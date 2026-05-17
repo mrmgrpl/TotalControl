@@ -4,11 +4,25 @@ project(TotalControl VERSION 1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Katalogi nagłówków
-include_directories(include)
+# ─── CrSDK ───────────────────────────────────────────────────────────────────
+set(CRSDK_ROOT    "${CMAKE_SOURCE_DIR}/external/CrSDK")
+set(CRSDK_INCLUDE "${CRSDK_ROOT}/include")
+set(CRSDK_LIB     "${CRSDK_ROOT}/lib/Cr_Core.lib")
+set(CRSDK_BIN     "${CRSDK_ROOT}/bin")
 
-# Pliki źródłowe
-add_executable(TotalControl WIN32
+# Walidacja — zatrzymuje build jeśli SDK nie na miejscu
+foreach(_check
+    "${CRSDK_INCLUDE}/CameraRemote_SDK.h"
+    "${CRSDK_INCLUDE}/IDeviceCallback.h"
+    "${CRSDK_LIB}"
+    "${CRSDK_BIN}/Cr_Core.dll")
+    if(NOT EXISTS "${_check}")
+        message(FATAL_ERROR "Brak pliku CrSDK: ${_check}")
+    endif()
+endforeach()
+
+# ─── Źródła ──────────────────────────────────────────────────────────────────
+set(SOURCES
     src/main.cpp
     src/CameraController.cpp
     src/SequencerEngine.cpp
@@ -17,25 +31,42 @@ add_executable(TotalControl WIN32
     src/visualization/CameraPreview.cpp
 )
 
-# Windows natywne biblioteki — zero zewnętrznych zależności
-target_link_libraries(TotalControl PRIVATE
-    d3d11.lib
-    d3dcompiler.lib
-    dxgi.lib
-    d2d1.lib
-    dwrite.lib
-    windowscodecs.lib
-    user32.lib
-    gdi32.lib
-    comctl32.lib
+add_executable(TotalControl WIN32 ${SOURCES})
+
+# ─── Includes ────────────────────────────────────────────────────────────────
+target_include_directories(TotalControl PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CRSDK_INCLUDE}
 )
 
-# Tryb Release — optymalizacja latencji
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(TotalControl PRIVATE /O2 /GL)
-endif()
+# ─── Linkowanie ──────────────────────────────────────────────────────────────
+target_link_libraries(TotalControl PRIVATE
+    ${CRSDK_LIB}
+    d3d11.lib dxgi.lib d3dcompiler.lib
+    d2d1.lib dwrite.lib
+    windowscodecs.lib
+    kernel32.lib user32.lib gdi32.lib
+    ole32.lib oleaut32.lib uuid.lib shell32.lib
+)
 
-# Tryb Debug — diagnostyka
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(TotalControl PRIVATE /Od /Zi)
-endif()
+# ─── Definicje i flagi ───────────────────────────────────────────────────────
+target_compile_definitions(TotalControl PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
+    _WIN32_WINNT=0x0A00
+)
+
+target_compile_options(TotalControl PRIVATE
+    /W4 /WX- /MP /utf-8
+)
+
+# ─── Kopiowanie DLL-i po buildzie ────────────────────────────────────────────
+add_custom_command(TARGET TotalControl POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CRSDK_BIN}"
+        "$<TARGET_FILE_DIR:TotalControl>"
+    COMMENT "Kopiowanie CrSDK DLL -> $<TARGET_FILE_DIR:TotalControl>"
+)
+
+message(STATUS "TotalControl | CrSDK include : ${CRSDK_INCLUDE}")
+message(STATUS "TotalControl | CrSDK lib     : ${CRSDK_LIB}")
+message(STATUS "TotalControl | CrSDK bin     : ${CRSDK_BIN}")
