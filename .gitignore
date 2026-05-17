@@ -1,0 +1,28 @@
+# Build
+build/
+out/
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# CrSDK — nie commitujemy
+external/CrSDK/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.aps
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Logi
+logs/
+*.log
