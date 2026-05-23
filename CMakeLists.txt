@@ -31,7 +31,7 @@ set(SOURCES
     src/visualization/CameraPreview.cpp
 )
 
-add_executable(TotalControl WIN32 ${SOURCES})
+add_executable(TotalControl ${SOURCES})
 
 # ─── Includes ────────────────────────────────────────────────────────────────
 target_include_directories(TotalControl PRIVATE
@@ -61,10 +61,20 @@ target_compile_options(TotalControl PRIVATE
 
 # ─── Kopiowanie DLL-i po buildzie ────────────────────────────────────────────
 add_custom_command(TARGET TotalControl POST_BUILD
+    # DLL-e główne → katalog exe
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CRSDK_BIN}"
         "$<TARGET_FILE_DIR:TotalControl>"
-    COMMENT "Kopiowanie CrSDK DLL -> $<TARGET_FILE_DIR:TotalControl>"
+    # DLL-e transportowe → podkatalog CrAdapter\
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:TotalControl>/CrAdapter"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CRSDK_BIN}/Cr_PTP_IP.dll"
+        "${CRSDK_BIN}/Cr_PTP_USB.dll"
+        "${CRSDK_BIN}/libusb-1.0.dll"
+        "${CRSDK_BIN}/libssh2.dll"
+        "$<TARGET_FILE_DIR:TotalControl>/CrAdapter/"
+    COMMENT "Kopiowanie CrSDK DLL -> output + CrAdapter/"
 )
 
 message(STATUS "TotalControl | CrSDK include : ${CRSDK_INCLUDE}")
