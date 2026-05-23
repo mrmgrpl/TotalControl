@@ -137,7 +137,15 @@ bool CameraController::Connect(int enumTimeoutSec, int connectTimeoutMs) {
     if (!ok) { Log(L"Connect: timeout OnConnected"); Disconnect(); return false; }
 
     lk.unlock();
-    PopulateSupportedCodes();
+
+    // Kamera potrzebuje chwili po OnConnected zanim zgłosi wszystkie właściwości.
+    // Czekamy max 5s aż liczba właściwości się ustabilizuje (≥50).
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        ::Sleep(500);
+        PopulateSupportedCodes();
+        if (m_supportedCodes.size() >= 50) break;
+        Logf(L"PopulateSupportedCodes attempt %d: %zu props", attempt + 1, m_supportedCodes.size());
+    }
     Logf(L"Połączono: %s  (%zu właściwości)", m_model.c_str(), m_supportedCodes.size());
     return true;
 }
@@ -421,7 +429,11 @@ CameraStatus CameraController::GetStatus() {
             case SDK::CrBatteryLevel_2_4:                    s.batteryLevel = L"2/4";     break;
             case SDK::CrBatteryLevel_3_4:                    s.batteryLevel = L"3/4";     break;
             case SDK::CrBatteryLevel_4_4:                    s.batteryLevel = L"full";    break;
+            case SDK::CrBatteryLevel_1_3:                    s.batteryLevel = L"1/3";     break;
+            case SDK::CrBatteryLevel_2_3:                    s.batteryLevel = L"2/3";     break;
+            case SDK::CrBatteryLevel_3_3:                    s.batteryLevel = L"full";    break;
             case SDK::CrBatteryLevel_USBPowerSupply:         s.batteryLevel = L"usb";     break;
+            case SDK::CrBatteryLevel_PreEnd_PowerSupply:     s.batteryLevel = L"pre-end-usb"; break;
             default:                                         s.batteryLevel = L"?";       break;
             }
             break;
