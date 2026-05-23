@@ -1,285 +1,401 @@
 #include "CameraController.h"
 
-// CrSDK — wszystkie include TYLKO tutaj
-#include "CameraRemote_SDK.h"       // SCRSDK::Init/Release/EnumCameraObjects/Connect
-#include "IDeviceCallback.h"        // SCRSDK::IDeviceCallback
-#include "ICrCameraObjectInfo.h"    // SCRSDK::ICrEnumCameraObjectInfo
+#include "CameraRemote_SDK.h"
+#include "IDeviceCallback.h"
+#include "ICrCameraObjectInfo.h"
+#include "CrDeviceProperty.h"
+#include "CrCommandData.h"
+#include "CrError.h"
 
 #include <chrono>
+#include <cmath>
+#include <cstdarg>
 #include <sstream>
+#include <string>
 
-// Wygodny alias — tylko w tym pliku .cpp
 namespace SDK = SCRSDK;
 
 namespace TotalControl {
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // DeviceCallback
-    // Sygnatury MUSZĄ być identyczne z IDeviceCallback.h — łącznie z "Versioin"!
-    // ─────────────────────────────────────────────────────────────────────────────
-    class CameraController::DeviceCallback : public SDK::IDeviceCallback
-    {
-    public:
-        explicit DeviceCallback(CameraController* owner) : m_owner(owner) {}
+// ─── DeviceCallback ───────────────────────────────────────────────────────────
 
-        void OnConnected(SDK::DeviceConnectionVersioin /*ver*/) override
-        {
-            Fire(L"Connected");
+class CameraController::DeviceCallback : public SDK::IDeviceCallback {
+public:
+    explicit DeviceCallback(CameraController* o) : m_owner(o) {}
+
+    void OnConnected(SDK::DeviceConnectionVersioin) override {
+        m_owner->m_connected    = true;
+        m_owner->m_connectedSig = true;
+        m_owner->m_waitCv.notify_all();
+        m_owner->Log(L"[CB] OnConnected");
+    }
+    void OnDisconnected(CrInt32u code) override {
+        m_owner->m_connected = false;
+        m_owner->Logf(L"[CB] OnDisconnected 0x%08X", code);
+        m_owner->m_waitCv.notify_all();
+    }
+    void OnWarning(CrInt32u w) override {
+        if (w == SDK::CrNotify_Captured_Event || w == SDK::CrNotify_All_Download_Complete) {
+            m_owner->m_capturedSig = true;
+            m_owner->m_waitCv.notify_all();
+            m_owner->Logf(L"[CB] Captured 0x%08X", w);
         }
+    }
+    void OnCompleteDownload(CrChar* fn, CrInt32u) override {
+        m_owner->m_capturedSig = true;
+        m_owner->m_waitCv.notify_all();
+        m_owner->Logf(L"[CB] Download: %s", fn ? fn : L"?");
+    }
+    void OnNotifyPostViewImage(CrChar*, CrInt32u sz) override {
+        m_owner->m_capturedSig = true;
+        m_owner->m_waitCv.notify_all();
+        m_owner->Logf(L"[CB] PostView %u B", sz);
+    }
+    void OnError(CrInt32u code) override { m_owner->Logf(L"[CB] Error 0x%08X", code); }
 
-        void OnDisconnected(CrInt32u error) override
-        {
-            m_owner->m_connected = false;
-            std::wostringstream ss;
-            ss << L"Disconnected:0x" << std::hex << error;
-            Fire(ss.str());
-        }
+    void OnPropertyChanged() override {}
+    void OnPropertyChangedCodes(CrInt32u, CrInt32u*) override {}
+    void OnLvPropertyChanged() override {}
+    void OnLvPropertyChangedCodes(CrInt32u, CrInt32u*) override {}
+    void OnCompleteOperation(CrInt32u, SDK::CrOperationResultData*) override {}
+    void OnNotifyContentsTransfer(CrInt32u, SDK::CrContentHandle, CrChar*) override {}
+    void OnWarningExt(CrInt32u, CrInt32, CrInt32, CrInt32) override {}
+    void OnNotifyFTPTransferResult(CrInt32u, CrInt32u, CrInt32u) override {}
+    void OnNotifyRemoteTransferResult(CrInt32u, CrInt32u, CrChar*) override {}
+    void OnNotifyRemoteTransferResult(CrInt32u, CrInt32u, CrInt8u*, CrInt64u) override {}
+    void OnNotifyRemoteTransferContentsListChanged(CrInt32u, CrInt32u, CrInt32u) override {}
+    void OnNotifyRemoteFirmwareUpdateResult(CrInt32u, const void*) override {}
+    void OnReceivePlaybackTimeCode(CrInt32u) override {}
+    void OnReceivePlaybackData(CrInt8u, CrInt32, CrInt8u*, CrInt64, CrInt64, CrInt32, CrInt32) override {}
+    void OnNotifyMonitorUpdated(CrInt32u, CrInt32u) override {}
 
-        void OnPropertyChanged() override { Fire(L"PropertyChanged"); }
+private:
+    CameraController* m_owner;
+};
 
-        void OnPropertyChangedCodes(CrInt32u /*num*/,
-            CrInt32u* /*codes*/) override {
-        }
+// ─── Lifecycle ────────────────────────────────────────────────────────────────
 
-        void OnLvPropertyChanged() override {}
+CameraController::CameraController(LogFn log) : m_log(std::move(log)) {}
+CameraController::~CameraController() { Shutdown(); }
 
-        void OnLvPropertyChangedCodes(CrInt32u /*num*/,
-            CrInt32u* /*codes*/) override {
-        }
+void CameraController::Log(const wchar_t* msg) {
+    ::OutputDebugStringW(msg); ::OutputDebugStringW(L"\n");
+    if (m_log) m_log(msg);
+}
+void CameraController::Logf(const wchar_t* fmt, ...) {
+    wchar_t buf[512]; va_list a; va_start(a, fmt);
+    _vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, a); va_end(a);
+    Log(buf);
+}
 
-        void OnCompleteDownload(CrChar* filename,
-            CrInt32u /*type*/) override
-        {
-            std::wostringstream ss;
-            ss << L"Download:" << (filename ? filename : L"?");
-            Fire(ss.str());
-        }
+bool CameraController::Init() {
+    if (m_initialized) return true;
+    m_callback = new DeviceCallback(this);
+    if (!SDK::Init(0)) {
+        Log(L"SDK::Init FAILED");
+        delete m_callback; m_callback = nullptr;
+        return false;
+    }
+    m_initialized = true;
+    Log(L"SDK::Init OK");
+    return true;
+}
 
-        // CrOperationResultData i CrContentHandle są w namespace SCRSDK
-        void OnCompleteOperation(CrInt32u /*code*/,
-            SDK::CrOperationResultData* /*result*/) override {
-        }
+void CameraController::Shutdown() {
+    Disconnect();
+    if (m_initialized) { SDK::Release(); m_initialized = false; }
+    delete m_callback; m_callback = nullptr;
+}
 
-        void OnNotifyContentsTransfer(CrInt32u /*notify*/,
-            SDK::CrContentHandle /*handle*/,
-            CrChar* /*filename*/) override {
-        }
+bool CameraController::Connect(int enumTimeoutSec, int connectTimeoutMs) {
+    if (!m_initialized) return false;
+    if (m_connected) Disconnect();
 
-        void OnWarning(CrInt32u warning) override
-        {
-            std::wostringstream ss;
-            ss << L"Warning:0x" << std::hex << warning;
-            Fire(ss.str());
-        }
+    SDK::ICrEnumCameraObjectInfo* pEnum = nullptr;
+    SDK::CrError err = SDK::EnumCameraObjects(&pEnum, enumTimeoutSec);
+    if (err != 0 || !pEnum || pEnum->GetCount() == 0) {
+        if (pEnum) pEnum->Release();
+        Log(L"Connect: brak kamery");
+        return false;
+    }
 
-        void OnWarningExt(CrInt32u /*w*/, CrInt32 /*p1*/,
-            CrInt32 /*p2*/, CrInt32 /*p3*/) override {
-        }
+    const auto* info0 = pEnum->GetCameraObjectInfo(0);
+    m_model = (info0 && info0->GetModel()) ? info0->GetModel() : L"Unknown";
+    auto* info = const_cast<SDK::ICrCameraObjectInfo*>(info0);
 
-        void OnError(CrInt32u error) override
-        {
-            std::wostringstream ss;
-            ss << L"Error:0x" << std::hex << error;
-            Fire(ss.str());
-        }
+    SDK::CrDeviceHandle h = 0;
+    m_connectedSig = false;
+    err = SDK::Connect(info, m_callback, &h);
+    pEnum->Release();
 
-        void OnNotifyFTPTransferResult(CrInt32u /*n*/,
-            CrInt32u /*ok*/,
-            CrInt32u /*fail*/) override {
-        }
+    if (err != 0 || h == 0) { Logf(L"Connect FAILED err=0x%04X", err); return false; }
+    m_deviceHandle = static_cast<uint64_t>(h);
 
-        void OnNotifyRemoteTransferResult(CrInt32u /*n*/, CrInt32u /*per*/,
-            CrChar* /*fn*/) override {
-        }
+    std::unique_lock<std::mutex> lk(m_waitMutex);
+    bool ok = m_waitCv.wait_for(lk, std::chrono::milliseconds(connectTimeoutMs),
+        [this] { return m_connectedSig.load(); });
+    if (!ok) { Log(L"Connect: timeout OnConnected"); Disconnect(); return false; }
+    Logf(L"Połączono: %s", m_model.c_str());
+    return true;
+}
 
-        void OnNotifyRemoteTransferResult(CrInt32u /*n*/, CrInt32u /*per*/,
-            CrInt8u* /*data*/,
-            CrInt64u /*sz*/) override {
-        }
+void CameraController::Disconnect() {
+    if (!m_connected || !m_deviceHandle) return;
+    auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    SDK::Disconnect(h);
+    SDK::ReleaseDevice(h);
+    m_deviceHandle = 0;
+    m_connected    = false;
+}
 
-        void OnNotifyRemoteTransferContentsListChanged(CrInt32u /*n*/,
-            CrInt32u /*slot*/,
-            CrInt32u /*add*/) override {
-        }
+// ─── SetPropRaw ───────────────────────────────────────────────────────────────
 
-        void OnNotifyRemoteFirmwareUpdateResult(CrInt32u /*n*/,
-            const void* /*p*/) override {
-        }
+bool CameraController::SetPropRaw(unsigned code, unsigned type, long long value, const wchar_t* desc) {
+    auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    SDK::CrDeviceProperty prop;
+    prop.SetCode(static_cast<SDK::CrDevicePropertyCode>(code));
+    prop.SetValueType(static_cast<SDK::CrDataType>(type));
+    prop.SetCurrentValue(static_cast<CrInt64u>(value));
+    SDK::CrError err = SDK::SetDeviceProperty(h, &prop);
+    Logf(L"Set %-24s = 0x%llX  err=0x%04X", desc, (unsigned long long)value, (unsigned)err);
+    return err == 0;
+}
 
-        void OnReceivePlaybackTimeCode(CrInt32u /*tc*/) override {}
+// ─── Nearest helpers ──────────────────────────────────────────────────────────
 
-        void OnReceivePlaybackData(CrInt8u /*mt*/, CrInt32 /*ds*/,
-            CrInt8u* /*d*/, CrInt64 /*pts*/,
-            CrInt64 /*dts*/, CrInt32 /*p1*/,
-            CrInt32 /*p2*/) override {
-        }
+uint32_t CameraController::NearestFromList16(unsigned propCode, uint32_t target) {
+    auto h    = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    CrInt32u codeU = static_cast<CrInt32u>(propCode);
+    SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
+    if (SDK::GetSelectDeviceProperties(h, 1, &codeU, &props, &num) != 0 || !props || num == 0) {
+        if (props) SDK::ReleaseDeviceProperties(h, props); return target;
+    }
+    auto*    vals  = reinterpret_cast<CrInt16u*>(props[0].GetSetValues());
+    uint32_t count = props[0].GetSetValueSize() / sizeof(CrInt16u);
+    uint32_t best  = target, bestDiff = UINT32_MAX;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t d = (vals[i] > target) ? (vals[i] - target) : (target - vals[i]);
+        if (d < bestDiff) { bestDiff = d; best = vals[i]; }
+    }
+    SDK::ReleaseDeviceProperties(h, props);
+    return best;
+}
 
-        void OnNotifyMonitorUpdated(CrInt32u /*type*/,
-            CrInt32u /*frameNo*/) override {
-        }
+uint32_t CameraController::NearestFromList32log(unsigned propCode, uint32_t target) {
+    auto h    = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    CrInt32u codeU = static_cast<CrInt32u>(propCode);
+    SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
+    if (SDK::GetSelectDeviceProperties(h, 1, &codeU, &props, &num) != 0 || !props || num == 0) {
+        if (props) SDK::ReleaseDeviceProperties(h, props); return target;
+    }
+    auto*    vals  = reinterpret_cast<CrInt32u*>(props[0].GetSetValues());
+    uint32_t count = props[0].GetSetValueSize() / sizeof(CrInt32u);
+    uint32_t best  = target; double bestDiff = 1e18;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (vals[i] == 0) continue;
+        double diff = std::abs(std::log((double)vals[i]) - std::log((double)target));
+        if (diff < bestDiff) { bestDiff = diff; best = vals[i]; }
+    }
+    SDK::ReleaseDeviceProperties(h, props);
+    return best;
+}
 
-        void OnNotifyPostViewImage(CrChar* /*fn*/,
-            CrInt32u /*sz*/) override {
-        }
+// ─── ShutterSpeed ────────────────────────────────────────────────────────────
 
-    private:
-        void Fire(const std::wstring& ev)
-        {
-            ::OutputDebugStringW((L"[CrSDK][CB] " + ev + L"\n").c_str());
-            if (m_owner->m_eventCallback)
-                m_owner->m_eventCallback(ev);
-        }
+uint32_t CameraController::ParseShutterSpeedToRaw(const wchar_t* value) {
+    std::wstring v = value;
+    if (v == L"bulb" || v == L"BULB") return 0;
+    auto slash = v.find(L'/');
+    if (slash != std::wstring::npos) {
+        // "1/100" format → (1 << 16) | 100
+        uint32_t n = static_cast<uint32_t>(std::stoi(v.substr(0, slash)));
+        uint32_t d = static_cast<uint32_t>(std::stoi(v.substr(slash + 1)));
+        return (n << 16) | d;
+    }
+    // "25s" or "25" — sekundy → encode as tenths: 25s → (250 << 16) | 10
+    if (!v.empty() && (v.back() == L's' || v.back() == L'S')) v.pop_back();
+    float sec = std::stof(v);
+    auto  tenths = static_cast<uint32_t>(sec * 10.0f + 0.5f);
+    return (tenths << 16) | 10u;
+}
 
-        CameraController* m_owner;
+uint32_t CameraController::NearestShutterSpeed(uint32_t targetRaw) {
+    auto h    = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    CrInt32u codeU = static_cast<CrInt32u>(SDK::CrDeviceProperty_ShutterSpeed);
+    SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
+    if (SDK::GetSelectDeviceProperties(h, 1, &codeU, &props, &num) != 0 || !props || num == 0) {
+        if (props) SDK::ReleaseDeviceProperties(h, props); return targetRaw;
+    }
+    auto* vals  = reinterpret_cast<CrInt32u*>(props[0].GetSetValues());
+    uint32_t count = props[0].GetSetValueSize() / sizeof(CrInt32u);
+
+    auto toSec = [](uint32_t v) -> double {
+        if (v == 0 || v == 0xFFFFFFFF) return -1.0;
+        uint32_t n = (v >> 16) & 0xFFFF, d = v & 0xFFFF;
+        return (d > 0) ? (double)n / d : (double)n;
     };
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // CameraController
-    // ─────────────────────────────────────────────────────────────────────────────
+    double tSec = toSec(targetRaw);
+    if (tSec <= 0.0) { SDK::ReleaseDeviceProperties(h, props); return targetRaw; }
 
-    CameraController::CameraController() = default;
-    CameraController::~CameraController() { Shutdown(); }
-
-    bool CameraController::Init()
-    {
-        if (m_initialized) return true;
-
-        // Init() zwraca bool (nie CrError!)
-        if (!SDK::Init(0)) {
-            ::OutputDebugStringW(L"[CrSDK] Init() FAILED\n");
-            return false;
-        }
-
-        m_callback = new DeviceCallback(this);
-        m_initialized = true;
-        ::OutputDebugStringW(L"[CrSDK] Init() OK\n");
-        return true;
+    uint32_t best = targetRaw; double bestDiff = 1e18;
+    for (uint32_t i = 0; i < count; ++i) {
+        double s = toSec(vals[i]);
+        if (s <= 0.0) continue;
+        double diff = std::abs(std::log(s) - std::log(tSec));
+        if (diff < bestDiff) { bestDiff = diff; best = vals[i]; }
     }
+    SDK::ReleaseDeviceProperties(h, props);
+    return best;
+}
 
-    void CameraController::Shutdown()
-    {
-        Disconnect();
-        if (m_initialized) {
-            SDK::Release();
-            m_initialized = false;
-            ::OutputDebugStringW(L"[CrSDK] Release() OK\n");
+// ─── Settery ekspozycji ───────────────────────────────────────────────────────
+
+bool CameraController::SetPCRemotePriority() {
+    return SetPropRaw(SDK::CrDeviceProperty_PriorityKeySettings,
+                      SDK::CrDataType_UInt16, SDK::CrPriorityKey_PCRemote, L"PriorityKey");
+}
+
+bool CameraController::SetExposureMode(const wchar_t* mode) {
+    uint32_t val = SDK::CrExposure_M_Manual;
+    if      (!wcscmp(mode, L"P")) val = SDK::CrExposure_P_Auto;
+    else if (!wcscmp(mode, L"A")) val = SDK::CrExposure_A_AperturePriority;
+    else if (!wcscmp(mode, L"S")) val = SDK::CrExposure_S_ShutterSpeedPriority;
+    return SetPropRaw(SDK::CrDeviceProperty_ExposureProgramMode,
+                      SDK::CrDataType_UInt32, val, L"ExposureMode");
+}
+
+bool CameraController::SetFocusMode(const wchar_t* mode) {
+    uint32_t val = SDK::CrFocus_MF;
+    if      (!wcscmp(mode, L"AF-S")) val = SDK::CrFocus_AF_S;
+    else if (!wcscmp(mode, L"AF-C")) val = SDK::CrFocus_AF_C;
+    else if (!wcscmp(mode, L"AF-A")) val = SDK::CrFocus_AF_A;
+    return SetPropRaw(SDK::CrDeviceProperty_FocusMode,
+                      SDK::CrDataType_UInt16, val, L"FocusMode");
+}
+
+bool CameraController::SetShutterSpeed(const wchar_t* value) {
+    uint32_t raw    = ParseShutterSpeedToRaw(value);
+    uint32_t actual = NearestShutterSpeed(raw);
+    uint32_t n = (actual >> 16) & 0xFFFF, d = actual & 0xFFFF;
+    if (d == 10) Logf(L"ShutterSpeed: %s → %.0fs", value, (double)n / 10.0);
+    else         Logf(L"ShutterSpeed: %s → %u/%u", value, n, d);
+    return SetPropRaw(SDK::CrDeviceProperty_ShutterSpeed,
+                      SDK::CrDataType_UInt32, actual, L"ShutterSpeed");
+}
+
+bool CameraController::SetISO(int iso) {
+    uint32_t actual = NearestFromList32log(SDK::CrDeviceProperty_IsoSensitivity,
+                                           static_cast<uint32_t>(iso));
+    Logf(L"ISO: %d → %u", iso, actual);
+    return SetPropRaw(SDK::CrDeviceProperty_IsoSensitivity,
+                      SDK::CrDataType_UInt32, actual, L"ISO");
+}
+
+bool CameraController::SetFNumber(float f) {
+    uint32_t target = static_cast<uint32_t>(f * 100.0f + 0.5f);
+    uint32_t actual = NearestFromList16(SDK::CrDeviceProperty_FNumber, target);
+    Logf(L"FNumber: F/%.1f → F/%.1f", f, actual / 100.0);
+    return SetPropRaw(SDK::CrDeviceProperty_FNumber,
+                      SDK::CrDataType_UInt16, actual, L"FNumber");
+}
+
+bool CameraController::SetStoreDestination(const wchar_t* dest) {
+    uint32_t val = SDK::CrStillImageStoreDestination_MemoryCard;
+    if      (!wcscmp(dest, L"pc"))   val = SDK::CrStillImageStoreDestination_HostPC;
+    else if (!wcscmp(dest, L"both")) val = SDK::CrStillImageStoreDestination_HostPCAndMemoryCard;
+    return SetPropRaw(SDK::CrDeviceProperty_StillImageStoreDestination,
+                      SDK::CrDataType_UInt16, val, L"StoreDestination");
+}
+
+// ─── Shoot ────────────────────────────────────────────────────────────────────
+
+bool CameraController::Shoot(int* latencyMs, int timeoutMs) {
+    if (!m_connected) { Log(L"Shoot: brak połączenia"); return false; }
+    auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    m_capturedSig = false;
+
+    auto t0 = std::chrono::steady_clock::now();
+    SDK::SendCommand(h, SDK::CrCommandId_Release, SDK::CrCommandParam_Down);
+    ::Sleep(35);
+    SDK::SendCommand(h, SDK::CrCommandId_Release, SDK::CrCommandParam_Up);
+
+    std::unique_lock<std::mutex> lk(m_waitMutex);
+    bool ok = m_waitCv.wait_for(lk, std::chrono::milliseconds(timeoutMs),
+        [this] { return m_capturedSig.load(); });
+
+    int ms = static_cast<int>(
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count());
+    if (latencyMs) *latencyMs = ms;
+    Logf(L"Shoot: %s  %d ms", ok ? L"OK" : L"TIMEOUT", ms);
+    return ok;
+}
+
+// ─── GetStatus ────────────────────────────────────────────────────────────────
+
+CameraStatus CameraController::GetStatus() {
+    CameraStatus s;
+    s.connected = m_connected;
+    s.model     = m_model;
+    if (!m_connected) return s;
+
+    auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
+    if (SDK::GetDeviceProperties(h, &props, &num) != 0 || !props) return s;
+
+    auto ssToStr = [](uint64_t cur) -> std::wstring {
+        if (cur == 0) return L"bulb";
+        uint32_t n = (cur >> 16) & 0xFFFF, d = cur & 0xFFFF;
+        double sec = (d > 0) ? (double)n / d : (double)n;
+        wchar_t b[32];
+        if (sec >= 1.0) swprintf_s(b, L"%.0fs", sec);
+        else            swprintf_s(b, L"1/%.0f", 1.0 / sec);
+        return b;
+    };
+
+    for (CrInt32 i = 0; i < num; ++i) {
+        auto code = props[i].GetCode();
+        auto cur  = props[i].GetCurrentValue();
+        switch (code) {
+        case SDK::CrDeviceProperty_BatteryRemain:
+            s.batteryPct = static_cast<int>(cur); break;
+        case SDK::CrDeviceProperty_MediaSLOT1_RemainingNumber:
+            s.remainingShots = static_cast<int>(cur); break;
+        case SDK::CrDeviceProperty_ShutterSpeed:
+            s.shutterSpeed = ssToStr(cur); break;
+        case SDK::CrDeviceProperty_IsoSensitivity:
+            s.iso = static_cast<int>(cur); break;
+        case SDK::CrDeviceProperty_FNumber:
+            s.fNumber = static_cast<float>(cur) / 100.0f; break;
+        case SDK::CrDeviceProperty_ExposureProgramMode:
+            switch (cur) {
+            case SDK::CrExposure_M_Manual:               s.exposureMode = L"M"; break;
+            case SDK::CrExposure_P_Auto:                 s.exposureMode = L"P"; break;
+            case SDK::CrExposure_A_AperturePriority:     s.exposureMode = L"A"; break;
+            case SDK::CrExposure_S_ShutterSpeedPriority: s.exposureMode = L"S"; break;
+            default:                                     s.exposureMode = L"?"; break;
+            }
+            break;
+        case SDK::CrDeviceProperty_FocusMode:
+            switch (cur) {
+            case SDK::CrFocus_MF:   s.focusMode = L"MF";   break;
+            case SDK::CrFocus_AF_S: s.focusMode = L"AF-S"; break;
+            case SDK::CrFocus_AF_C: s.focusMode = L"AF-C"; break;
+            default:                s.focusMode = L"?";    break;
+            }
+            break;
+        case SDK::CrDeviceProperty_StillImageStoreDestination:
+            switch (cur) {
+            case SDK::CrStillImageStoreDestination_HostPC:              s.storeDestination = L"pc";   break;
+            case SDK::CrStillImageStoreDestination_MemoryCard:          s.storeDestination = L"card"; break;
+            case SDK::CrStillImageStoreDestination_HostPCAndMemoryCard: s.storeDestination = L"both"; break;
+            }
+            break;
         }
-        delete m_callback;
-        m_callback = nullptr;
     }
-
-    int CameraController::EnumerateCameras()
-    {
-        m_cameras.clear();
-
-        if (!m_initialized) {
-            ::OutputDebugStringW(L"[CrSDK] Enumerate: SDK nie zainicjowany!\n");
-            return 0;
-        }
-
-        SDK::ICrEnumCameraObjectInfo* pEnum = nullptr;
-        // CrError jest w namespace SCRSDK
-        SDK::CrError err = SDK::EnumCameraObjects(&pEnum);
-
-        if (err != 0 || !pEnum) {
-            std::wostringstream ss;
-            ss << L"[CrSDK] EnumCameraObjects FAILED err=0x" << std::hex << err << L"\n";
-            ::OutputDebugStringW(ss.str().c_str());
-            return 0;
-        }
-
-        const CrInt32u count = pEnum->GetCount();
-
-        {
-            std::wostringstream ss;
-            ss << L"[CrSDK] Znaleziono kamer: " << count << L"\n";
-            ::OutputDebugStringW(ss.str().c_str());
-        }
-
-        for (CrInt32u i = 0; i < count; ++i) {
-            const SDK::ICrCameraObjectInfo* info = pEnum->GetCameraObjectInfo(i);
-            if (!info) continue;
-
-            CameraInfo ci;
-            ci.model = info->GetModel() ? info->GetModel() : L"Unknown";
-            ci.connType = info->GetConnectionTypeName() ? info->GetConnectionTypeName() : L"Unknown";
-            m_cameras.push_back(ci);
-
-            std::wostringstream ss;
-            ss << L"[CrSDK]   [" << i << L"] " << ci.model
-                << L"  conn=" << ci.connType << L"\n";
-            ::OutputDebugStringW(ss.str().c_str());
-        }
-
-        pEnum->Release();
-        return static_cast<int>(count);
-    }
-
-    bool CameraController::Connect(int index)
-    {
-        if (!m_initialized) return false;
-        if (m_connected)    Disconnect();
-
-        if (index < 0 || index >= static_cast<int>(m_cameras.size())) {
-            ::OutputDebugStringW(L"[CrSDK] Connect: nieprawidłowy indeks\n");
-            return false;
-        }
-
-        SDK::ICrEnumCameraObjectInfo* pEnum = nullptr;
-        SDK::CrError err = SDK::EnumCameraObjects(&pEnum);
-        if (err != 0 || !pEnum) return false;
-
-        if (static_cast<CrInt32u>(index) >= pEnum->GetCount()) {
-            pEnum->Release();
-            return false;
-        }
-
-        SDK::ICrCameraObjectInfo* info =
-            const_cast<SDK::ICrCameraObjectInfo*>(
-                pEnum->GetCameraObjectInfo(static_cast<CrInt32u>(index)));
-
-        SDK::CrDeviceHandle handle = 0;
-
-        auto t0 = std::chrono::steady_clock::now();
-        err = SDK::Connect(info, m_callback, &handle);
-        auto t1 = std::chrono::steady_clock::now();
-
-        m_lastLatencyMs =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-        pEnum->Release();
-
-        if (err != 0 || handle == 0) {
-            std::wostringstream ss;
-            ss << L"[CrSDK] Connect FAILED err=0x" << std::hex << err << L"\n";
-            ::OutputDebugStringW(ss.str().c_str());
-            return false;
-        }
-
-        // Przechowujemy jako uint64_t (m_deviceHandle w nagłówku)
-        m_deviceHandle = static_cast<uint64_t>(handle);
-        m_connected = true;
-        m_connectedCamera = m_cameras[index];
-        m_connectedCamera.connected = true;
-
-        std::wostringstream ss;
-        ss << L"[CrSDK] Połączono: " << m_connectedCamera.model
-            << L"  latencja=" << m_lastLatencyMs << L"ms\n";
-        ::OutputDebugStringW(ss.str().c_str());
-        return true;
-    }
-
-    void CameraController::Disconnect()
-    {
-        if (!m_connected || m_deviceHandle == 0) return;
-
-        auto handle = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
-        SDK::Disconnect(handle);
-        SDK::ReleaseDevice(handle);
-
-        m_deviceHandle = 0;
-        m_connected = false;
-        ::OutputDebugStringW(L"[CrSDK] Rozłączono\n");
-    }
+    SDK::ReleaseDeviceProperties(h, props);
+    return s;
+}
 
 } // namespace TotalControl

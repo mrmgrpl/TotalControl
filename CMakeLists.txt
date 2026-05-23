@@ -21,21 +21,24 @@ foreach(_check
     endif()
 endforeach()
 
-# ─── Źródła ──────────────────────────────────────────────────────────────────
-set(SOURCES
+# ─── Źródła — daemon ─────────────────────────────────────────────────────────
+set(DAEMON_SOURCES
     src/main.cpp
     src/CameraController.cpp
+    src/daemon/PipeServer.cpp
+    src/daemon/CommandHandler.cpp
     src/SequencerEngine.cpp
     src/visualization/Renderer3D.cpp
     src/visualization/Overlay2D.cpp
     src/visualization/CameraPreview.cpp
 )
 
-add_executable(TotalControl ${SOURCES})
+add_executable(TotalControl ${DAEMON_SOURCES})
 
 # ─── Includes ────────────────────────────────────────────────────────────────
 target_include_directories(TotalControl PRIVATE
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
     ${CRSDK_INCLUDE}
 )
 
@@ -75,6 +78,34 @@ add_custom_command(TARGET TotalControl POST_BUILD
         "${CRSDK_BIN}/libssh2.dll"
         "$<TARGET_FILE_DIR:TotalControl>/CrAdapter/"
     COMMENT "Kopiowanie CrSDK DLL -> output + CrAdapter/"
+)
+
+# ─── tc.exe — thin CLI client (bez CrSDK, bez WIN32) ────────────────────────
+add_executable(tc src/tc/main.cpp)
+
+target_include_directories(tc PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+target_compile_definitions(tc PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
+    _WIN32_WINNT=0x0A00
+)
+
+target_compile_options(tc PRIVATE
+    /W4 /WX- /MP /utf-8
+)
+
+target_link_libraries(tc PRIVATE
+    kernel32.lib user32.lib
+)
+
+# tc.exe obok TotalControl.exe (normalnie oba trafiają do tego samego katalogu)
+add_custom_command(TARGET tc POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:tc>"
+        "$<TARGET_FILE_DIR:TotalControl>/tc.exe"
+    COMMENT "Kopiowanie tc.exe -> output TotalControl"
 )
 
 message(STATUS "TotalControl | CrSDK include : ${CRSDK_INCLUDE}")
