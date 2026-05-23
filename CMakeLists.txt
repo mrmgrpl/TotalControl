@@ -10,7 +10,6 @@ set(CRSDK_INCLUDE "${CRSDK_ROOT}/include")
 set(CRSDK_LIB     "${CRSDK_ROOT}/lib/Cr_Core.lib")
 set(CRSDK_BIN     "${CRSDK_ROOT}/bin")
 
-# Walidacja — zatrzymuje build jeśli SDK nie na miejscu
 foreach(_check
     "${CRSDK_INCLUDE}/CameraRemote_SDK.h"
     "${CRSDK_INCLUDE}/IDeviceCallback.h"
@@ -21,8 +20,8 @@ foreach(_check
     endif()
 endforeach()
 
-# ─── Źródła — daemon ─────────────────────────────────────────────────────────
-set(DAEMON_SOURCES
+# ─── TotalControlSRV.exe — daemon (trzyma połączenie z kamerą, pipe server) ──
+set(SRV_SOURCES
     src/main.cpp
     src/CameraController.cpp
     src/daemon/PipeServer.cpp
@@ -33,17 +32,15 @@ set(DAEMON_SOURCES
     src/visualization/CameraPreview.cpp
 )
 
-add_executable(TotalControl ${DAEMON_SOURCES})
+add_executable(TotalControlSRV ${SRV_SOURCES})
 
-# ─── Includes ────────────────────────────────────────────────────────────────
-target_include_directories(TotalControl PRIVATE
+target_include_directories(TotalControlSRV PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
     ${CRSDK_INCLUDE}
 )
 
-# ─── Linkowanie ──────────────────────────────────────────────────────────────
-target_link_libraries(TotalControl PRIVATE
+target_link_libraries(TotalControlSRV PRIVATE
     ${CRSDK_LIB}
     d3d11.lib dxgi.lib d3dcompiler.lib
     d2d1.lib dwrite.lib
@@ -52,61 +49,62 @@ target_link_libraries(TotalControl PRIVATE
     ole32.lib oleaut32.lib uuid.lib shell32.lib
 )
 
-# ─── Definicje i flagi ───────────────────────────────────────────────────────
-target_compile_definitions(TotalControl PRIVATE
+target_compile_definitions(TotalControlSRV PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     _WIN32_WINNT=0x0A00
 )
 
-target_compile_options(TotalControl PRIVATE
+target_compile_options(TotalControlSRV PRIVATE
     /W4 /WX- /MP /utf-8
 )
 
-# ─── Kopiowanie DLL-i po buildzie ────────────────────────────────────────────
-add_custom_command(TARGET TotalControl POST_BUILD
-    # DLL-e główne → katalog exe
+# Kopiowanie DLL-i CrSDK po buildzie
+add_custom_command(TARGET TotalControlSRV POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CRSDK_BIN}"
-        "$<TARGET_FILE_DIR:TotalControl>"
-    # DLL-e transportowe → podkatalog CrAdapter\
+        "$<TARGET_FILE_DIR:TotalControlSRV>"
     COMMAND ${CMAKE_COMMAND} -E make_directory
-        "$<TARGET_FILE_DIR:TotalControl>/CrAdapter"
+        "$<TARGET_FILE_DIR:TotalControlSRV>/CrAdapter"
     COMMAND ${CMAKE_COMMAND} -E copy
         "${CRSDK_BIN}/Cr_PTP_IP.dll"
         "${CRSDK_BIN}/Cr_PTP_USB.dll"
         "${CRSDK_BIN}/libusb-1.0.dll"
         "${CRSDK_BIN}/libssh2.dll"
-        "$<TARGET_FILE_DIR:TotalControl>/CrAdapter/"
+        "$<TARGET_FILE_DIR:TotalControlSRV>/CrAdapter/"
     COMMENT "Kopiowanie CrSDK DLL -> output + CrAdapter/"
 )
 
-# ─── tc.exe — thin CLI client (bez CrSDK, bez WIN32) ────────────────────────
-add_executable(tc src/tc/main.cpp)
+# ─── TotalControlCLI.exe — thin CLI client (bez CrSDK) ───────────────────────
+add_executable(TotalControlCLI src/cli/main.cpp)
 
-target_include_directories(tc PRIVATE
+target_include_directories(TotalControlCLI PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
-target_compile_definitions(tc PRIVATE
+target_compile_definitions(TotalControlCLI PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     _WIN32_WINNT=0x0A00
 )
 
-target_compile_options(tc PRIVATE
+target_compile_options(TotalControlCLI PRIVATE
     /W4 /WX- /MP /utf-8
 )
 
-target_link_libraries(tc PRIVATE
+target_link_libraries(TotalControlCLI PRIVATE
     kernel32.lib user32.lib
 )
 
-# tc.exe obok TotalControl.exe (normalnie oba trafiają do tego samego katalogu)
-add_custom_command(TARGET tc POST_BUILD
+# TotalControlCLI.exe obok TotalControlSRV.exe
+add_custom_command(TARGET TotalControlCLI POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:tc>"
-        "$<TARGET_FILE_DIR:TotalControl>/tc.exe"
-    COMMENT "Kopiowanie tc.exe -> output TotalControl"
+        "$<TARGET_FILE:TotalControlCLI>"
+        "$<TARGET_FILE_DIR:TotalControlSRV>/TotalControlCLI.exe"
+    COMMENT "Kopiowanie TotalControlCLI.exe -> output SRV"
 )
+
+# ─── TotalControlGUI.exe — graficzny interfejs (placeholder) ─────────────────
+# add_executable(TotalControlGUI src/gui/main.cpp)
+# ... (do implementacji)
 
 message(STATUS "TotalControl | CrSDK include : ${CRSDK_INCLUDE}")
 message(STATUS "TotalControl | CrSDK lib     : ${CRSDK_LIB}")

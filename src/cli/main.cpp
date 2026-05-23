@@ -98,7 +98,7 @@ static std::wstring ExeDir() {
 
 static bool LaunchDaemon() {
     std::wstring dir    = ExeDir();
-    std::wstring daemon = dir + L"TotalControl.exe";
+    std::wstring daemon = dir + L"TotalControlSRV.exe";
     STARTUPINFOW si = {}; si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(daemon.c_str(), nullptr, nullptr, nullptr,
@@ -113,7 +113,7 @@ static bool LaunchDaemon() {
 
 static void Usage() {
     fputs(
-        "TotalControl CLI — tc.exe\n"
+        "TotalControlCLI — Sony Camera Remote Controller\n"
         "\n"
         "Usage:\n"
         "  tc status\n"
