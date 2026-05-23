@@ -147,6 +147,7 @@ bool CameraController::Connect(int enumTimeoutSec, int connectTimeoutMs) {
         Logf(L"PopulateSupportedCodes attempt %d: %zu props", attempt + 1, m_supportedCodes.size());
     }
     Logf(L"Połączono: %s  (%zu właściwości)", m_model.c_str(), m_supportedCodes.size());
+    WarmCache();
     return true;
 }
 
@@ -158,6 +159,7 @@ void CameraController::Disconnect() {
     m_deviceHandle = 0;
     m_connected    = false;
     m_supportedCodes.clear();
+    m_propSetCache.clear();
 }
 
 // ─── Capability ───────────────────────────────────────────────────────────────
@@ -177,6 +179,21 @@ bool CameraController::SupportsProperty(uint32_t code) const {
     return m_supportedCodes.count(code) > 0;
 }
 
+void CameraController::WarmCache() {
+    auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
+    if (SDK::GetDeviceProperties(h, &props, &num) != 0 || !props) return;
+    m_propSetCache.clear();
+    for (CrInt32 i = 0; i < num; ++i) {
+        uint32_t  code = static_cast<uint32_t>(props[i].GetCode());
+        long long val  = static_cast<long long>(props[i].GetCurrentValue());
+        m_propSetCache[code] = val;
+    }
+    SDK::ReleaseDeviceProperties(h, props);
+    Logf(L"WarmCache: %d właściwości → cache (pierwsze Set będzie Skip jeśli wartość zgodna)",
+         num);
+}
+
 // ─── Generic set / get ────────────────────────────────────────────────────────
 
 bool CameraController::SetPropRaw(unsigned code, unsigned type, long long value, const wchar_t* desc) {
@@ -189,6 +206,47 @@ bool CameraController::SetPropRaw(unsigned code, unsigned type, long long value,
     Logf(L"Set %-28s = 0x%llX  err=0x%04X",
          desc ? desc : L"?", (unsigned long long)value, (unsigned)err);
     return err == 0;
+}
+
+bool CameraController::SetPropCached(unsigned code, unsigned type, long long value,
+                                      const wchar_t* desc) {
+    uint32_t k = static_cast<uint32_t>(code);
+    auto it = m_propSetCache.find(k);
+    if (it != m_propSetCache.end() && it->second == value) {
+        Logf(L"Skip %-26s = 0x%llX (cached)", desc ? desc : L"?", (unsigned long long)value);
+        return true;
+    }
+    bool ok = SetPropRaw(code, type, value, desc);
+    if (ok) m_propSetCache[k] = value;
+    return ok;
+}
+
+bool CameraController::SetPropAndVerify(uint32_t code, uint32_t dataType, long long value,
+                                         const wchar_t* desc, int maxWaitMs) {
+    if (!m_connected) return false;
+    auto it = m_propSetCache.find(code);
+    if (it != m_propSetCache.end() && it->second == value) {
+        Logf(L"Skip %-26s = 0x%llX (cached)", desc ? desc : L"?", (unsigned long long)value);
+        return true;
+    }
+    SetPropRaw(code, dataType, value, desc);
+    int steps = maxWaitMs / 200;
+    if (steps < 1) steps = 1;
+    for (int i = 0; i < steps; ++i) {
+        ::Sleep(200);
+        uint64_t cur = 0;
+        if (GetPropRaw(code, cur) &&
+            static_cast<long long>(static_cast<uint32_t>(cur)) == value) {
+            if (i > 0) Logf(L"%-26s confirmed after %d × 200ms", desc ? desc : L"?", i + 1);
+            m_propSetCache[code] = value;
+            return true;
+        }
+        if (steps > 2 && i == steps / 2)
+            SetPropRaw(code, dataType, value,
+                       (std::wstring(desc ? desc : L"?") + L"(retry)").c_str());
+    }
+    Logf(L"%-26s verify timeout (%dms)", desc ? desc : L"?", maxWaitMs);
+    return true;
 }
 
 bool CameraController::SetProp(uint32_t code, uint32_t dataType, long long value,
@@ -321,8 +379,8 @@ uint32_t CameraController::NearestShutterSpeed(uint32_t targetRaw) {
 // ─── Exposure setters ─────────────────────────────────────────────────────────
 
 bool CameraController::SetPCRemotePriority() {
-    return SetPropRaw(SDK::CrDeviceProperty_PriorityKeySettings,
-                      SDK::CrDataType_UInt16, SDK::CrPriorityKey_PCRemote, L"PriorityKey");
+    return SetPropCached(SDK::CrDeviceProperty_PriorityKeySettings,
+                         SDK::CrDataType_UInt16, SDK::CrPriorityKey_PCRemote, L"PriorityKey");
 }
 
 bool CameraController::SetExposureMode(const wchar_t* mode) {
@@ -330,8 +388,8 @@ bool CameraController::SetExposureMode(const wchar_t* mode) {
     if      (!wcscmp(mode, L"P")) val = SDK::CrExposure_P_Auto;
     else if (!wcscmp(mode, L"A")) val = SDK::CrExposure_A_AperturePriority;
     else if (!wcscmp(mode, L"S")) val = SDK::CrExposure_S_ShutterSpeedPriority;
-    return SetPropRaw(SDK::CrDeviceProperty_ExposureProgramMode,
-                      SDK::CrDataType_UInt32, val, L"ExposureMode");
+    return SetPropCached(SDK::CrDeviceProperty_ExposureProgramMode,
+                         SDK::CrDataType_UInt32, val, L"ExposureMode");
 }
 
 bool CameraController::SetFocusMode(const wchar_t* mode) {
@@ -340,45 +398,51 @@ bool CameraController::SetFocusMode(const wchar_t* mode) {
     else if (!wcscmp(mode, L"AF-C")) val = SDK::CrFocus_AF_C;
     else if (!wcscmp(mode, L"AF-A")) val = SDK::CrFocus_AF_A;
     else if (!wcscmp(mode, L"DMF"))  val = SDK::CrFocus_DMF;
-    return SetPropRaw(SDK::CrDeviceProperty_FocusMode,
-                      SDK::CrDataType_UInt16, val, L"FocusMode");
+    return SetPropCached(SDK::CrDeviceProperty_FocusMode,
+                         SDK::CrDataType_UInt16, val, L"FocusMode");
 }
 
 bool CameraController::SetShutterSpeed(const wchar_t* value) {
     uint32_t raw    = ParseShutterSpeedToRaw(value);
     uint32_t actual = NearestShutterSpeed(raw);
     Logf(L"ShutterSpeed: %s → %s", value, DecodeShutterSpeed(actual).c_str());
-    return SetPropRaw(SDK::CrDeviceProperty_ShutterSpeed,
-                      SDK::CrDataType_UInt32, actual, L"ShutterSpeed");
+    auto ssCode = static_cast<uint32_t>(SDK::CrDeviceProperty_ShutterSpeed);
+    return SetPropAndVerify(ssCode, SDK::CrDataType_UInt32, (long long)actual,
+                            L"ShutterSpeed", 3000);
 }
 
 bool CameraController::SetISO(int iso) {
     uint32_t actual = NearestFromList32log(SDK::CrDeviceProperty_IsoSensitivity,
                                            static_cast<uint32_t>(iso));
     Logf(L"ISO: %d → %u", iso, actual);
-    return SetPropRaw(SDK::CrDeviceProperty_IsoSensitivity,
-                      SDK::CrDataType_UInt32, actual, L"ISO");
+    return SetPropCached(SDK::CrDeviceProperty_IsoSensitivity,
+                         SDK::CrDataType_UInt32, actual, L"ISO");
 }
 
 bool CameraController::SetFNumber(float f) {
     uint32_t target = static_cast<uint32_t>(f * 100.0f + 0.5f);
     uint32_t actual = NearestFromList16(SDK::CrDeviceProperty_FNumber, target);
     Logf(L"FNumber: F/%.1f → F/%.2f", f, actual / 100.0);
-    return SetPropRaw(SDK::CrDeviceProperty_FNumber,
-                      SDK::CrDataType_UInt16, actual, L"FNumber");
+    return SetPropCached(SDK::CrDeviceProperty_FNumber,
+                         SDK::CrDataType_UInt16, actual, L"FNumber");
 }
 
 bool CameraController::SetStoreDestination(const wchar_t* dest) {
     uint32_t val = SDK::CrStillImageStoreDestination_MemoryCard;
     if      (!wcscmp(dest, L"pc"))   val = SDK::CrStillImageStoreDestination_HostPC;
     else if (!wcscmp(dest, L"both")) val = SDK::CrStillImageStoreDestination_HostPCAndMemoryCard;
-    return SetPropRaw(SDK::CrDeviceProperty_StillImageStoreDestination,
-                      SDK::CrDataType_UInt16, val, L"StoreDestination");
+    return SetPropCached(SDK::CrDeviceProperty_StillImageStoreDestination,
+                         SDK::CrDataType_UInt16, val, L"StoreDestination");
 }
 
 // ─── Shoot ────────────────────────────────────────────────────────────────────
 
-bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures) {
+void CameraController::RequestShutdown() {
+    m_shutdownReq = true;
+    m_waitCv.notify_all();
+}
+
+bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures, bool holdForBurst) {
     if (!m_connected) { Log(L"Shoot: brak połączenia"); return false; }
     auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     m_capturedCount  = 0;
@@ -386,12 +450,26 @@ bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures
 
     auto t0 = std::chrono::steady_clock::now();
     SDK::SendCommand(h, SDK::CrCommandId_Release, SDK::CrCommandParam_Down);
-    ::Sleep(35);
-    SDK::SendCommand(h, SDK::CrCommandId_Release, SDK::CrCommandParam_Up);
 
-    std::unique_lock<std::mutex> lk(m_waitMutex);
-    bool ok = m_waitCv.wait_for(lk, std::chrono::milliseconds(timeoutMs),
-        [this] { return m_capturedCount.load() >= m_capturedTarget; });
+    bool ok;
+    if (holdForBurst) {
+        // Keep button pressed — Cont_Bracket fires all N shots while held.
+        // Release only after all captures arrive (or timeout/abort).
+        std::unique_lock<std::mutex> lk(m_waitMutex);
+        ok = m_waitCv.wait_for(lk, std::chrono::milliseconds(timeoutMs),
+            [this] { return m_capturedCount.load() >= m_capturedTarget
+                         || m_shutdownReq.load(); });
+        lk.unlock();
+        SDK::SendCommand(h, SDK::CrCommandId_Release, SDK::CrCommandParam_Up);
+    } else {
+        // Quick click — single shot or Single_Bracket (one press per shot).
+        ::Sleep(35);
+        SDK::SendCommand(h, SDK::CrCommandId_Release, SDK::CrCommandParam_Up);
+        std::unique_lock<std::mutex> lk(m_waitMutex);
+        ok = m_waitCv.wait_for(lk, std::chrono::milliseconds(timeoutMs),
+            [this] { return m_capturedCount.load() >= m_capturedTarget
+                         || m_shutdownReq.load(); });
+    }
 
     int ms = static_cast<int>(
         std::chrono::duration<double, std::milli>(

@@ -44,18 +44,42 @@ static std::wstring ExeDir() {
     return buf;
 }
 
+// ─── Graceful shutdown on console close / Ctrl+C ─────────────────────────────
+static TotalControl::PipeServer*       g_server         = nullptr;
+static TotalControl::CameraController* g_cam            = nullptr;
+static HANDLE                          g_shutdownDone   = nullptr;
+
+static BOOL WINAPI CtrlHandler(DWORD type) {
+    switch (type) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        LogLine(L"Signal — inicjuję shutdown...");
+        if (g_cam)    g_cam->RequestShutdown();   // przerywa aktywny Shoot()
+        if (g_server) g_server->Stop();            // odblokowuje Run()
+        // Czekaj aż main() dokończy cam.Shutdown() — max 5s zanim OS dobije proces
+        if (g_shutdownDone) WaitForSingleObject(g_shutdownDone, 5000);
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     _setmode(_fileno(stdout), _O_U8TEXT);
 
-    std::wstring logPath = ExeDir() + L"tc_daemon.log";
+    std::wstring logPath = ExeDir() + L"TotalControlSRV.log";
     g_logFile.open(logPath, std::ios::out | std::ios::trunc | std::ios::binary);
     g_logFile.write("\xEF\xBB\xBF", 3);
 
     LogLine(L"╔══════════════════════════════════════╗");
-    LogLine(L"║  TotalControl daemon                 ║");
+    LogLine(L"║  TotalControlSRV daemon              ║");
     LogLine(L"║  pipe: \\\\.\\pipe\\TotalControl         ║");
+    LogLine(L"║  zamknij: TotalControlCLI quit       ║");
     LogLine(L"╚══════════════════════════════════════╝");
 
     // ── Init + Connect ────────────────────────────────────────────────────────
@@ -82,13 +106,20 @@ int main() {
         }
     );
 
+    // Rejestruj handler konsoli (Ctrl+C, zamknięcie okna, shutdown systemu)
+    g_shutdownDone = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_server = &server;
+    g_cam    = &cam;
+    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+
     LogLine(L"Nasłuchuję na pipe...");
     server.Run();
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
     LogLine(L"Zamykam...");
     cam.Shutdown();
-    LogLine(L"Daemon zakończony.");
+    LogLine(L"Daemon zakończony — kamera zwolniona.");
+    if (g_shutdownDone) { SetEvent(g_shutdownDone); CloseHandle(g_shutdownDone); }
     g_logFile.close();
     return 0;
 }

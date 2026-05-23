@@ -546,27 +546,44 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         if (!m_cam.IsConnected()) { resp = Err(L"not_connected"); return true; }
 
         m_cam.SetPCRemotePriority();
-        ::Sleep(300);
 
         if (JHas(req, L"mode"))  m_cam.SetExposureMode(JStr(req, L"mode").c_str());
         if (JHas(req, L"focus")) m_cam.SetFocusMode(JStr(req, L"focus").c_str());
         if (JHas(req, L"iso"))   m_cam.SetISO(JInt(req, L"iso"));
         if (JHas(req, L"f"))     m_cam.SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss")) {
-            m_cam.SetShutterSpeed(JStr(req, L"ss").c_str());
-            ::Sleep(800);
-        }
+        if (JHas(req, L"ss"))    m_cam.SetShutterSpeed(JStr(req, L"ss").c_str());
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
         m_cam.SetStoreDestination(store.c_str());
         ::Sleep(300);
 
-        int timeout = JHas(req, L"timeout_ms") ? JInt(req, L"timeout_ms") : 5000;
+        int count = JHas(req, L"count") ? JInt(req, L"count", 1) : 1;
+        if (count < 1) count = 1;
+
+        int timeout = JHas(req, L"timeout_ms") ? JInt(req, L"timeout_ms")
+                                                : (count > 1 ? count * 1500 + 5000 : 5000);
         int latency = 0;
-        bool ok = m_cam.Shoot(&latency, timeout);
+        bool ok;
+
+        if (count > 1) {
+            // Burst: resolve drive mode string → code (default cont-hi)
+            std::wstring driveStr = JHas(req, L"drive") ? JStr(req, L"drive") : L"cont-hi";
+            uint32_t driveCode = 0x00010001; // cont-hi
+            if      (driveStr == L"cont-hi-plus") driveCode = 0x00010004;
+            else if (driveStr == L"cont-hi-live") driveCode = 0x00010006;
+            else if (driveStr == L"cont-lo")      driveCode = 0x00010002;
+            else if (driveStr == L"cont-mid")     driveCode = 0x00010007;
+            m_cam.SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
+                                   L"DriveMode(burst)", 2000);
+            ok = m_cam.Shoot(&latency, timeout, count, /*holdForBurst=*/true);
+        } else {
+            ok = m_cam.Shoot(&latency, timeout);
+        }
+
         if (ok) {
             std::wostringstream ss;
             ss << L"\"latency_ms\":" << latency;
+            if (count > 1) ss << L",\"captures\":" << count;
             resp = Ok(ss.str());
         } else {
             resp = Err(L"timeout", L"captured event timeout");
@@ -611,7 +628,6 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
                                   ? 0x01 : 0x02;
 
         m_cam.SetPCRemotePriority();
-        ::Sleep(200);
 
         // Apply optional exposure overrides
         if (JHas(req, L"mode"))  m_cam.SetExposureMode(JStr(req, L"mode").c_str());
@@ -619,8 +635,8 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         if (JHas(req, L"iso"))   m_cam.SetISO(JInt(req, L"iso"));
         if (JHas(req, L"f"))     m_cam.SetFNumber(JFlt(req, L"f"));
         if (JHas(req, L"ss")) {
+            // SetShutterSpeed polls internally until camera confirms the value
             m_cam.SetShutterSpeed(JStr(req, L"ss").c_str());
-            ::Sleep(800);
         }
 
         // Set bracket order
@@ -632,8 +648,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             resp = Err(L"not_supported", L"DriveMode not supported by this camera");
             return true;
         }
-        m_cam.SetProp(0x010e, 0x0003, driveCode, L"DriveMode");
-        ::Sleep(400);
+        m_cam.SetPropAndVerify(0x010e, 0x0003, (long long)driveCode, L"DriveMode", 2000);
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
         m_cam.SetStoreDestination(store.c_str());
@@ -641,7 +656,27 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
         int timeout = JHas(req, L"timeout_ms") ? JInt(req, L"timeout_ms") : 15000;
         int latency = 0;
-        bool ok = m_cam.Shoot(&latency, timeout, count);
+        bool ok;
+
+        if (!single) {
+            // Cont_Bracket: hold Release button — camera fires all N shots in one burst.
+            ok = m_cam.Shoot(&latency, timeout, count, /*holdForBurst=*/true);
+        } else {
+            // Single_Bracket: each Release fires one shot at next bracket exposure.
+            // Loop N times, each press expects exactly 1 capture.
+            int perShot = (timeout / count) + 3000;
+            int captured = 0, totalLatency = 0;
+            for (int i = 0; i < count; ++i) {
+                int lat = 0;
+                if (!m_cam.Shoot(&lat, perShot, 1)) break;
+                totalLatency += lat;
+                ++captured;
+                if (i + 1 < count) ::Sleep(300);
+            }
+            ok      = (captured == count);
+            latency = totalLatency;
+        }
+
         if (ok) {
             std::wostringstream ss;
             ss << L"\"latency_ms\":" << latency

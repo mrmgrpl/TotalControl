@@ -6,6 +6,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace SCRSDK { class IDeviceCallback; }
@@ -59,14 +60,19 @@ public:
     bool IsConnected() const { return m_connected; }
     const std::wstring& Model() const { return m_model; }
 
+    // Abort any ongoing Shoot() wait immediately (call before Shutdown on signal).
+    void RequestShutdown();
+
     // ── Capability ──────────────────────────────────────────────────────────
     bool SupportsProperty(uint32_t code) const;
 
     // ── Generic access ──────────────────────────────────────────────────────
-    // Set any property by raw code + CrDataType value + numeric value
     bool SetProp(uint32_t code, uint32_t dataType, long long value,
                  const wchar_t* desc = nullptr);
-    // Get current value of any property
+    // Set + poll until camera confirms value (or maxWaitMs).
+    // Skips both set and verify when already cached from a prior successful call.
+    bool SetPropAndVerify(uint32_t code, uint32_t dataType, long long value,
+                          const wchar_t* desc, int maxWaitMs = 2000);
     bool GetPropRaw(uint32_t code, uint64_t& outValue);
 
     // ── Generic command ──────────────────────────────────────────────────────
@@ -83,8 +89,11 @@ public:
     bool SetStoreDestination(const wchar_t* dest); // "card","pc","both"
 
     // ── Shoot ────────────────────────────────────────────────────────────────
-    // expectedCaptures: 1 for single, N for bracket (waits for N CrNotify_Captured_Event)
-    bool Shoot(int* latencyMs = nullptr, int timeoutMs = 5000, int expectedCaptures = 1);
+    // holdForBurst=true: keeps Release button pressed until all captures arrive,
+    // then releases (required for CrDrive_Cont_Bracket_* — camera fires N shots
+    // only while button is held). For single-shot and Single_Bracket, leave false.
+    bool Shoot(int* latencyMs = nullptr, int timeoutMs = 5000,
+               int expectedCaptures = 1, bool holdForBurst = false);
 
     // ── Status ───────────────────────────────────────────────────────────────
     CameraStatus GetStatus();
@@ -100,11 +109,13 @@ private:
     void Logf(const wchar_t* fmt, ...);
 
     bool     SetPropRaw(unsigned code, unsigned type, long long value, const wchar_t* desc);
+    bool     SetPropCached(unsigned code, unsigned type, long long value, const wchar_t* desc);
     uint32_t NearestFromList16(unsigned propCode, uint32_t target);
     uint32_t NearestFromList32log(unsigned propCode, uint32_t target);
     uint32_t ParseShutterSpeedToRaw(const wchar_t* value);
     uint32_t NearestShutterSpeed(uint32_t targetRaw);
     void     PopulateSupportedCodes();
+    void     WarmCache();
 
     bool                         m_initialized  = false;
     bool                         m_connected    = false;
@@ -113,10 +124,12 @@ private:
     DeviceCallback*              m_callback     = nullptr;
     LogFn                        m_log;
     std::unordered_set<uint32_t> m_supportedCodes;
+    std::unordered_map<uint32_t, long long> m_propSetCache;
 
     std::mutex              m_waitMutex;
     std::condition_variable m_waitCv;
-    std::atomic<bool>       m_connectedSig { false };
+    std::atomic<bool>       m_connectedSig  { false };
+    std::atomic<bool>       m_shutdownReq   { false };
     std::atomic<int>        m_capturedCount { 0 };
     int                     m_capturedTarget { 1 };
 };

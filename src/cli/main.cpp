@@ -1,7 +1,29 @@
 #include <windows.h>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
+
+// ─── Log ──────────────────────────────────────────────────────────────────────
+
+static std::ofstream g_log;
+
+static void LogOpen(const std::wstring& dir) {
+    g_log.open(dir + L"TotalControlCLI.log",
+               std::ios::out | std::ios::app | std::ios::binary);
+}
+
+static void Log(const std::string& msg) {
+    if (!g_log.is_open()) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char ts[32];
+    snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+             st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    g_log << ts << "  " << msg << "\r\n";
+    g_log.flush();
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -116,25 +138,30 @@ static void Usage() {
         "TotalControlCLI — Sony Camera Remote Controller\n"
         "\n"
         "Usage:\n"
-        "  tc status\n"
-        "  tc shoot [--ss 1/100] [--iso 100] [--f 2.8] [--mode M|A|S|P]\n"
-        "           [--focus MF|AF-S|AF-C|AF-A|DMF] [--store card|pc|both]\n"
-        "           [--timeout_ms 5000]\n"
-        "  tc bracket [--ev 0.3ev|0.5ev|0.7ev|1ev|1.3ev|1.5ev|1.7ev|2ev|2.3ev|2.5ev|2.7ev|3ev]\n"
-        "             [--count 3|5|7|9] [--mode single|cont] [--order minus|zero]\n"
-        "             [--ss 1/250] [--iso 200] [--f 2.8] [--store card|pc|both]\n"
-        "             [--timeout_ms 15000]\n"
-        "  tc movie start|stop|toggle\n"
-        "  tc af s1|s2|s1+s2|ael|awb|fel [up|down|press]\n"
-        "  tc get <prop>\n"
-        "  tc set <prop> <val>\n"
-        "  tc cmd <id> [--param 1] [--press]\n"
-        "  tc quit\n"
+        "  TotalControlCLI status\n"
+        "  TotalControlCLI shoot [--ss 1/100] [--iso 100] [--f 2.8] [--mode M|A|S|P]\n"
+        "                        [--focus MF|AF-S|AF-C|AF-A|DMF] [--store card|pc|both]\n"
+        "                        [--count N] [--drive cont-hi|cont-hi-plus|cont-hi-live|cont-lo|cont-mid]\n"
+        "                        [--timeout_ms 5000]\n"
+        "  (--count N > 1 = burst: holds shutter until N captures; default drive: cont-hi)\n"
+        "  TotalControlCLI bracket [--ev 0.3ev|0.5ev|0.7ev|1ev|1.3ev|1.5ev|1.7ev|2ev|2.3ev|2.5ev|2.7ev|3ev]\n"
+        "                          [--count 3|5|9] [--mode single|cont] [--order minus|zero]\n"
+        "                          [--ss 1/250] [--iso 200] [--f 2.8] [--store card|pc|both]\n"
+        "                          [--timeout_ms 15000]\n"
+        "  TotalControlCLI movie start|stop|toggle\n"
+        "  TotalControlCLI af s1|s2|s1+s2|ael|awb|fel [up|down|press]\n"
+        "  TotalControlCLI get <prop>\n"
+        "  TotalControlCLI set <prop> <val>\n"
+        "  TotalControlCLI cmd <id> [--param 1] [--press]\n"
+        "  TotalControlCLI quit\n"
+        "\n"
+        "Global flags:\n"
+        "  --nolog    disable logging to TotalControlCLI.log\n"
         "\n"
         "gPhoto2-compatible aliases:\n"
-        "  tc --trigger-capture            (= shoot)\n"
-        "  tc --get-config <prop>          (= get)\n"
-        "  tc --set-config <prop>=<val>    (= set)\n"
+        "  TotalControlCLI --trigger-capture            (= shoot)\n"
+        "  TotalControlCLI --get-config <prop>          (= get)\n"
+        "  TotalControlCLI --set-config <prop>=<val>    (= set)\n"
         "\n"
         "Properties (get/set):\n"
         "  shutter-speed  iso  f-number  ev-comp  exposure-mode  focus-mode\n"
@@ -168,10 +195,26 @@ int wmain(int argc, wchar_t* argv[]) {
 
     if (argc < 2) { Usage(); return 1; }
 
+    // Collect args, strip --nolog early (global flag, not a command flag)
     std::vector<std::string> args;
     args.reserve(argc - 1);
-    for (int i = 1; i < argc; ++i)
-        args.push_back(WtoU8(argv[i]));
+    bool logging = true;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = WtoU8(argv[i]);
+        if (a == "--nolog") { logging = false; continue; }
+        args.push_back(std::move(a));
+    }
+
+    if (args.empty()) { Usage(); return 1; }
+
+    if (logging) {
+        LogOpen(ExeDir());
+        // log invocation: reconstruct command line from original argv
+        std::string invocation = ">> tc";
+        for (int i = 1; i < argc; ++i)
+            invocation += " " + WtoU8(argv[i]);
+        Log(invocation);
+    }
 
     // ── Build JSON request ────────────────────────────────────────────────────
     std::string req;
@@ -185,13 +228,15 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     else if (cmd == "shoot" || cmd == "--trigger-capture") {
         req = "{\"cmd\":\"shoot\"";
-        auto ss   = Arg(args, "--ss");     if (!ss.empty())    req += ",\"ss\":"    + Q(ss);
-        auto iso  = Arg(args, "--iso");    if (!iso.empty())   req += ",\"iso\":"   + iso;
-        auto f    = Arg(args, "--f");      if (!f.empty())     req += ",\"f\":"     + f;
-        auto mode = Arg(args, "--mode");   if (!mode.empty())  req += ",\"mode\":"  + Q(mode);
-        auto foc  = Arg(args, "--focus");  if (!foc.empty())   req += ",\"focus\":" + Q(foc);
-        auto store= Arg(args, "--store");  if (!store.empty()) req += ",\"store\":" + Q(store);
-        auto tms  = Arg(args, "--timeout_ms"); if (!tms.empty()) req += ",\"timeout_ms\":" + tms;
+        auto ss    = Arg(args, "--ss");     if (!ss.empty())    req += ",\"ss\":"    + Q(ss);
+        auto iso   = Arg(args, "--iso");    if (!iso.empty())   req += ",\"iso\":"   + iso;
+        auto f     = Arg(args, "--f");      if (!f.empty())     req += ",\"f\":"     + f;
+        auto mode  = Arg(args, "--mode");   if (!mode.empty())  req += ",\"mode\":"  + Q(mode);
+        auto foc   = Arg(args, "--focus");  if (!foc.empty())   req += ",\"focus\":" + Q(foc);
+        auto store = Arg(args, "--store");  if (!store.empty()) req += ",\"store\":" + Q(store);
+        auto cnt   = Arg(args, "--count");  if (!cnt.empty())   req += ",\"count\":"  + cnt;
+        auto drv   = Arg(args, "--drive");  if (!drv.empty())   req += ",\"drive\":"  + Q(drv);
+        auto tms   = Arg(args, "--timeout_ms"); if (!tms.empty()) req += ",\"timeout_ms\":" + tms;
         req += "}";
     }
     else if (cmd == "bracket") {
@@ -224,7 +269,7 @@ int wmain(int argc, wchar_t* argv[]) {
     else if (cmd == "--set-config" && args.size() >= 2) {
         auto& kv = args[1];
         auto eq = kv.find('=');
-        if (eq == std::string::npos) { Usage(); return 1; }
+        if (eq == std::string::npos) { Log("ERR: --set-config missing '='"); Usage(); return 1; }
         req = "{\"cmd\":\"set\",\"prop\":" + Q(kv.substr(0, eq)) +
               ",\"val\":"                  + Q(kv.substr(eq + 1)) + "}";
     }
@@ -236,18 +281,26 @@ int wmain(int argc, wchar_t* argv[]) {
         req += "}";
     }
     else {
+        Log("ERR: unknown command: " + cmd);
         Usage(); return 1;
     }
+
+    Log("REQ: " + req);
 
     // ── Connect (auto-start daemon if needed) ─────────────────────────────────
     HANDLE pipe = TryOpenPipe();
     if (pipe == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
         if (err != ERROR_FILE_NOT_FOUND) {
+            char buf[64]; snprintf(buf, sizeof(buf), "ERR: pipe open error %lu", err);
+            Log(buf);
             fprintf(stderr, "tc: pipe error %lu\n", err);
             return 1;
         }
+        Log("INF: pipe not found, launching TotalControlSRV.exe");
         if (!LaunchDaemon()) {
+            Log("ERR: CreateProcess(TotalControlSRV.exe) failed, err=" +
+                std::to_string(GetLastError()));
             fprintf(stderr, "tc: cannot start TotalControl.exe (dir: %s)\n",
                     WtoU8(ExeDir()).c_str());
             return 1;
@@ -260,9 +313,11 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         fputc('\n', stderr);
         if (pipe == INVALID_HANDLE_VALUE) {
+            Log("ERR: daemon did not open pipe within 10s");
             fprintf(stderr, "tc: daemon did not start in time\n");
             return 1;
         }
+        Log("INF: daemon pipe connected after auto-start");
     }
 
     // ── Send / receive ────────────────────────────────────────────────────────
@@ -270,7 +325,13 @@ int wmain(int argc, wchar_t* argv[]) {
     bool ok = Talk(pipe, req, resp);
     CloseHandle(pipe);
 
-    if (!ok) { fprintf(stderr, "tc: pipe I/O error\n"); return 1; }
+    if (!ok) {
+        Log("ERR: pipe I/O error");
+        fprintf(stderr, "tc: pipe I/O error\n");
+        return 1;
+    }
+
+    Log("RSP: " + resp);
 
     // ── Interpret response ────────────────────────────────────────────────────
     if (!JBool(resp, "ok")) {
@@ -285,8 +346,10 @@ int wmain(int argc, wchar_t* argv[]) {
         printf("%s\n", JStr(resp, "val").c_str());
     }
     else if (cmd == "shoot" || cmd == "--trigger-capture") {
-        std::string lat = JNum(resp, "latency_ms");
-        if (!lat.empty()) printf("latency_ms=%s\n", lat.c_str());
+        std::string lat  = JNum(resp, "latency_ms");
+        std::string caps = JNum(resp, "captures");
+        if (!lat.empty())  printf("latency_ms=%s\n", lat.c_str());
+        if (!caps.empty()) printf("captures=%s\n", caps.c_str());
     }
     else if (cmd == "bracket") {
         std::string lat  = JNum(resp, "latency_ms");
@@ -329,15 +392,7 @@ int wmain(int argc, wchar_t* argv[]) {
         ps("metering");
         ps("store");
     }
-    else if (cmd == "af") {
-        // no output on success
-    }
-    else if (cmd == "movie") {
-        // no output on success
-    }
-    else if (cmd == "cmd") {
-        // no output on success
-    }
+    // af / movie / cmd / set / quit: no output on success
 
     return 0;
 }
