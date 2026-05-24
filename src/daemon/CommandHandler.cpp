@@ -780,20 +780,20 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             ok = cam->SendCmd(7, 1);
             if (state == L"press") { ::Sleep(50); cam->SendCmd(7, 0); }
         } else {
+            bool found = false;
             for (const auto& b : btns) {
-                if (btn == b.name) {
-                    uint8_t val = (state == L"up") ? 0 : 1;
-                    ok = cam->SetProp(b.code, 0x0001, val, b.name);
-                    if (state == L"press") {
-                        ::Sleep(500);
-                        cam->SetProp(b.code, 0x0001, 0, b.name);
-                    }
-                    goto af_done;
+                if (btn != b.name) continue;
+                const uint8_t val = (state == L"up") ? 0U : 1U;
+                ok = cam->SetProp(b.code, 0x0001, val, b.name);
+                if (state == L"press") {
+                    ::Sleep(500);
+                    cam->SetProp(b.code, 0x0001, 0U, b.name);
                 }
+                found = true;
+                break;
             }
-            resp = Err(L"unknown_button", btn.c_str()); return true;
+            if (!found) { resp = Err(L"unknown_button", btn.c_str()); return true; }
         }
-        af_done:
         resp = ok ? Ok() : Err(L"cmd_failed");
         return true;
     }

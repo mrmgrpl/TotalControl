@@ -1,11 +1,14 @@
 #include "CameraController.h"
 
+// Sony CrSDK — zewnętrzne nagłówki, nie modyfikować; ostrzeżenia wyłączone celowo
+#pragma warning(push, 0)
 #include "CameraRemote_SDK.h"
 #include "IDeviceCallback.h"
 #include "ICrCameraObjectInfo.h"
 #include "CrDeviceProperty.h"
 #include "CrCommandData.h"
 #include "CrError.h"
+#pragma warning(pop)
 
 #include <chrono>
 #include <cmath>
@@ -117,10 +120,12 @@ CameraController::CameraController(LogFn log) : m_log(std::move(log)) {}
 CameraController::~CameraController() { Shutdown(); }
 
 void CameraController::Log(const wchar_t* msg) {
+    if (msg == nullptr) return;
     ::OutputDebugStringW(msg); ::OutputDebugStringW(L"\n");
     if (m_log) m_log(msg);
 }
 void CameraController::Logf(const wchar_t* fmt, ...) {
+    if (fmt == nullptr) return;
     wchar_t buf[512]; va_list a; va_start(a, fmt);
     _vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, a); va_end(a);
     Log(buf);
@@ -149,7 +154,10 @@ void CameraController::Shutdown() {
 }
 
 bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int connectTimeoutMs) {
-    if (!m_initialized) return false;
+    if (!m_initialized)       { Log(L"Connect: brak Init()");             return false; }
+    if (m_callback == nullptr){ Log(L"Connect: brak callback");           return false; }
+    if (enumTimeoutSec <= 0)  { Log(L"Connect: enumTimeout musi być > 0");return false; }
+    if (connectTimeoutMs <= 0){ Log(L"Connect: connTimeout musi być > 0");return false; }
     if (m_connected) Disconnect();
 
     SDK::ICrEnumCameraObjectInfo* pEnum = nullptr;
@@ -212,10 +220,17 @@ bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int conn
 }
 
 void CameraController::Disconnect() {
-    if (!m_connected || !m_deviceHandle) return;
+    if (!m_connected) return;
+    if (m_deviceHandle == 0) {
+        Log(L"Disconnect: połączona bez handle — niespójny stan");
+        m_connected = false;
+        return;
+    }
     auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
-    SDK::Disconnect(h);
-    SDK::ReleaseDevice(h);
+    const SDK::CrError e1 = SDK::Disconnect(h);
+    if (e1 != 0) Logf(L"Disconnect WARN 0x%04X", static_cast<unsigned>(e1));
+    const SDK::CrError e2 = SDK::ReleaseDevice(h);
+    if (e2 != 0) Logf(L"ReleaseDevice WARN 0x%04X", static_cast<unsigned>(e2));
     m_deviceHandle = 0;
     m_connected    = false;
     m_supportedCodes.clear();
@@ -225,6 +240,7 @@ void CameraController::Disconnect() {
 // ─── Capability ───────────────────────────────────────────────────────────────
 
 void CameraController::PopulateSupportedCodes() {
+    if (!m_connected || m_deviceHandle == 0) return;
     auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
     if (SDK::GetDeviceProperties(h, &props, &num) != 0 || !props) return;
@@ -240,6 +256,7 @@ bool CameraController::SupportsProperty(uint32_t code) const {
 }
 
 void CameraController::WarmCache() {
+    if (!m_connected || m_deviceHandle == 0) return;
     auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
     if (SDK::GetDeviceProperties(h, &props, &num) != 0 || !props) return;
@@ -257,6 +274,8 @@ void CameraController::WarmCache() {
 // ─── Generic set / get ────────────────────────────────────────────────────────
 
 bool CameraController::SetPropRaw(unsigned code, unsigned type, long long value, const wchar_t* desc) {
+    if (!m_connected)       { Log(L"SetPropRaw: brak połączenia"); return false; }
+    if (m_deviceHandle == 0){ Log(L"SetPropRaw: brak handle");    return false; }
     auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     SDK::CrDeviceProperty prop;
     prop.SetCode(static_cast<SDK::CrDevicePropertyCode>(code));
@@ -342,6 +361,7 @@ bool CameraController::SendCmd(int cmdId, int param) {
 // ─── Nearest helpers ──────────────────────────────────────────────────────────
 
 uint32_t CameraController::NearestFromList16(unsigned propCode, uint32_t target) {
+    if (!m_connected || m_deviceHandle == 0) return target;
     auto h     = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     CrInt32u codeU = propCode;
     SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
@@ -360,6 +380,7 @@ uint32_t CameraController::NearestFromList16(unsigned propCode, uint32_t target)
 }
 
 uint32_t CameraController::NearestFromList32log(unsigned propCode, uint32_t target) {
+    if (!m_connected || m_deviceHandle == 0) return target;
     auto h     = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     CrInt32u codeU = propCode;
     SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
@@ -408,6 +429,7 @@ uint32_t CameraController::ParseShutterSpeedToRaw(const wchar_t* value) {
 }
 
 uint32_t CameraController::NearestShutterSpeed(uint32_t targetRaw) {
+    if (!m_connected || m_deviceHandle == 0) return targetRaw;
     auto h     = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     CrInt32u codeU = static_cast<CrInt32u>(SDK::CrDeviceProperty_ShutterSpeed);
     SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
@@ -503,7 +525,10 @@ void CameraController::RequestShutdown() {
 }
 
 bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures, bool holdForBurst) {
-    if (!m_connected) { Log(L"Shoot: brak połączenia"); return false; }
+    if (!m_connected)        { Log(L"Shoot: brak połączenia");       return false; }
+    if (m_deviceHandle == 0) { Log(L"Shoot: brak handle");           return false; }
+    if (timeoutMs <= 0)      { Log(L"Shoot: timeout musi być > 0");  return false; }
+    if (expectedCaptures < 1){ Log(L"Shoot: expectedCaptures < 1");  return false; }
     auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     m_capturedCount  = 0;
     m_capturedTarget = expectedCaptures;

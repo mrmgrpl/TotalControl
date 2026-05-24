@@ -41,8 +41,10 @@ static void LogLine(const wchar_t* msg) {
 // ─── Pomocnik: katalog exe ────────────────────────────────────────────────────
 static std::wstring ExeDir() {
     wchar_t buf[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    if (auto* s = wcsrchr(buf, L'\\')) *(s + 1) = L'\0';
+    const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (n == 0) return L"";
+    wchar_t* const sep = wcsrchr(buf, L'\\');
+    if (sep != nullptr) sep[1] = L'\0';  // array indexing, nie arytmetyka wskaźnikowa
     return buf;
 }
 
@@ -74,9 +76,13 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
     _setmode(_fileno(stdout), _O_U8TEXT);
 
-    std::wstring logPath = ExeDir() + L"TotalControlSRV.log";
+    const std::wstring logPath = ExeDir() + L"TotalControlSRV.log";
     g_logFile.open(logPath, std::ios::out | std::ios::trunc | std::ios::binary);
-    g_logFile.write("\xEF\xBB\xBF", 3);
+    if (!g_logFile.is_open()) {
+        ::OutputDebugStringW(L"WARN: nie można otworzyć pliku logu\n");
+    } else {
+        g_logFile.write("\xEF\xBB\xBF", 3);
+    }
 
     LogLine(L"╔══════════════════════════════════════╗");
     LogLine(L"║  TotalControlSRV daemon              ║");
@@ -171,9 +177,11 @@ int main() {
     );
 
     g_shutdownDone = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_shutdownDone == nullptr) LogLine(L"WARN: CreateEventW nie powiodło się");
     g_server = &server;
     g_cams   = &camPtrs;
-    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+    if (!SetConsoleCtrlHandler(CtrlHandler, TRUE))
+        LogLine(L"WARN: SetConsoleCtrlHandler nie powiodło się");
 
     LogLine(L"Nasłuchuję na pipe...");
     server.Run();

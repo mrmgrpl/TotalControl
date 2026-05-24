@@ -55,7 +55,8 @@ target_compile_definitions(TotalControlSRV PRIVATE
 )
 
 target_compile_options(TotalControlSRV PRIVATE
-    /W4 /WX- /MP /utf-8
+    /W4 /WX /MP /utf-8
+    /external:I "${CRSDK_INCLUDE}" /external:W0
 )
 
 # Kopiowanie DLL-i CrSDK po buildzie
@@ -87,7 +88,7 @@ target_compile_definitions(TotalControlCLI PRIVATE
 )
 
 target_compile_options(TotalControlCLI PRIVATE
-    /W4 /WX- /MP /utf-8
+    /W4 /WX /MP /utf-8
 )
 
 target_link_libraries(TotalControlCLI PRIVATE
