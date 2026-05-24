@@ -8,7 +8,28 @@
 
 namespace TotalControl {
 
-CommandHandler::CommandHandler(CameraController& cam) : m_cam(cam) {}
+CommandHandler::CommandHandler(std::vector<CameraController*> cams)
+    : m_cams(std::move(cams)) {}
+
+CameraController* CommandHandler::RouteCamera(const std::wstring& req) const {
+    if (m_cams.empty()) return nullptr;
+    if (!JHas(req, L"cam")) return m_cams[0];
+
+    // "cam":"<guid>" lub "cam":"<prefix_guid>"
+    std::wstring guidOrIdx = JStr(req, L"cam");
+    if (!guidOrIdx.empty()) {
+        for (auto* c : m_cams)
+            if (c->Guid() == guidOrIdx) return c;
+        // dopasowanie po prefiksie (wygodne dla skróconych GUIDów)
+        for (auto* c : m_cams)
+            if (!c->Guid().empty() && c->Guid().rfind(guidOrIdx, 0) == 0) return c;
+        return nullptr;
+    }
+    // "cam":0  (indeks numeryczny)
+    int idx = JInt(req, L"cam", -1);
+    if (idx >= 0 && idx < static_cast<int>(m_cams.size())) return m_cams[idx];
+    return nullptr;
+}
 
 // ─── JSON helpers ─────────────────────────────────────────────────────────────
 
@@ -511,12 +532,37 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         resp = Ok(); return false;
     }
 
+    // ── list_cameras ──────────────────────────────────────────────────────────
+    if (cmd == L"list_cameras") {
+        std::wostringstream ss;
+        ss << L"\"cameras\":[";
+        for (size_t i = 0; i < m_cams.size(); ++i) {
+            if (i > 0) ss << L",";
+            ss << L"{\"index\":" << i
+               << L",\"model\":\"" << m_cams[i]->Model() << L"\""
+               << L",\"guid\":\""  << m_cams[i]->Guid()  << L"\""
+               << L",\"connected\":" << (m_cams[i]->IsConnected() ? L"true" : L"false")
+               << L"}";
+        }
+        ss << L"]";
+        resp = Ok(ss.str());
+        return true;
+    }
+
+    // Wszystkie pozostałe komendy wymagają konkretnej kamery
+    CameraController* cam = RouteCamera(req);
+    if (!cam) {
+        resp = Err(L"camera_not_found", JHas(req, L"cam") ? JStr(req, L"cam").c_str() : L"brak kamer");
+        return true;
+    }
+
     // ── status ────────────────────────────────────────────────────────────────
     if (cmd == L"status") {
-        CameraStatus s = m_cam.GetStatus();
+        CameraStatus s = cam->GetStatus();
         std::wostringstream ss;
         ss << L"\"connected\":"  << (s.connected ? L"true" : L"false")
-           << L",\"model\":\""   << s.model        << L"\""
+           << L",\"guid\":\""    << cam->Guid()     << L"\""
+           << L",\"model\":\""   << s.model         << L"\""
            << L",\"battery\":"   << s.batteryPct
            << L",\"battery_level\":\"" << s.batteryLevel << L"\""
            << L",\"remaining\":" << s.remainingShots
@@ -543,18 +589,18 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
     // ── shoot ─────────────────────────────────────────────────────────────────
     if (cmd == L"shoot") {
-        if (!m_cam.IsConnected()) { resp = Err(L"not_connected"); return true; }
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
 
-        m_cam.SetPCRemotePriority();
+        cam->SetPCRemotePriority();
 
-        if (JHas(req, L"mode"))  m_cam.SetExposureMode(JStr(req, L"mode").c_str());
-        if (JHas(req, L"focus")) m_cam.SetFocusMode(JStr(req, L"focus").c_str());
-        if (JHas(req, L"iso"))   m_cam.SetISO(JInt(req, L"iso"));
-        if (JHas(req, L"f"))     m_cam.SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss"))    m_cam.SetShutterSpeed(JStr(req, L"ss").c_str());
+        if (JHas(req, L"mode"))  cam->SetExposureMode(JStr(req, L"mode").c_str());
+        if (JHas(req, L"focus")) cam->SetFocusMode(JStr(req, L"focus").c_str());
+        if (JHas(req, L"iso"))   cam->SetISO(JInt(req, L"iso"));
+        if (JHas(req, L"f"))     cam->SetFNumber(JFlt(req, L"f"));
+        if (JHas(req, L"ss"))    cam->SetShutterSpeed(JStr(req, L"ss").c_str());
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
-        m_cam.SetStoreDestination(store.c_str());
+        cam->SetStoreDestination(store.c_str());
         ::Sleep(300);
 
         int count = JHas(req, L"count") ? JInt(req, L"count", 1) : 1;
@@ -573,11 +619,11 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             else if (driveStr == L"cont-hi-live") driveCode = 0x00010006;
             else if (driveStr == L"cont-lo")      driveCode = 0x00010002;
             else if (driveStr == L"cont-mid")     driveCode = 0x00010007;
-            m_cam.SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
-                                   L"DriveMode(burst)", 2000);
-            ok = m_cam.Shoot(&latency, timeout, count, /*holdForBurst=*/true);
+            cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
+                                  L"DriveMode(burst)", 2000);
+            ok = cam->Shoot(&latency, timeout, count, /*holdForBurst=*/true);
         } else {
-            ok = m_cam.Shoot(&latency, timeout);
+            ok = cam->Shoot(&latency, timeout);
         }
 
         if (ok) {
@@ -594,7 +640,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
     // ── bracket ───────────────────────────────────────────────────────────────
     // {"cmd":"bracket","ev":"1ev","count":5,"mode":"single","order":"minus","ss":"1/250","iso":200}
     if (cmd == L"bracket") {
-        if (!m_cam.IsConnected()) { resp = Err(L"not_connected"); return true; }
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
 
         // Parse EV step: "0.3ev","0.5ev","0.7ev","1ev","1ev","2ev","3ev"
         std::wstring evStr = JStr(req, L"ev");
@@ -627,31 +673,28 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         uint8_t bracketOrderVal = (orderStr == L"zero" || orderStr == L"0-to-minus-to-plus")
                                   ? 0x01 : 0x02;
 
-        m_cam.SetPCRemotePriority();
+        cam->SetPCRemotePriority();
 
         // Apply optional exposure overrides
-        if (JHas(req, L"mode"))  m_cam.SetExposureMode(JStr(req, L"mode").c_str());
-        if (JHas(req, L"focus")) m_cam.SetFocusMode(JStr(req, L"focus").c_str());
-        if (JHas(req, L"iso"))   m_cam.SetISO(JInt(req, L"iso"));
-        if (JHas(req, L"f"))     m_cam.SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss")) {
-            // SetShutterSpeed polls internally until camera confirms the value
-            m_cam.SetShutterSpeed(JStr(req, L"ss").c_str());
-        }
+        if (JHas(req, L"mode"))  cam->SetExposureMode(JStr(req, L"mode").c_str());
+        if (JHas(req, L"focus")) cam->SetFocusMode(JStr(req, L"focus").c_str());
+        if (JHas(req, L"iso"))   cam->SetISO(JInt(req, L"iso"));
+        if (JHas(req, L"f"))     cam->SetFNumber(JFlt(req, L"f"));
+        if (JHas(req, L"ss"))    cam->SetShutterSpeed(JStr(req, L"ss").c_str());
 
         // Set bracket order
-        if (m_cam.SupportsProperty(0x01fd))
-            m_cam.SetProp(0x01fd, 0x0001, bracketOrderVal, L"BracketOrder");
+        if (cam->SupportsProperty(0x01fd))
+            cam->SetProp(0x01fd, 0x0001, bracketOrderVal, L"BracketOrder");
 
         // Set drive mode to bracket
-        if (!m_cam.SupportsProperty(0x010e)) {
+        if (!cam->SupportsProperty(0x010e)) {
             resp = Err(L"not_supported", L"DriveMode not supported by this camera");
             return true;
         }
-        m_cam.SetPropAndVerify(0x010e, 0x0003, (long long)driveCode, L"DriveMode", 2000);
+        cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode, L"DriveMode", 2000);
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
-        m_cam.SetStoreDestination(store.c_str());
+        cam->SetStoreDestination(store.c_str());
         ::Sleep(200);
 
         int timeout = JHas(req, L"timeout_ms") ? JInt(req, L"timeout_ms") : 15000;
@@ -660,7 +703,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
         if (!single) {
             // Cont_Bracket: hold Release button — camera fires all N shots in one burst.
-            ok = m_cam.Shoot(&latency, timeout, count, /*holdForBurst=*/true);
+            ok = cam->Shoot(&latency, timeout, count, /*holdForBurst=*/true);
         } else {
             // Single_Bracket: each Release fires one shot at next bracket exposure.
             // Loop N times, each press expects exactly 1 capture.
@@ -668,7 +711,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             int captured = 0, totalLatency = 0;
             for (int i = 0; i < count; ++i) {
                 int lat = 0;
-                if (!m_cam.Shoot(&lat, perShot, 1)) break;
+                if (!cam->Shoot(&lat, perShot, 1)) break;
                 totalLatency += lat;
                 ++captured;
                 if (i + 1 < count) ::Sleep(300);
@@ -693,23 +736,15 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
     // ── movie ─────────────────────────────────────────────────────────────────
     // {"cmd":"movie","action":"start"|"stop"|"toggle"}
     if (cmd == L"movie") {
-        if (!m_cam.IsConnected()) { resp = Err(L"not_connected"); return true; }
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
         std::wstring action = JStr(req, L"action");
-        // CrCommandId_MovieRecord=1, CrCommandId_MovieRecButtonToggle=11
-        // CrCommandParam_Down=1, CrCommandParam_Up=0
         bool ok;
         if (action == L"start") {
-            ok = m_cam.SendCmd(1, 1); // Down
-            ::Sleep(50);
-            m_cam.SendCmd(1, 0); // Up
+            ok = cam->SendCmd(1, 1); ::Sleep(50); cam->SendCmd(1, 0);
         } else if (action == L"stop") {
-            ok = m_cam.SendCmd(1, 1);
-            ::Sleep(50);
-            m_cam.SendCmd(1, 0);
+            ok = cam->SendCmd(1, 1); ::Sleep(50); cam->SendCmd(1, 0);
         } else { // toggle
-            ok = m_cam.SendCmd(11, 1);
-            ::Sleep(50);
-            m_cam.SendCmd(11, 0);
+            ok = cam->SendCmd(11, 1); ::Sleep(50); cam->SendCmd(11, 0);
         }
         resp = ok ? Ok() : Err(L"cmd_failed");
         return true;
@@ -718,7 +753,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
     // ── af ────────────────────────────────────────────────────────────────────
     // {"cmd":"af","button":"s1"|"s2"|"s1+s2"|"ael"|"awb"|"fel","state":"down"|"up"|"press"}
     if (cmd == L"af") {
-        if (!m_cam.IsConnected()) { resp = Err(L"not_connected"); return true; }
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
         std::wstring btn   = JStr(req, L"button");
         std::wstring state = JStr(req, L"state");
         if (state.empty()) state = L"press";
@@ -739,20 +774,19 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         // S2 and S1+S2 use CrCommandId_Release (0) or CrCommandId_S1andRelease (7)
         bool ok = false;
         if (btn == L"s2" || btn == L"shoot") {
-            // Full release: S1+S2 together via CrCommandId_Release
-            ok = m_cam.SendCmd(0, 1); // Down
-            if (state == L"press") { ::Sleep(50); m_cam.SendCmd(0, 0); }
+            ok = cam->SendCmd(0, 1);
+            if (state == L"press") { ::Sleep(50); cam->SendCmd(0, 0); }
         } else if (btn == L"s1+s2") {
-            ok = m_cam.SendCmd(7, 1); // CrCommandId_S1andRelease
-            if (state == L"press") { ::Sleep(50); m_cam.SendCmd(7, 0); }
+            ok = cam->SendCmd(7, 1);
+            if (state == L"press") { ::Sleep(50); cam->SendCmd(7, 0); }
         } else {
             for (const auto& b : btns) {
                 if (btn == b.name) {
                     uint8_t val = (state == L"up") ? 0 : 1;
-                    ok = m_cam.SetProp(b.code, 0x0001, val, b.name);
+                    ok = cam->SetProp(b.code, 0x0001, val, b.name);
                     if (state == L"press") {
-                        ::Sleep(500); // half-press hold
-                        m_cam.SetProp(b.code, 0x0001, 0, b.name);
+                        ::Sleep(500);
+                        cam->SetProp(b.code, 0x0001, 0, b.name);
                     }
                     goto af_done;
                 }
@@ -767,7 +801,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
     // ── cmd ───────────────────────────────────────────────────────────────────
     // {"cmd":"cmd","id":"power-off"|"sensor-clean"|"nav-up",...,"param":1}
     if (cmd == L"cmd") {
-        if (!m_cam.IsConnected()) { resp = Err(L"not_connected"); return true; }
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
         std::wstring idStr = JStr(req, L"id");
         int id = -1;
         // Try name lookup
@@ -784,10 +818,10 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         if (id == -1) { resp = Err(L"unknown_cmd_id", idStr.c_str()); return true; }
 
         int param = JInt(req, L"param", 1);
-        bool ok = m_cam.SendCmd(id, param);
+        bool ok = cam->SendCmd(id, param);
         if (JHas(req, L"param_up") || JBool(req, L"press")) {
             ::Sleep(50);
-            m_cam.SendCmd(id, 0);
+            cam->SendCmd(id, 0);
         }
         resp = ok ? Ok() : Err(L"cmd_failed");
         return true;
@@ -795,74 +829,61 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
     // ── set ───────────────────────────────────────────────────────────────────
     if (cmd == L"set") {
-        if (!m_cam.IsConnected()) { resp = Err(L"not_connected"); return true; }
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
         std::wstring prop = NormProp(JStr(req, L"prop"));
         std::wstring val  = JStr(req, L"val");
 
-        // Handle special cases using existing helpers
         if (prop == L"shutter_speed") {
-            bool ok = m_cam.SetShutterSpeed(val.c_str());
-            resp = ok ? Ok() : Err(L"set_failed"); return true;
+            resp = cam->SetShutterSpeed(val.c_str()) ? Ok() : Err(L"set_failed"); return true;
         }
         if (prop == L"f_number") {
-            try { bool ok = m_cam.SetFNumber(std::stof(val));
-                  resp = ok ? Ok() : Err(L"set_failed"); }
+            try { resp = cam->SetFNumber(std::stof(val)) ? Ok() : Err(L"set_failed"); }
             catch (...) { resp = Err(L"invalid_value"); }
             return true;
         }
         if (prop == L"iso") {
             if (val == L"auto" || val == L"AUTO") {
-                bool ok = m_cam.SetISO(0xFFFFFF);
-                resp = ok ? Ok() : Err(L"set_failed"); return true;
+                resp = cam->SetISO(0xFFFFFF) ? Ok() : Err(L"set_failed"); return true;
             }
-            try { bool ok = m_cam.SetISO(std::stoi(val));
-                  resp = ok ? Ok() : Err(L"set_failed"); }
+            try { resp = cam->SetISO(std::stoi(val)) ? Ok() : Err(L"set_failed"); }
             catch (...) { resp = Err(L"invalid_value"); }
             return true;
         }
         if (prop == L"exposure_mode") {
-            bool ok = m_cam.SetExposureMode(val.c_str());
-            resp = ok ? Ok() : Err(L"set_failed"); return true;
+            resp = cam->SetExposureMode(val.c_str()) ? Ok() : Err(L"set_failed"); return true;
         }
         if (prop == L"focus_mode") {
-            bool ok = m_cam.SetFocusMode(val.c_str());
-            resp = ok ? Ok() : Err(L"set_failed"); return true;
+            resp = cam->SetFocusMode(val.c_str()) ? Ok() : Err(L"set_failed"); return true;
         }
         if (prop == L"store_dest") {
-            bool ok = m_cam.SetStoreDestination(val.c_str());
-            resp = ok ? Ok() : Err(L"set_failed"); return true;
+            resp = cam->SetStoreDestination(val.c_str()) ? Ok() : Err(L"set_failed"); return true;
         }
-        if (prop == L"priority_key") {
-            if (val == L"pc" || val == L"PC") {
-                bool ok = m_cam.SetPCRemotePriority();
-                resp = ok ? Ok() : Err(L"set_failed"); return true;
-            }
+        if (prop == L"priority_key" && (val == L"pc" || val == L"PC")) {
+            resp = cam->SetPCRemotePriority() ? Ok() : Err(L"set_failed"); return true;
         }
 
         // Generic table-driven set
         const PropDef* pd = FindProp(prop);
         if (!pd) { resp = Err(L"unknown_prop", prop.c_str()); return true; }
         if (!pd->writable) { resp = Err(L"read_only", prop.c_str()); return true; }
-        if (!m_cam.SupportsProperty(pd->code)) {
-            resp = Err(L"not_supported", (m_cam.Model() + L" nie obsługuje: " + prop).c_str());
+        if (!cam->SupportsProperty(pd->code)) {
+            resp = Err(L"not_supported", (cam->Model() + L" nie obsługuje: " + prop).c_str());
             return true;
         }
         long long raw;
         if (!EncodePropValue(pd->code, val, raw)) {
             resp = Err(L"invalid_value", (prop + L"=" + val).c_str()); return true;
         }
-        bool ok = m_cam.SetProp(pd->code, pd->dataType, raw, prop.c_str());
-        resp = ok ? Ok() : Err(L"set_failed");
+        resp = cam->SetProp(pd->code, pd->dataType, raw, prop.c_str()) ? Ok() : Err(L"set_failed");
         return true;
     }
 
     // ── get ───────────────────────────────────────────────────────────────────
     if (cmd == L"get") {
-        if (!m_cam.IsConnected()) { resp = Err(L"not_connected"); return true; }
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
         std::wstring prop = NormProp(JStr(req, L"prop"));
 
-        // Fast path for CameraStatus fields
-        CameraStatus s = m_cam.GetStatus();
+        CameraStatus s = cam->GetStatus();
         auto respVal = [&](const std::wstring& v) {
             resp = Ok(L"\"val\":\"" + v + L"\"");
         };
@@ -898,12 +919,12 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         // Generic table-driven get via raw prop read
         const PropDef* pd = FindProp(prop);
         if (!pd) { resp = Err(L"unknown_prop", prop.c_str()); return true; }
-        if (!m_cam.SupportsProperty(pd->code)) {
-            resp = Err(L"not_supported", (m_cam.Model() + L" nie obsługuje: " + prop).c_str());
+        if (!cam->SupportsProperty(pd->code)) {
+            resp = Err(L"not_supported", (cam->Model() + L" nie obsługuje: " + prop).c_str());
             return true;
         }
         uint64_t raw = 0;
-        if (!m_cam.GetPropRaw(pd->code, raw)) {
+        if (!cam->GetPropRaw(pd->code, raw)) {
             resp = Err(L"get_failed"); return true;
         }
         std::wstring decoded = DecodePropValue(pd->code, raw);

@@ -58,14 +58,21 @@ Używają: SetPCRemotePriority, SetExposureMode, SetISO, SetFNumber, SetFocusMod
 Każde żądanie = jedna linia JSON + `\n`. Odpowiedź = jedna linia JSON + `\n`.
 
 ```json
+{"cmd":"list_cameras"}
 {"cmd":"shoot","ss":"1/100","iso":100,"f":2.8,"mode":"M"}
+{"cmd":"shoot","ss":"1/100","cam":"<guid>"}           // konkretna kamera po GUID
+{"cmd":"shoot","ss":"1/100","cam":1}                  // lub po indeksie (0-based)
 {"cmd":"bracket","ev":"1ev","count":5,"mode":"cont","ss":"1/100"}
-{"cmd":"shoot","count":10,"drive":"cont-hi-plus"}   // burst
+{"cmd":"shoot","count":10,"drive":"cont-hi-plus"}
 {"cmd":"status"}
+{"cmd":"status","cam":"<guid-prefix>"}                // prefix GUID też działa
 {"cmd":"get","prop":"shutter_speed"}
 {"cmd":"set","prop":"drive_mode","val":"cont-hi"}
 {"cmd":"quit"}
 ```
+
+Pole `"cam"` jest opcjonalne — bez niego komenda trafia do kamery 0 (compat tryb jednej kamery).  
+`"cam"` akceptuje: pełny GUID, prefiks GUID, indeks numeryczny.
 
 ## Konwencje kodu
 
@@ -84,10 +91,11 @@ Każde żądanie = jedna linia JSON + `\n`. Odpowiedź = jedna linia JSON + `\n`
 | Moduł | Stan |
 |---|---|
 | CMakeLists.txt | Gotowy — SRV + CLI targets |
-| CameraController | Init / Connect / Disconnect + WarmCache + property cache |
+| CameraController | Init / Connect / Disconnect + WarmCache + property cache + multi-cam |
 | PipeServer | Działa — named pipe, JSON Lines |
-| CommandHandler | shoot / bracket / burst / movie / af / get / set / cmd / quit |
-| Graceful shutdown | SetConsoleCtrlHandler → RequestShutdown → cam.Shutdown() |
+| CommandHandler | shoot / bracket / burst / movie / af / get / set / cmd / quit / list_cameras |
+| Multi-camera | CameraController::Enumerate + Connect(guid) + routing po "cam":guid/index |
+| Graceful shutdown | SetConsoleCtrlHandler → RequestShutdown na wszystkich kamerach → Shutdown() |
 | SequencerEngine | Szkielet — do implementacji |
 | Renderer3D / Overlay2D / CameraPreview | Puste stubs |
 | TotalControlGUI | Placeholder — nie zaimplementowane |

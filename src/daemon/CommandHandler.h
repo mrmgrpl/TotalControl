@@ -1,18 +1,24 @@
 #pragma once
 #include "CameraController.h"
 #include <string>
+#include <vector>
 
 namespace TotalControl {
 
 class CommandHandler {
 public:
-    explicit CommandHandler(CameraController& cam);
+    // Przyjmuje listę wskaźników do połączonych kamer.
+    // "cam":guid lub "cam":index w JSON → routing; brak pola → kamera[0].
+    explicit CommandHandler(std::vector<CameraController*> cams);
 
     // Zwraca false gdy daemon ma się zakończyć (cmd=quit)
     bool Handle(const std::wstring& request, std::wstring& response);
 
 private:
-    CameraController& m_cam;
+    std::vector<CameraController*> m_cams;
+
+    // Routing: zwraca kamerę na podstawie pola "cam" w JSON lub nullptr jeśli nie znaleziono.
+    CameraController* RouteCamera(const std::wstring& req) const;
 
     // Minimalne narzędzia JSON
     static std::wstring JStr(const std::wstring& json, const wchar_t* key);

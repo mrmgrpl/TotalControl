@@ -9,8 +9,10 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // ─── Log do pliku ─────────────────────────────────────────────────────────────
 static std::ofstream g_logFile;
@@ -45,9 +47,9 @@ static std::wstring ExeDir() {
 }
 
 // ─── Graceful shutdown on console close / Ctrl+C ─────────────────────────────
-static TotalControl::PipeServer*       g_server         = nullptr;
-static TotalControl::CameraController* g_cam            = nullptr;
-static HANDLE                          g_shutdownDone   = nullptr;
+static TotalControl::PipeServer*                       g_server       = nullptr;
+static std::vector<TotalControl::CameraController*>*   g_cams         = nullptr;
+static HANDLE                                          g_shutdownDone = nullptr;
 
 static BOOL WINAPI CtrlHandler(DWORD type) {
     switch (type) {
@@ -57,9 +59,9 @@ static BOOL WINAPI CtrlHandler(DWORD type) {
     case CTRL_LOGOFF_EVENT:
     case CTRL_SHUTDOWN_EVENT:
         LogLine(L"Signal — inicjuję shutdown...");
-        if (g_cam)    g_cam->RequestShutdown();   // przerywa aktywny Shoot()
-        if (g_server) g_server->Stop();            // odblokowuje Run()
-        // Czekaj aż main() dokończy cam.Shutdown() — max 5s zanim OS dobije proces
+        if (g_cams)
+            for (auto* c : *g_cams) c->RequestShutdown();
+        if (g_server) g_server->Stop();
         if (g_shutdownDone) WaitForSingleObject(g_shutdownDone, 5000);
         return TRUE;
     default:
@@ -82,19 +84,81 @@ int main() {
     LogLine(L"║  zamknij: TotalControlCLI quit       ║");
     LogLine(L"╚══════════════════════════════════════╝");
 
-    // ── Init + Connect ────────────────────────────────────────────────────────
-    TotalControl::CameraController cam([](const wchar_t* msg) { LogLine(msg); });
-
+    // ── Init SDK ──────────────────────────────────────────────────────────────
     LogLine(L"Inicjalizacja SDK...");
-    if (!cam.Init()) { LogLine(L"BŁĄD: Init SDK"); return 1; }
+    if (!TotalControl::CameraController::InitSDK()) {
+        LogLine(L"BŁĄD: SDK::Init");
+        return 1;
+    }
 
-    LogLine(L"Szukam kamery (timeout 5s)...");
-    if (!cam.Connect(5, 8000)) { LogLine(L"BŁĄD: brak kamery"); return 2; }
+    // ── Enumeracja kamer ──────────────────────────────────────────────────────
+    LogLine(L"Szukam kamer (timeout 5s)...");
+    auto cameraList = TotalControl::CameraController::Enumerate(5);
+    if (cameraList.empty()) {
+        LogLine(L"BŁĄD: brak kamer");
+        TotalControl::CameraController::ReleaseSDK();
+        return 2;
+    }
+    {
+        wchar_t buf[128];
+        swprintf_s(buf, L"Znaleziono %zu kamer(ę/y):", cameraList.size());
+        LogLine(buf);
+        for (size_t i = 0; i < cameraList.size(); ++i) {
+            swprintf_s(buf, L"  [%zu] %s  guid=%s",
+                       i, cameraList[i].model.c_str(), cameraList[i].guid.c_str());
+            LogLine(buf);
+        }
+    }
 
-    LogLine(L"Kamera połączona. Daemon gotowy.");
+    // ── Połącz z każdą kamerą ─────────────────────────────────────────────────
+    std::vector<std::unique_ptr<TotalControl::CameraController>> camOwners;
+
+    for (size_t i = 0; i < cameraList.size(); ++i) {
+        const auto& info = cameraList[i];
+
+        // Logger z prefiksem indeksu kamery
+        auto logFn = [i](const wchar_t* msg) {
+            wchar_t buf[1024];
+            swprintf_s(buf, L"[CAM%zu] %s", i, msg);
+            LogLine(buf);
+        };
+
+        auto cam = std::make_unique<TotalControl::CameraController>(logFn);
+        if (!cam->Init()) {
+            wchar_t buf[128];
+            swprintf_s(buf, L"BŁĄD: Init kamery %zu (%s)", i, info.model.c_str());
+            LogLine(buf);
+            continue;
+        }
+        if (!cam->Connect(info.guid.c_str(), 5, 8000)) {
+            wchar_t buf[128];
+            swprintf_s(buf, L"BŁĄD: Connect kamery %zu (%s)", i, info.model.c_str());
+            LogLine(buf);
+            cam->Shutdown();
+            continue;
+        }
+        camOwners.push_back(std::move(cam));
+    }
+
+    if (camOwners.empty()) {
+        LogLine(L"BŁĄD: żadna kamera nie połączona");
+        TotalControl::CameraController::ReleaseSDK();
+        return 3;
+    }
+
+    {
+        wchar_t buf[128];
+        swprintf_s(buf, L"Połączono %zu/%zu kamer. Daemon gotowy.",
+                   camOwners.size(), cameraList.size());
+        LogLine(buf);
+    }
+
+    // ── Zbuduj wektor wskaźników dla CommandHandler ───────────────────────────
+    std::vector<TotalControl::CameraController*> camPtrs;
+    for (auto& c : camOwners) camPtrs.push_back(c.get());
 
     // ── Pipe server ───────────────────────────────────────────────────────────
-    TotalControl::CommandHandler handler(cam);
+    TotalControl::CommandHandler handler(camPtrs);
 
     TotalControl::PipeServer server(
         L"\\\\.\\pipe\\TotalControl",
@@ -106,10 +170,9 @@ int main() {
         }
     );
 
-    // Rejestruj handler konsoli (Ctrl+C, zamknięcie okna, shutdown systemu)
     g_shutdownDone = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_server = &server;
-    g_cam    = &cam;
+    g_cams   = &camPtrs;
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
 
     LogLine(L"Nasłuchuję na pipe...");
@@ -117,8 +180,9 @@ int main() {
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
     LogLine(L"Zamykam...");
-    cam.Shutdown();
-    LogLine(L"Daemon zakończony — kamera zwolniona.");
+    for (auto& c : camOwners) c->Shutdown();
+    TotalControl::CameraController::ReleaseSDK(); // finalny decrement (z InitSDK w main)
+    LogLine(L"Daemon zakończony.");
     if (g_shutdownDone) { SetEvent(g_shutdownDone); CloseHandle(g_shutdownDone); }
     g_logFile.close();
     return 0;

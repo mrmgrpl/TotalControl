@@ -8,10 +8,17 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace SCRSDK { class IDeviceCallback; }
 
 namespace TotalControl {
+
+struct CameraInfo {
+    std::wstring guid;   // GetGuid() — UUID unikalny per jednostka
+    std::wstring model;  // GetModel()
+    std::wstring name;   // GetName()
+};
 
 struct CameraStatus {
     bool         connected      = false;
@@ -53,12 +60,24 @@ public:
     explicit CameraController(LogFn log = nullptr);
     ~CameraController();
 
-    bool Init();
-    void Shutdown();
-    bool Connect(int enumTimeoutSec = 5, int connectTimeoutMs = 8000);
+    // ── SDK lifecycle (static) ───────────────────────────────────────────────
+    // InitSDK/ReleaseSDK używają refcount — bezpieczne przy wielu kontrolerach.
+    static bool InitSDK();
+    static void ReleaseSDK();
+
+    // Enumerate wszystkich podłączonych kamer (wymaga wcześniejszego InitSDK).
+    static std::vector<CameraInfo> Enumerate(int timeoutSec = 5);
+
+    // ── Instance lifecycle ───────────────────────────────────────────────────
+    bool Init();     // wywołuje InitSDK + tworzy callback
+    void Shutdown(); // Disconnect + wywołuje ReleaseSDK
+    // guid=nullptr → łączy z pierwszą kamerą (compat jednej kamery)
+    bool Connect(const wchar_t* guid = nullptr,
+                 int enumTimeoutSec = 5, int connectTimeoutMs = 8000);
     void Disconnect();
     bool IsConnected() const { return m_connected; }
     const std::wstring& Model() const { return m_model; }
+    const std::wstring& Guid()  const { return m_guid;  }
 
     // Abort any ongoing Shoot() wait immediately (call before Shutdown on signal).
     void RequestShutdown();
@@ -121,6 +140,7 @@ private:
     bool                         m_connected    = false;
     uint64_t                     m_deviceHandle = 0;
     std::wstring                 m_model;
+    std::wstring                 m_guid;
     DeviceCallback*              m_callback     = nullptr;
     LogFn                        m_log;
     std::unordered_set<uint32_t> m_supportedCodes;

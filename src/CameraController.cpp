@@ -17,6 +17,44 @@ namespace SDK = SCRSDK;
 
 namespace TotalControl {
 
+// ─── Static SDK lifecycle ─────────────────────────────────────────────────────
+
+static std::mutex s_sdkMutex;
+static int        s_sdkRef = 0;
+
+bool CameraController::InitSDK() {
+    std::lock_guard<std::mutex> lk(s_sdkMutex);
+    if (s_sdkRef == 0 && !SDK::Init(0)) return false;
+    ++s_sdkRef;
+    return true;
+}
+
+void CameraController::ReleaseSDK() {
+    std::lock_guard<std::mutex> lk(s_sdkMutex);
+    if (s_sdkRef > 0 && --s_sdkRef == 0) SDK::Release();
+}
+
+std::vector<CameraInfo> CameraController::Enumerate(int timeoutSec) {
+    std::vector<CameraInfo> result;
+    SDK::ICrEnumCameraObjectInfo* pEnum = nullptr;
+    SDK::EnumCameraObjects(&pEnum, static_cast<CrInt8u>(timeoutSec));
+    if (!pEnum) return result;
+    CrInt32u n = pEnum->GetCount();
+    for (CrInt32u i = 0; i < n; ++i) {
+        const auto* info = pEnum->GetCameraObjectInfo(i);
+        if (!info) continue;
+        CameraInfo ci;
+        if (auto* g  = info->GetGuid();  g  && *g)  ci.guid  = g;
+        if (auto* m  = info->GetModel(); m  && *m)  ci.model = m;
+        else ci.model = L"Unknown";
+        if (auto* nm = info->GetName();  nm && *nm) ci.name  = nm;
+        else ci.name = ci.model;
+        result.push_back(std::move(ci));
+    }
+    pEnum->Release();
+    return result;
+}
+
 // ─── DeviceCallback ───────────────────────────────────────────────────────────
 
 class CameraController::DeviceCallback : public SDK::IDeviceCallback {
@@ -91,7 +129,7 @@ void CameraController::Logf(const wchar_t* fmt, ...) {
 bool CameraController::Init() {
     if (m_initialized) return true;
     m_callback = new DeviceCallback(this);
-    if (!SDK::Init(0)) {
+    if (!InitSDK()) {
         Log(L"SDK::Init FAILED");
         delete m_callback; m_callback = nullptr;
         return false;
@@ -103,11 +141,14 @@ bool CameraController::Init() {
 
 void CameraController::Shutdown() {
     Disconnect();
-    if (m_initialized) { SDK::Release(); m_initialized = false; }
+    if (m_initialized) {
+        m_initialized = false;
+        ReleaseSDK();
+    }
     delete m_callback; m_callback = nullptr;
 }
 
-bool CameraController::Connect(int enumTimeoutSec, int connectTimeoutMs) {
+bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int connectTimeoutMs) {
     if (!m_initialized) return false;
     if (m_connected) Disconnect();
 
@@ -119,9 +160,28 @@ bool CameraController::Connect(int enumTimeoutSec, int connectTimeoutMs) {
         return false;
     }
 
-    const auto* info0 = pEnum->GetCameraObjectInfo(0);
-    m_model = (info0 && info0->GetModel()) ? info0->GetModel() : L"Unknown";
-    auto* info = const_cast<SDK::ICrCameraObjectInfo*>(info0);
+    // Znajdź kamerę po GUID lub weź pierwszą (guid==nullptr → compat tryb)
+    const SDK::ICrCameraObjectInfo* target = nullptr;
+    CrInt32u camCount = pEnum->GetCount();
+    if (guid && *guid) {
+        for (CrInt32u i = 0; i < camCount; ++i) {
+            const auto* ci = pEnum->GetCameraObjectInfo(i);
+            if (ci && ci->GetGuid() && wcscmp(ci->GetGuid(), guid) == 0) {
+                target = ci; break;
+            }
+        }
+        if (!target) {
+            pEnum->Release();
+            Logf(L"Connect: kamera GUID '%s' nie znaleziona", guid);
+            return false;
+        }
+    } else {
+        target = pEnum->GetCameraObjectInfo(0);
+    }
+
+    m_model = (target->GetModel() && *target->GetModel()) ? target->GetModel() : L"Unknown";
+    m_guid  = (target->GetGuid()  && *target->GetGuid())  ? target->GetGuid()  : L"";
+    auto* info = const_cast<SDK::ICrCameraObjectInfo*>(target);
 
     SDK::CrDeviceHandle h = 0;
     m_connectedSig = false;
