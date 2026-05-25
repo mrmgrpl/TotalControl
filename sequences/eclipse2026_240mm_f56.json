@@ -1,0 +1,298 @@
+{
+  "name": "TSE-2026 | 240mm f/5.6 | ISO 100 | szerokokątna korona zewnętrzna",
+  "notes": [
+    "Setup    : Sony A7R IVA + 240mm f/5.6, ISO 100, stałe przez całą sesję",
+    "ND filter: wymagany dla faz częściowych (ND 5.0 = 1/100 000)",
+    "Lokalizacja: 003°33'07.88\"W, 41°56'40.51\"N, 1290m",
+    "C1  = 2026-08-12T19:34:06.000Z  h=18.1°",
+    "C2  = 2026-08-12T20:29:02.100Z  h= 8.0°",
+    "C3  = 2026-08-12T20:30:46.000Z  h= 7.7°",
+    "Max = 2026-08-12T20:29:54.050Z  (midpoint totality)",
+    "Totality = 103.9s",
+    "Sunset   = 2026-08-12T21:18:51Z",
+    "",
+    "Formula: t = f²/(ISO × 2^Q_eff), Q_eff = Q − ΔEV",
+    "ΔEV(h=8°) = 0.13/sin(8°) ≈ 0.94 EV",
+    "",
+    "Ekspozycje (f/5.6, ISO 100, h=8°, ΔEV=0.94):",
+    "  Diamond Ring / Chromosphere  Q= 8  Q_eff= 7.06  t≈1/400s",
+    "  Prominences                  Q= 9  Q_eff= 8.06  t≈1/850s",
+    "  Inner corona < 0.1 R☉       Q= 7  Q_eff= 6.06  t≈1/213s",
+    "  Inner corona < 0.2 R☉       Q= 5  Q_eff= 4.06  t≈1/53s",
+    "  Middle corona < 0.5 R☉      Q= 3  Q_eff= 2.06  t≈1/13s",
+    "  Corona < 1.0 R☉             Q= 1  Q_eff= 0.06  t≈0.30s",
+    "  Corona < 2.0 R☉             Q= 0  Q_eff=-0.94  t≈0.60s",
+    "  Corona < 4.0 R☉             Q=-1  Q_eff=-1.94  t≈1.20s",
+    "  Corona < 8.0 R☉             Q=-3  Q_eff=-3.94  t≈4.79s  → single",
+    "  Earthshine                  Q=-5  Q_eff=-5.94  t≈19.3s  → single",
+    "",
+    "Budżet czasowy totalności (103.9s):",
+    "  Fazy szybkie (chromosphere→middle): ~15s",
+    "  Bracket 1R☉ (0.3s center, 5kl.):    ~4s",
+    "  Bracket 2R☉ (0.6s center, 5kl.):    ~6s",
+    "  Bracket 4R☉ (1.2s center, 5kl.):   ~11s",
+    "  Single 8R☉ (5s):                     ~6s",
+    "  Earthshine single (20s):            ~21s",
+    "  Mirror post-max (4R☉+2R☉+fast):    ~22s",
+    "  Razem: ~85s — zapas ~18s na overhead i C3 Diamond Ring"
+  ],
+
+  "steps": [
+
+    {
+      "_section": "=== FAZA CZĘŚCIOWA C1 → C2-30s (z filtrem ND 5.0) ===",
+      "at":          "2026-08-12T19:34:06.000Z",
+      "until":       "2026-08-12T20:28:32.000Z",
+      "interval_ms": 60000,
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/500",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "label": "C1-partial-ND5"
+    },
+
+    {
+      "_section": "=== DIAMOND RING przed C2 ===",
+      "at":    "2026-08-12T20:28:56.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "1/400",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 5000,
+      "label": "diamond-ring-pre-C2"
+    },
+
+    {
+      "_section": "=== TOTALNOŚĆ — seria wstępująca ===",
+
+      "at":    "2026-08-12T20:29:04.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/1000",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "chromosphere-prominences"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:09.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/200",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "inner-corona-01Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:14.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/50",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "inner-corona-02Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:19.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/13",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "middle-corona-05Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:24.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "0.3s",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 15000,
+      "label": "corona-1Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:31.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "0.6s",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 20000,
+      "label": "corona-2Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:40.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1.2s",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 30000,
+      "label": "corona-4Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:53.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "5s",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "corona-8Rs-single"
+    },
+
+    {
+      "_note": "Earthshine: t_NASA = 19.3s. Start 9.5s przed midpoint (20:29:54.05Z) → 20:29:44.5Z",
+      "at":    "2026-08-12T20:29:44.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "20s",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 30000,
+      "label": "Earthshine"
+    },
+
+    {
+      "_section": "=== TOTALNOŚĆ — seria zstępująca (post-max) ===",
+
+      "at":    "2026-08-12T20:30:06.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1.2s",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 30000,
+      "label": "corona-4Rs-post"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:20.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "0.6s",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 20000,
+      "label": "corona-2Rs-post"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:28.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "0.3s",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 15000,
+      "label": "corona-1Rs-post"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:35.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/50",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "inner-corona-post"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:40.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/1000",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "chromosphere-post"
+    },
+
+    {
+      "_section": "=== DIAMOND RING C3 ===",
+      "at":    "2026-08-12T20:30:46.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "1/400",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "timeout_ms": 5000,
+      "label": "diamond-ring-C3"
+    },
+
+    {
+      "_section": "=== FAZA CZĘŚCIOWA C3+30s → zmrok (z filtrem ND 5.0) ===",
+      "at":          "2026-08-12T20:31:16.000Z",
+      "until":       "2026-08-12T21:10:00.000Z",
+      "interval_ms": 60000,
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/500",
+      "iso":   100,
+      "f":     5.6,
+      "store": "card",
+      "label": "C3-partial-ND5"
+    }
+
+  ]
+}

@@ -1,0 +1,287 @@
+{
+  "name": "TSE-2026 | 900mm f/10 | ISO 100 (Earthshine ISO 400) | korona wewnętrzna",
+  "notes": [
+    "Setup    : Sony A7R IVA + 900mm f/10, ISO 100 (z wyjątkiem Earthshine: ISO 400)",
+    "ND filter: wymagany dla faz częściowych (ND 5.0 = 1/100 000)",
+    "Lokalizacja: 003°33'07.88\"W, 41°56'40.51\"N, 1290m",
+    "C1  = 2026-08-12T19:34:06.000Z  h=18.1°",
+    "C2  = 2026-08-12T20:29:02.100Z  h= 8.0°",
+    "C3  = 2026-08-12T20:30:46.000Z  h= 7.7°",
+    "Max = 2026-08-12T20:29:54.050Z  (midpoint totality)",
+    "Totality = 103.9s",
+    "Sunset   = 2026-08-12T21:18:51Z",
+    "",
+    "Formula: t = f²/(ISO × 2^Q_eff), Q_eff = Q − ΔEV",
+    "ΔEV(h=8°) = 0.13/sin(8°) ≈ 0.94 EV",
+    "f/10, ISO 100 → f²/ISO = 1.0 (→ t = 2^(-Q_eff) bezpośrednio)",
+    "",
+    "Ekspozycje (f/10, ISO 100, h=8°, ΔEV=0.94):",
+    "  Diamond Ring / Chromosphere  Q= 8  Q_eff= 7.06  t≈1/133s  ≈1/125s",
+    "  Chromosphere                 Q=11  Q_eff=10.06  t≈1/1065s ≈1/1000s",
+    "  Prominences                  Q= 9  Q_eff= 8.06  t≈1/266s  ≈1/250s",
+    "  Inner corona < 0.1 R☉       Q= 7  Q_eff= 6.06  t≈1/67s   ≈1/60s",
+    "  Inner corona < 0.2 R☉       Q= 5  Q_eff= 4.06  t≈1/16.7s ≈1/15s",
+    "  Middle corona < 0.5 R☉      Q= 3  Q_eff= 2.06  t≈0.240s  ≈0.25s",
+    "  Corona < 1.0 R☉             Q= 1  Q_eff= 0.06  t≈0.959s  ≈1s",
+    "  Corona < 2.0 R☉             Q= 0  Q_eff=-0.94  t≈1.91s   ≈2s",
+    "  Corona < 4.0 R☉             Q=-1  Q_eff=-1.94  t≈3.82s   ≈4s  (single/3-kl.)",
+    "  Earthshine@ISO100            Q=-5  Q_eff=-5.94  t≈61.4s   NIEMOŻLIWE w 103.9s",
+    "  Earthshine@ISO400            Q=-5  Q_eff=-5.94  t≈15.3s   ← używane w tej sekwencji",
+    "",
+    "UWAGA — Earthshine: ten krok używa iso=400 (nadpisuje ISO dla jednego ujęcia).",
+    "Następny krok z iso=100 przywróci wartość przez SetPropCached.",
+    "",
+    "Budżet czasowy totalności (103.9s):",
+    "  Fazy szybkie (chromosphere→inner): ~15s",
+    "  Bracket middle (0.25s center):      ~3s",
+    "  Bracket 1R☉ (1s center, 5kl.):     ~8s",
+    "  3-frame 2R☉ (2s center, ±1EV):     ~9s",
+    "  3-frame 4R☉ (4s center, ±1EV):    ~17s",
+    "  Earthshine single @ISO400 (15s):   ~17s",
+    "  Mirror post-max (4R☉+2R☉+1R☉):   ~28s",
+    "  Razem: ~97s — zapas ~7s na overhead i C3",
+    "",
+    "FOV przy 900mm: ~2.3° szerokości. Słońce zajmuje ~23% kadru.",
+    "Korona powyżej ~4R☉ prawdopodobnie poza kadrem — specjalizacja w detalu."
+  ],
+
+  "steps": [
+
+    {
+      "_section": "=== FAZA CZĘŚCIOWA C1 → C2-30s (z filtrem ND 5.0) ===",
+      "at":          "2026-08-12T19:34:06.000Z",
+      "until":       "2026-08-12T20:28:32.000Z",
+      "interval_ms": 60000,
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/160",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "label": "C1-partial-ND5"
+    },
+
+    {
+      "_section": "=== DIAMOND RING przed C2 ===",
+      "at":    "2026-08-12T20:28:56.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "1/125",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 5000,
+      "label": "diamond-ring-pre-C2"
+    },
+
+    {
+      "_section": "=== TOTALNOŚĆ — seria wstępująca ===",
+
+      "at":    "2026-08-12T20:29:03.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/1000",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "chromosphere"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:08.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/250",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "prominences"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:13.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/60",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "inner-corona-01Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:18.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/15",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "inner-corona-02Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:23.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "0.25s",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 15000,
+      "label": "middle-corona-05Rs"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:28.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1s",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 20000,
+      "label": "corona-1Rs"
+    },
+
+    {
+      "_note": "3-frame ±1EV: 1s / 2s / 4s — oszczędność czasu vs 5-frame",
+      "at":    "2026-08-12T20:29:39.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 3,
+      "mode":  "cont",
+      "ss":    "2s",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 20000,
+      "label": "corona-2Rs"
+    },
+
+    {
+      "_note": "3-frame ±1EV: 2s / 4s / 8s — korona 4R☉, może być poza kadrem 900mm",
+      "at":    "2026-08-12T20:29:51.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 3,
+      "mode":  "cont",
+      "ss":    "4s",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 25000,
+      "label": "corona-4Rs"
+    },
+
+    {
+      "_note": [
+        "Earthshine: t@ISO100=61s (niemożliwe), t@ISO400=15.3s (użyte tutaj).",
+        "iso=400 nadpisuje globalne ISO=100 tylko dla tego kroku.",
+        "Następny bracket z iso=100 przywróci oryginalną wartość.",
+        "Start: midpoint(20:29:54.05Z) - 15.3s/2 = 20:29:46.4Z"
+      ],
+      "at":    "2026-08-12T20:30:06.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "15s",
+      "iso":   400,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 25000,
+      "label": "Earthshine-ISO400"
+    },
+
+    {
+      "_section": "=== TOTALNOŚĆ — seria zstępująca (post-max) ===",
+
+      "at":    "2026-08-12T20:30:23.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 3,
+      "mode":  "cont",
+      "ss":    "4s",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 25000,
+      "label": "corona-4Rs-post"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:35.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 3,
+      "mode":  "cont",
+      "ss":    "2s",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 20000,
+      "label": "corona-2Rs-post"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:42.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/250",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 10000,
+      "label": "chromosphere-post"
+    },
+
+    {
+      "_section": "=== DIAMOND RING C3 ===",
+      "at":    "2026-08-12T20:30:46.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "1/125",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "timeout_ms": 5000,
+      "label": "diamond-ring-C3"
+    },
+
+    {
+      "_section": "=== FAZA CZĘŚCIOWA C3+30s → zmrok (z filtrem ND 5.0) ===",
+      "at":          "2026-08-12T20:31:16.000Z",
+      "until":       "2026-08-12T21:10:00.000Z",
+      "interval_ms": 60000,
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "mode":  "cont",
+      "ss":    "1/160",
+      "iso":   100,
+      "f":     10.0,
+      "store": "card",
+      "label": "C3-partial-ND5"
+    }
+
+  ]
+}
