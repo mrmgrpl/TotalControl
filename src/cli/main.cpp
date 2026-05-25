@@ -154,6 +154,9 @@ static void Usage() {
         "  TotalControlCLI set <prop> <val>\n"
         "  TotalControlCLI cmd <id> [--param 1] [--press]\n"
         "  TotalControlCLI quit\n"
+        "  TotalControlCLI seq_start <path/to/sequence.json>\n"
+        "  TotalControlCLI seq_stop\n"
+        "  TotalControlCLI seq_status\n"
         "\n"
         "Global flags:\n"
         "  --nolog    disable logging to TotalControlCLI.log\n"
@@ -168,7 +171,7 @@ static void Usage() {
         "  focus-area  drive-mode  white-balance  color-temp  image-size\n"
         "  file-type  metering-mode  store-dest  bracket-order  priority-key\n"
         "  battery  battery-level  remaining  slot1-remaining  slot2-remaining\n"
-        "  slot1-status  slot2-status  focus-ind  model\n"
+        "  slot1-status  slot2-status  slot1-writing  slot2-writing  focus-ind  model\n"
         "\n"
         "Exposure mode values:  M  P  A  S\n"
         "Focus mode values:     MF  AF-S  AF-C  AF-A  DMF\n"
@@ -280,6 +283,15 @@ int wmain(int argc, wchar_t* argv[]) {
         if (HasFlag(args, "--press")) req += ",\"press\":true";
         req += "}";
     }
+    else if (cmd == "seq_start" && args.size() >= 2) {
+        req = "{\"cmd\":\"seq_start\",\"file\":" + Q(args[1]) + "}";
+    }
+    else if (cmd == "seq_stop") {
+        req = "{\"cmd\":\"seq_stop\"}";
+    }
+    else if (cmd == "seq_status") {
+        req = "{\"cmd\":\"seq_status\"}";
+    }
     else {
         Log("ERR: unknown command: " + cmd);
         Usage(); return 1;
@@ -306,14 +318,14 @@ int wmain(int argc, wchar_t* argv[]) {
             return 1;
         }
         fprintf(stderr, "tc: starting daemon");
-        for (int i = 0; i < 20 && pipe == INVALID_HANDLE_VALUE; ++i) {
+        for (int i = 0; i < 180 && pipe == INVALID_HANDLE_VALUE; ++i) {
             Sleep(500);
-            fputc('.', stderr);
+            if (i % 20 == 19) fputc('.', stderr);  // jeden '.' co 10s
             pipe = TryOpenPipe();
         }
         fputc('\n', stderr);
         if (pipe == INVALID_HANDLE_VALUE) {
-            Log("ERR: daemon did not open pipe within 10s");
+            Log("ERR: daemon did not open pipe within 90s");
             fprintf(stderr, "tc: daemon did not start in time\n");
             return 1;
         }
@@ -376,6 +388,8 @@ int wmain(int argc, wchar_t* argv[]) {
         pn("slot2_remaining");
         ps("slot1_status");
         ps("slot2_status");
+        ps("slot1_writing");
+        ps("slot2_writing");
         ps("ss");
         pn("iso");
         pn("f");
@@ -391,6 +405,20 @@ int wmain(int argc, wchar_t* argv[]) {
         ps("file_type");
         ps("metering");
         ps("store");
+    }
+    else if (cmd == "seq_start" || cmd == "seq_stop" || cmd == "seq_status") {
+        auto state = JStr(resp, "seq_state");
+        auto total = JNum(resp, "seq_total");
+        auto done  = JNum(resp, "seq_done");
+        auto skip  = JNum(resp, "seq_skip");
+        auto fail  = JNum(resp, "seq_fail");
+        auto file  = JStr(resp, "seq_file");
+        auto err   = JStr(resp, "seq_error");
+        if (!state.empty()) printf("state=%s\n", state.c_str());
+        if (!total.empty()) printf("total=%s  done=%s  skip=%s  fail=%s\n",
+                                   total.c_str(), done.c_str(), skip.c_str(), fail.c_str());
+        if (!file.empty())  printf("file=%s\n",  file.c_str());
+        if (!err.empty())   printf("last_error=%s\n", err.c_str());
     }
     // af / movie / cmd / set / quit: no output on success
 

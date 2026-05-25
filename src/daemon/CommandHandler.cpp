@@ -1,4 +1,5 @@
 #include "CommandHandler.h"
+#include "SequencerEngine.h"
 #include <algorithm>
 #include <cwctype>
 #include <sstream>
@@ -10,6 +11,10 @@ namespace TotalControl {
 
 CommandHandler::CommandHandler(std::vector<CameraController*> cams)
     : m_cams(std::move(cams)) {}
+
+void CommandHandler::SetSequencer(SequencerEngine* seq) {
+    m_seq = seq;
+}
 
 CameraController* CommandHandler::RouteCamera(const std::wstring& req) const {
     if (m_cams.empty()) return nullptr;
@@ -145,6 +150,8 @@ static const PropDef kProps[] = {
     { L"slot2_remaining",   0x070f, 0x0003, false },
     { L"slot1_status",      0x0708, 0x0002, false },
     { L"slot2_status",      0x070d, 0x0002, false },
+    { L"slot1_writing",     0x0773, 0x0003, false },
+    { L"slot2_writing",     0x0774, 0x0003, false },
     { L"focus_indicator",   0x0707, 0x0003, false },
 };
 static const size_t kPropsCount = sizeof(kProps) / sizeof(kProps[0]);
@@ -569,6 +576,8 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
            << L",\"slot2_remaining\":" << s.slot2Remaining
            << L",\"slot1_status\":\"" << s.slot1Status << L"\""
            << L",\"slot2_status\":\"" << s.slot2Status << L"\""
+           << L",\"slot1_writing\":\"" << s.slot1Writing << L"\""
+           << L",\"slot2_writing\":\"" << s.slot2Writing << L"\""
            << L",\"ss\":\""      << s.shutterSpeed  << L"\""
            << L",\"iso\":"       << s.iso
            << L",\"f\":"         << s.fNumber
@@ -611,9 +620,10 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         int latency = 0;
         bool ok;
 
+        std::wstring driveStr = JHas(req, L"drive") ? JStr(req, L"drive") : L"";
+
         if (count > 1) {
             // Burst: resolve drive mode string → code (default cont-hi)
-            std::wstring driveStr = JHas(req, L"drive") ? JStr(req, L"drive") : L"cont-hi";
             uint32_t driveCode = 0x00010001; // cont-hi
             if      (driveStr == L"cont-hi-plus") driveCode = 0x00010004;
             else if (driveStr == L"cont-hi-live") driveCode = 0x00010006;
@@ -623,6 +633,9 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
                                   L"DriveMode(burst)", 2000);
             ok = cam->Shoot(&latency, timeout, count, /*holdForBurst=*/true);
         } else {
+            // Single shot: if "drive":"single" specified, switch drive mode back from bracket
+            if (driveStr == L"single")
+                cam->SetPropAndVerify(0x010e, 0x0003, 0x00000001LL, L"DriveMode(single)", 2000);
             ok = cam->Shoot(&latency, timeout);
         }
 
@@ -912,8 +925,10 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         if (prop == L"remaining")      { respNum(s.remainingShots); return true; }
         if (prop == L"slot1_remaining"){ respNum(s.remainingShots); return true; }
         if (prop == L"slot2_remaining"){ respNum(s.slot2Remaining); return true; }
-        if (prop == L"slot1_status")   { respVal(s.slot1Status); return true; }
-        if (prop == L"slot2_status")   { respVal(s.slot2Status); return true; }
+        if (prop == L"slot1_status")   { respVal(s.slot1Status);  return true; }
+        if (prop == L"slot2_status")   { respVal(s.slot2Status);  return true; }
+        if (prop == L"slot1_writing")  { respVal(s.slot1Writing); return true; }
+        if (prop == L"slot2_writing")  { respVal(s.slot2Writing); return true; }
         if (prop == L"model")          { respVal(s.model); return true; }
 
         // Generic table-driven get via raw prop read
@@ -929,6 +944,37 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         }
         std::wstring decoded = DecodePropValue(pd->code, raw);
         resp = Ok(L"\"val\":\"" + decoded + L"\"");
+        return true;
+    }
+
+    // ── seq_start ─────────────────────────────────────────────────────────────
+    // {"cmd":"seq_start","file":"C:\\sequences\\eclipse.json"}
+    if (cmd == L"seq_start") {
+        if (!m_seq) { resp = Err(L"no_sequencer", L"SequencerEngine not configured"); return true; }
+        if (m_seq->State() == SeqState::Running) {
+            resp = Err(L"already_running", L"seq_stop first"); return true;
+        }
+        std::wstring file = JStr(req, L"file");
+        if (file.empty()) { resp = Err(L"missing_file", L"seq_start requires \"file\""); return true; }
+        std::wstring err = m_seq->Load(file);
+        if (!err.empty()) { resp = Err(L"load_failed", err.c_str()); return true; }
+        if (!m_seq->Start()) { resp = Err(L"start_failed", L"no steps or dispatch not set"); return true; }
+        resp = Ok(m_seq->StatusJson());
+        return true;
+    }
+
+    // ── seq_stop ──────────────────────────────────────────────────────────────
+    if (cmd == L"seq_stop") {
+        if (!m_seq) { resp = Err(L"no_sequencer"); return true; }
+        m_seq->Stop();
+        resp = Ok(m_seq->StatusJson());
+        return true;
+    }
+
+    // ── seq_status ────────────────────────────────────────────────────────────
+    if (cmd == L"seq_status") {
+        if (!m_seq) { resp = Err(L"no_sequencer"); return true; }
+        resp = Ok(m_seq->StatusJson());
         return true;
     }
 

@@ -5,17 +5,23 @@
 
 namespace TotalControl {
 
+class SequencerEngine; // forward declare — no full include needed here
+
 class CommandHandler {
 public:
     // Przyjmuje listę wskaźników do połączonych kamer.
     // "cam":guid lub "cam":index w JSON → routing; brak pola → kamera[0].
     explicit CommandHandler(std::vector<CameraController*> cams);
 
+    // Opcjonalnie: ustaw sekwencer do obsługi seq_start/stop/status.
+    void SetSequencer(SequencerEngine* seq);
+
     // Zwraca false gdy daemon ma się zakończyć (cmd=quit)
     bool Handle(const std::wstring& request, std::wstring& response);
 
 private:
     std::vector<CameraController*> m_cams;
+    SequencerEngine*               m_seq = nullptr;
 
     // Routing: zwraca kamerę na podstawie pola "cam" w JSON lub nullptr jeśli nie znaleziono.
     CameraController* RouteCamera(const std::wstring& req) const;

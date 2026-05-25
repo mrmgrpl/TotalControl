@@ -20,6 +20,25 @@ namespace SDK = SCRSDK;
 
 namespace TotalControl {
 
+// ─── Static helpers ───────────────────────────────────────────────────────────
+
+// Returns the camera's UUID string when available (WiFi/Ethernet cameras).
+// For USB cameras GetGuid() is empty; GetId() contains a null-terminated UTF-16LE
+// string (e.g. serial number), so reinterpret as wchar_t* rather than hex-encoding.
+static std::wstring GuidOrIdHex(const SDK::ICrCameraObjectInfo* info) {
+    if (!info) return L"";
+    const CrChar* g = info->GetGuid();
+    if (g && *g) return g;
+    const CrInt8u* id = info->GetId();
+    const CrInt32u sz = info->GetIdSize();
+    if (!id || sz < sizeof(wchar_t)) return L"";
+    const wchar_t* wid      = reinterpret_cast<const wchar_t*>(id);
+    const size_t   maxChars = sz / sizeof(wchar_t);
+    size_t len = 0;
+    while (len < maxChars && wid[len] != L'\0') ++len;
+    return std::wstring(wid, len);
+}
+
 // ─── Static SDK lifecycle ─────────────────────────────────────────────────────
 
 static std::mutex s_sdkMutex;
@@ -47,7 +66,7 @@ std::vector<CameraInfo> CameraController::Enumerate(int timeoutSec) {
         const auto* info = pEnum->GetCameraObjectInfo(i);
         if (!info) continue;
         CameraInfo ci;
-        if (auto* g  = info->GetGuid();  g  && *g)  ci.guid  = g;
+        ci.guid = GuidOrIdHex(info);
         if (auto* m  = info->GetModel(); m  && *m)  ci.model = m;
         else ci.model = L"Unknown";
         if (auto* nm = info->GetName();  nm && *nm) ci.name  = nm;
@@ -77,20 +96,31 @@ public:
     }
     void OnWarning(CrInt32u w) override {
         if (w == SDK::CrNotify_Captured_Event || w == SDK::CrNotify_All_Download_Complete) {
-            ++m_owner->m_capturedCount;
-            m_owner->m_waitCv.notify_all();
-            m_owner->Logf(L"[CB] Captured 0x%08X count=%d", w, m_owner->m_capturedCount.load());
+            if (CountCapture()) {
+                m_owner->Logf(L"[CB] Captured 0x%08X count=%d", w, m_owner->m_capturedCount.load());
+            } else {
+                m_owner->Logf(L"[CB] Captured 0x%08X SUPPRESSED (count=%d >= target=%d)",
+                              w, m_owner->m_capturedCount.load(), m_owner->m_capturedTarget);
+            }
         }
     }
     void OnCompleteDownload(CrChar* fn, CrInt32u) override {
-        ++m_owner->m_capturedCount;
-        m_owner->m_waitCv.notify_all();
-        m_owner->Logf(L"[CB] Download: %s count=%d", fn ? fn : L"?", m_owner->m_capturedCount.load());
+        if (CountCapture()) {
+            m_owner->Logf(L"[CB] Download: %s count=%d",
+                          fn ? fn : L"?", m_owner->m_capturedCount.load());
+        } else {
+            m_owner->Logf(L"[CB] Download: %s SUPPRESSED (count=%d >= target=%d)",
+                          fn ? fn : L"?",
+                          m_owner->m_capturedCount.load(), m_owner->m_capturedTarget);
+        }
     }
     void OnNotifyPostViewImage(CrChar*, CrInt32u sz) override {
-        ++m_owner->m_capturedCount;
-        m_owner->m_waitCv.notify_all();
-        m_owner->Logf(L"[CB] PostView %u B count=%d", sz, m_owner->m_capturedCount.load());
+        if (CountCapture()) {
+            m_owner->Logf(L"[CB] PostView %u B count=%d", sz, m_owner->m_capturedCount.load());
+        } else {
+            m_owner->Logf(L"[CB] PostView %u B SUPPRESSED (count=%d >= target=%d)",
+                          sz, m_owner->m_capturedCount.load(), m_owner->m_capturedTarget);
+        }
     }
     void OnError(CrInt32u code) override { m_owner->Logf(L"[CB] Error 0x%08X", code); }
 
@@ -112,6 +142,20 @@ public:
 
 private:
     CameraController* m_owner;
+
+    // Atomically increments m_capturedCount only if it is still below m_capturedTarget.
+    // Returns true when the increment happened; false when the event is a stray/late.
+    bool CountCapture() {
+        int cur = m_owner->m_capturedCount.load(std::memory_order_relaxed);
+        while (cur < m_owner->m_capturedTarget) {
+            if (m_owner->m_capturedCount.compare_exchange_weak(
+                    cur, cur + 1, std::memory_order_release, std::memory_order_relaxed)) {
+                m_owner->m_waitCv.notify_all();
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
@@ -174,7 +218,7 @@ bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int conn
     if (guid && *guid) {
         for (CrInt32u i = 0; i < camCount; ++i) {
             const auto* ci = pEnum->GetCameraObjectInfo(i);
-            if (ci && ci->GetGuid() && wcscmp(ci->GetGuid(), guid) == 0) {
+            if (ci && GuidOrIdHex(ci) == guid) {
                 target = ci; break;
             }
         }
@@ -188,7 +232,7 @@ bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int conn
     }
 
     m_model = (target->GetModel() && *target->GetModel()) ? target->GetModel() : L"Unknown";
-    m_guid  = (target->GetGuid()  && *target->GetGuid())  ? target->GetGuid()  : L"";
+    m_guid  = GuidOrIdHex(target);
     auto* info = const_cast<SDK::ICrCameraObjectInfo*>(target);
 
     SDK::CrDeviceHandle h = 0;
@@ -623,6 +667,14 @@ CameraStatus CameraController::GetStatus() {
             }
             break;
         }
+        case SDK::CrDeviceProperty_MediaSLOT1_WritingState:
+            s.slot1Writing = (cur == SDK::CrMediaSlotWritingState_ContentsWriting)
+                             ? L"writing" : L"idle";
+            break;
+        case SDK::CrDeviceProperty_MediaSLOT2_WritingState:
+            s.slot2Writing = (cur == SDK::CrMediaSlotWritingState_ContentsWriting)
+                             ? L"writing" : L"idle";
+            break;
         // ── Exposure ──────────────────────────────────────────────────────────
         case SDK::CrDeviceProperty_ShutterSpeed:
             s.shutterSpeed = DecodeShutterSpeed(cur); break;

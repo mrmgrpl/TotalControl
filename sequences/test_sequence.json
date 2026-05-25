@@ -1,0 +1,40 @@
+{
+  "name": "TestSequence",
+  "notes": [
+    "Test sequence — edit 'at' timestamps to be ~30s in the future before running.",
+    "Run: TotalControlCLI seq_start D:\\Dev\\TotalControl\\sequences\\test_sequence.json",
+    "Then: TotalControlCLI seq_status   (check progress)",
+    "Then: TotalControlCLI seq_stop     (abort if needed)"
+  ],
+  "steps": [
+    {
+      "at":    "2026-05-25T18:00:00.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/100",
+      "iso":   100,
+      "f":     8.0,
+      "label": "test-bracket-1"
+    },
+    {
+      "at":    "2026-05-25T18:00:15.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/200",
+      "iso":   100,
+      "f":     8.0,
+      "label": "test-bracket-2"
+    },
+    {
+      "at":    "2026-05-25T18:00:30.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "1/50",
+      "iso":   100,
+      "f":     8.0,
+      "label": "test-single"
+    }
+  ]
+}

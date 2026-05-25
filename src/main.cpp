@@ -1,4 +1,5 @@
 #include "CameraController.h"
+#include "SequencerEngine.h"
 #include "daemon/PipeServer.h"
 #include "daemon/CommandHandler.h"
 
@@ -51,6 +52,7 @@ static std::wstring ExeDir() {
 // ─── Graceful shutdown on console close / Ctrl+C ─────────────────────────────
 static TotalControl::PipeServer*                       g_server       = nullptr;
 static std::vector<TotalControl::CameraController*>*   g_cams         = nullptr;
+static TotalControl::SequencerEngine*                  g_seq          = nullptr;
 static HANDLE                                          g_shutdownDone = nullptr;
 
 static BOOL WINAPI CtrlHandler(DWORD type) {
@@ -61,6 +63,7 @@ static BOOL WINAPI CtrlHandler(DWORD type) {
     case CTRL_LOGOFF_EVENT:
     case CTRL_SHUTDOWN_EVENT:
         LogLine(L"Signal — inicjuję shutdown...");
+        if (g_seq)  g_seq->Stop();
         if (g_cams)
             for (auto* c : *g_cams) c->RequestShutdown();
         if (g_server) g_server->Stop();
@@ -163,9 +166,16 @@ int main() {
     std::vector<TotalControl::CameraController*> camPtrs;
     for (auto& c : camOwners) camPtrs.push_back(c.get());
 
-    // ── Pipe server ───────────────────────────────────────────────────────────
+    // ── Sequencer + CommandHandler ────────────────────────────────────────────
     TotalControl::CommandHandler handler(camPtrs);
 
+    TotalControl::SequencerEngine seq(LogLine);
+    seq.SetDispatch([&handler](const std::wstring& req, std::wstring& resp) {
+        return handler.Handle(req, resp);
+    });
+    handler.SetSequencer(&seq);
+
+    // ── Pipe server ───────────────────────────────────────────────────────────
     TotalControl::PipeServer server(
         L"\\\\.\\pipe\\TotalControl",
         [&handler](const std::wstring& req, std::wstring& resp) -> bool {
@@ -180,6 +190,7 @@ int main() {
     if (g_shutdownDone == nullptr) LogLine(L"WARN: CreateEventW nie powiodło się");
     g_server = &server;
     g_cams   = &camPtrs;
+    g_seq    = &seq;
     if (!SetConsoleCtrlHandler(CtrlHandler, TRUE))
         LogLine(L"WARN: SetConsoleCtrlHandler nie powiodło się");
 

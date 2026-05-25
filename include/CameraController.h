@@ -31,6 +31,8 @@ struct CameraStatus {
     int          slot2Remaining = 0;
     std::wstring slot1Status;               // "ok","no-card","full","error"
     std::wstring slot2Status;
+    std::wstring slot1Writing;              // "idle","writing"
+    std::wstring slot2Writing;
     // Exposure
     std::wstring shutterSpeed;              // "1/100","25s","bulb"
     int          iso            = 0;

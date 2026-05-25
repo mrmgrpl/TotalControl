@@ -1,0 +1,146 @@
+{
+  "name": "Eclipse2026-Example",
+  "notes": [
+    "C1  = 2026-08-12T19:34:06.000Z  (partial begins)",
+    "C2  = 2026-08-12T20:29:02.100Z  (totality begins)",
+    "Max = 2026-08-12T20:29:54.000Z  (maximum eclipse / Earthshine reference)",
+    "C3  = 2026-08-12T20:30:46.000Z  (totality ends)",
+    "Totality duration = 103.9s",
+    "",
+    "Scheduling rules:",
+    "  - 'at'          : ISO8601 UTC timestamp, ms precision, 'Z' suffix required",
+    "  - 'interval_ms' : repeat every N ms starting at 'at' until 'until' (inclusive)",
+    "  - 'until'       : end timestamp for repeating steps",
+    "  - 'label'       : used in logs only, no effect on execution",
+    "  - All other fields are forwarded verbatim to the camera daemon",
+    "",
+    "Constants in this sequence: iso=100, f=8.0, store=card"
+  ],
+  "steps": [
+    {
+      "at":          "2026-08-12T19:34:06.000Z",
+      "until":       "2026-08-12T20:28:02.000Z",
+      "interval_ms": 60000,
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/500",
+      "iso":   100,
+      "f":     8.0,
+      "store": "card",
+      "label": "C1-partial"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:02.100Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/1000",
+      "iso":   100,
+      "f":     8.0,
+      "label": "C2-chromosphere"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:10.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/250",
+      "iso":   100,
+      "f":     8.0,
+      "label": "C2-prominences"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:20.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/30",
+      "iso":   100,
+      "f":     8.0,
+      "label": "inner-corona"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:30.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/4",
+      "iso":   100,
+      "f":     8.0,
+      "label": "middle-corona"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:40.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "2s",
+      "iso":   100,
+      "f":     8.0,
+      "label": "outer-corona"
+    },
+
+    {
+      "at":    "2026-08-12T20:29:51.000Z",
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "7s",
+      "iso":   100,
+      "f":     8.0,
+      "timeout_ms": 15000,
+      "label": "Earthshine"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:05.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/4",
+      "iso":   100,
+      "f":     8.0,
+      "label": "outer-corona-post"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:20.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/30",
+      "iso":   100,
+      "f":     8.0,
+      "label": "inner-corona-post"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:35.000Z",
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/1000",
+      "iso":   100,
+      "f":     8.0,
+      "label": "C3-chromosphere"
+    },
+
+    {
+      "at":    "2026-08-12T20:30:46.000Z",
+      "until": "2026-08-12T21:15:00.000Z",
+      "interval_ms": 60000,
+      "cmd":   "bracket",
+      "ev":    "1ev",
+      "count": 5,
+      "ss":    "1/500",
+      "iso":   100,
+      "f":     8.0,
+      "label": "C3-partial"
+    }
+  ]
+}
