@@ -181,25 +181,75 @@ static bool HasFlag(const std::vector<std::string>& args, const std::string& fla
     return false;
 }
 
-// Parse --test argument in two forms:
-//   --test C2=2026-08-12T20:29:51.000Z   (contact=utc combined)
-//   --test C2 2026-08-12T20:29:51.000Z   (space-separated)
-//   --test C2=now  |  --test C2 now      ("now" = current UTC)
-// Returns true if --test was found; fills contact and utcStr.
+// Read contact UTC string from JSON file "contacts" section.
+// E.g. ReadContactFromJson("...", "C2") → "2026-08-12T20:29:02.100Z"
+// Returns empty string if not found.
+static std::string ReadContactFromJson(const std::string& path, const std::string& contact) {
+    std::ifstream f(path);
+    if (!f.is_open()) return "";
+    std::string contents((std::istreambuf_iterator<char>(f)),
+                          std::istreambuf_iterator<char>());
+    auto pos = contents.find("\"contacts\"");
+    if (pos == std::string::npos) return "";
+    std::string key = "\"" + contact + "\"";
+    pos = contents.find(key, pos);
+    if (pos == std::string::npos) return "";
+    pos += key.size();
+    while (pos < contents.size() && (contents[pos] == ' ' || contents[pos] == '\t')) ++pos;
+    if (pos >= contents.size() || contents[pos] != ':') return "";
+    ++pos;
+    while (pos < contents.size() && (contents[pos] == ' ' || contents[pos] == '\t')) ++pos;
+    if (pos >= contents.size() || contents[pos] != '"') return "";
+    ++pos;
+    auto end = contents.find('"', pos);
+    if (end == std::string::npos) return "";
+    return contents.substr(pos, end - pos);
+}
+
+// Parse --test argument. Three forms:
+//   --test C2-0s            lead=0 s before C2   (reads C2 UTC from JSON "contacts")
+//   --test C3-20s           lead=20 s before C3
+//   --test C2=2026-...Z     explicit UTC, lead defaults to 15 s
+//   --test C2=now           current UTC as contact, lead 15 s
+//   --test C2 now           same, space-separated
+// Returns true if --test found.
+// utcStr: empty → use contacts from JSON + leadMs; "now" / ISO-8601 → legacy explicit UTC
+// leadMs: milliseconds before contact that the sequence fires (positive = before contact)
 static bool ParseTestArg(const std::vector<std::string>& args,
-                          std::string& contact, std::string& utcStr) {
+                          std::string& contact, std::string& utcStr, long long& leadMs) {
     for (size_t i = 0; i + 1 < args.size(); ++i) {
         if (args[i] != "--test") continue;
         const std::string& val = args[i + 1];
-        auto eq = val.find('=');
-        if (eq != std::string::npos) {
-            contact = val.substr(0, eq);
-            utcStr  = val.substr(eq + 1);
-        } else {
-            contact = val;
-            utcStr  = (i + 2 < args.size()) ? args[i + 2] : "now";
+
+        // New form: Cx-Ns or Cx+Ns  (C2-0s, C3-20s, C2+5s …)
+        if (val.size() >= 3 && val[0] == 'C' && isdigit((unsigned char)val[1])) {
+            size_t signPos = val.find_first_of("+-", 1);
+            if (signPos != std::string::npos && val.back() == 's') {
+                std::string numStr = val.substr(signPos + 1, val.size() - signPos - 2);
+                long long secs = 0;
+                try { secs = std::stoll(numStr); } catch (...) { goto legacy; }
+                contact = val.substr(0, signPos);
+                utcStr  = "";   // signal: read from JSON contacts
+                // '-' = before contact (positive lead), '+' = after (negative lead)
+                leadMs  = (val[signPos] == '-') ? secs * 1000LL : -secs * 1000LL;
+                return true;
+            }
         }
-        return true;
+
+        legacy:
+        // Legacy: C2=<utc> or C2 <utc> or C2 now
+        {
+            auto eq = val.find('=');
+            if (eq != std::string::npos) {
+                contact = val.substr(0, eq);
+                utcStr  = val.substr(eq + 1);
+            } else {
+                contact = val;
+                utcStr  = (i + 2 < args.size()) ? args[i + 2] : "now";
+            }
+            leadMs = 15000;
+            return true;
+        }
     }
     return false;
 }
@@ -254,14 +304,14 @@ static void Usage() {
         "  TotalControlCLI seq_status\n"
         "\n"
         "Test mode (seq_start only):\n"
-        "  --test C2=2026-08-12T20:29:51.000Z   explicit UTC contact time\n"
-        "  --test C2=now                         use current system UTC as contact\n"
-        "  --test C2 now                         same, space-separated\n"
-        "      Shifts all step timestamps so that the specified contact\n"
-        "      (C1/C2/C3/C4) occurs ~15 seconds after launch.\n"
-        "      'now' resolves to the system UTC at the moment of invocation.\n"
+        "  --test C2-0s                          C2 fires NOW  (reads C2 from JSON \"contacts\")\n"
+        "  --test C2-15s                         C2 fires in 15 s\n"
+        "  --test C3-20s                         C3 fires in 20 s\n"
+        "  --test C2=2026-08-12T20:29:51.000Z   explicit UTC, fires in 15 s (legacy)\n"
+        "  --test C2=now                         current UTC as contact, fires in 15 s (legacy)\n"
+        "      Cx-Ns: reads contact time from JSON \"contacts\" section — no typing UTC.\n"
+        "      N=0 → fires immediately;  N=20 → fires in 20 s.\n"
         "      The JSON file is never modified — offset is computed on-the-fly.\n"
-        "      Displays a TEST MODE banner and logs resolved UTC + offset.\n"
         "\n"
         "Global flags:\n"
         "  --nolog      disable logging to TotalControlCLI.log\n"
@@ -393,47 +443,74 @@ int wmain(int argc, wchar_t* argv[]) {
         req = "{\"cmd\":\"seq_start\",\"file\":" + Q(args[1]);
 
         std::string contact, utcStr;
-        if (ParseTestArg(args, contact, utcStr)) {
-            // Resolve "now" keyword → current UTC timestamp
-            bool isNow = (utcStr == "now" || utcStr == "NOW");
+        long long   leadMs = 15000;
+        if (ParseTestArg(args, contact, utcStr, leadMs)) {
             long long contactMs;
             std::string displayUtc;
-            if (isNow) {
-                contactMs  = UtcNowMs();
-                displayUtc = FormatUtcMs(contactMs);
-            } else {
-                contactMs = ParseUtcMs(utcStr);
-                if (contactMs == LLONG_MIN) {
-                    fprintf(stderr, "tc: --test: nieprawidlowy czas UTC: %s\n", utcStr.c_str());
+            std::string sourceTag;
+
+            if (utcStr.empty()) {
+                // New form: Cx-Ns — read contact UTC from JSON "contacts" section
+                displayUtc = ReadContactFromJson(args[1], contact);
+                if (displayUtc.empty()) {
+                    fprintf(stderr,
+                        "tc: --test: kontakt \"%s\" nie znaleziony w sekcji \"contacts\" pliku:\n"
+                        "           %s\n"
+                        "           Dodaj sekcje \"contacts\":{\"C2\":\"2026-...\"}  lub uzyj --test C2=<utc>\n",
+                        contact.c_str(), args[1].c_str());
                     return 1;
                 }
-                displayUtc = utcStr;
+                contactMs  = ParseUtcMs(displayUtc);
+                if (contactMs == LLONG_MIN) {
+                    fprintf(stderr, "tc: --test: nieprawidlowy czas w contacts JSON: %s\n",
+                            displayUtc.c_str());
+                    return 1;
+                }
+                sourceTag = "  (z JSON)";
+            } else {
+                // Legacy form: explicit UTC or "now"
+                bool isNow = (utcStr == "now" || utcStr == "NOW");
+                if (isNow) {
+                    contactMs  = UtcNowMs();
+                    displayUtc = FormatUtcMs(contactMs);
+                    sourceTag  = "  [now]";
+                } else {
+                    contactMs = ParseUtcMs(utcStr);
+                    if (contactMs == LLONG_MIN) {
+                        fprintf(stderr, "tc: --test: nieprawidlowy czas UTC: %s\n",
+                                utcStr.c_str());
+                        return 1;
+                    }
+                    displayUtc = utcStr;
+                }
             }
 
             long long nowMs       = UtcNowMs();
-            long long simOffsetMs = (nowMs + 15000LL) - contactMs;
+            long long simOffsetMs = (nowMs + leadMs) - contactMs;
             req += ",\"sim_offset_ms\":" + std::to_string(simOffsetMs);
 
-            double offsetMin = (double)simOffsetMs / 60000.0;
+            double offsetDays = (double)simOffsetMs / 86400000.0;
             printf("\n");
             printf("  ========================================================\n");
             printf("  ***  TRYB TESTOWY  ***  SYMULACJA SEKWENCJI          ***\n");
             printf("  ========================================================\n");
-            if (isNow)
-                printf("  Kontakt referencyjny : %s = %s  [now]\n",
-                       contact.c_str(), displayUtc.c_str());
+            printf("  Kontakt referencyjny : %s = %s%s\n",
+                   contact.c_str(), displayUtc.c_str(), sourceTag.c_str());
+            printf("  Przesuniecie czasu   : %+lld ms  (%.1f dni)\n",
+                   simOffsetMs, offsetDays);
+            if (leadMs >= 0)
+                printf("  %s nastapi za        : %lld s  od uruchomienia\n",
+                       contact.c_str(), leadMs / 1000LL);
             else
-                printf("  Kontakt referencyjny : %s = %s\n",
-                       contact.c_str(), displayUtc.c_str());
-            printf("  Przesuniecie czasu   : %+lld ms  (%.1f min)\n",
-                   (long long)simOffsetMs, offsetMin);
-            printf("  %s nastapi za        : ~15 sekund od uruchomienia\n", contact.c_str());
+                printf("  %s minal             : %lld s  temu (sekwencja w toku)\n",
+                       contact.c_str(), (-leadMs) / 1000LL);
             printf("  ========================================================\n");
             printf("\n");
 
             if (logging)
                 Log("INF: TEST MODE  contact=" + contact +
-                    "  utc=" + displayUtc + (isNow ? "[now]" : "") +
+                    "  utc=" + displayUtc + sourceTag +
+                    "  lead=" + std::to_string(leadMs) + " ms" +
                     "  offset=" + std::to_string(simOffsetMs) + " ms");
         }
 

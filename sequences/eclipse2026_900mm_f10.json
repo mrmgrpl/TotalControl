@@ -1,6 +1,12 @@
 {
   "name": "TSE-2026 | 900mm f/10 | ISO 100 (Earthshine ISO 400) | korona wewnętrzna",
 
+  "contacts": {
+    "C1": "2026-08-12T19:34:06.000Z",
+    "C2": "2026-08-12T20:29:02.100Z",
+    "C3": "2026-08-12T20:30:46.000Z"
+  },
+
   "notes": [
     "Setup    : Sony A7R IVA + 900mm f/10, ISO 100 (z wyjątkiem Earthshine: ISO 400)",
     "ND filter: wymagany dla faz częściowych (ND 5.0 = 1/100 000)",

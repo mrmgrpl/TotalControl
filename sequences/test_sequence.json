@@ -1,5 +1,10 @@
 {
   "name": "TestSequence",
+
+  "contacts": {
+    "C1": "2026-08-12T12:00:00.000Z"
+  },
+
   "notes": [
     "Test sequence for camera commands (bracket + single shoot).",
     "Step 1 is the C1 reference; steps are spaced 15s apart.",
