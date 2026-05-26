@@ -182,6 +182,25 @@ std::wstring SequencerEngine::Load(const std::wstring& path) {
     std::wstring json = ReadFileW(path, err);
     if (!err.empty()) return err;
 
+    // ── Tryb symulacji ────────────────────────────────────────────────────────
+    // Jeśli JSON zawiera "c2_utc" i "sim_c2_utc", przesuń wszystkie timestampy
+    // tak by prawdziwe C2 wypadło w czasie symulacji. Produkcja: usuń sim_c2_utc.
+    int64_t simOffset = 0;
+    {
+        std::wstring realC2Str = SJStr(json, L"c2_utc");
+        std::wstring simC2Str  = SJStr(json, L"sim_c2_utc");
+        if (!realC2Str.empty() && !simC2Str.empty()) {
+            int64_t realC2Ms = ParseUtcMs(realC2Str);
+            int64_t simC2Ms  = ParseUtcMs(simC2Str);
+            if (realC2Ms > 0 && simC2Ms > 0 && realC2Ms != simC2Ms) {
+                simOffset = simC2Ms - realC2Ms;
+                Logf(L"[SEQ] SYMULACJA aktywna — offset %+lld ms", (long long)simOffset);
+                Logf(L"[SEQ]   prod C2: %s", realC2Str.c_str());
+                Logf(L"[SEQ]   sim  C2: %s", simC2Str.c_str());
+            }
+        }
+    }
+
     auto rawSteps = ExtractSteps(json);
     Logf(L"[SEQ] ExtractSteps: %d obiektów w \"steps\"", (int)rawSteps.size());
     if (rawSteps.empty()) return L"No steps found — check \"steps\" array in file";
@@ -196,7 +215,7 @@ std::wstring SequencerEngine::Load(const std::wstring& path) {
             Logf(L"[SEQ] SKIP (brak 'at')  label='%s'", lbl.c_str());
             ++skipped; continue;
         }
-        int64_t atMs = ParseUtcMs(atStr);
+        int64_t atMs = ParseUtcMs(atStr) + simOffset;
         if (atMs < 0) {
             Logf(L"[SEQ] SKIP (błąd ParseUtcMs)  at='%s'", atStr.c_str());
             ++skipped; continue;
@@ -209,7 +228,7 @@ std::wstring SequencerEngine::Load(const std::wstring& path) {
                              ? SJInt64(stepJson, L"interval_ms") : 0;
         int64_t untilMs = 0;
         if (intervalMs > 0 && SJHas(stepJson, L"until"))
-            untilMs = ParseUtcMs(SJStr(stepJson, L"until"));
+            untilMs = ParseUtcMs(SJStr(stepJson, L"until")) + simOffset;
 
         if (intervalMs > 0 && untilMs > atMs) {
             int idx = 0;
