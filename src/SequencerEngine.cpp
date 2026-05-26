@@ -45,10 +45,13 @@ static int64_t ParseUtcMs(const std::wstring& s) {
 // ─── Local JSON helpers ───────────────────────────────────────────────────────
 
 static std::wstring SJStr(const std::wstring& j, const wchar_t* key) {
-    std::wstring k = std::wstring(L"\"") + key + L"\":\"";
+    std::wstring k = std::wstring(L"\"") + key + L"\":";
     auto pos = j.find(k);
     if (pos == std::wstring::npos) return L"";
     pos += k.size();
+    while (pos < j.size() && iswspace(j[pos])) ++pos;
+    if (pos >= j.size() || j[pos] != L'"') return L"";
+    ++pos;
     // Handle escaped quotes inside the value
     std::wstring result;
     bool escape = false;
