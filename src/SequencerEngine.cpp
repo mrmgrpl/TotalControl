@@ -110,10 +110,17 @@ static std::wstring ReadFileW(const std::wstring& path, std::wstring& err) {
 // Uses bracket-matching with escape/string tracking.
 
 static std::vector<std::wstring> ExtractSteps(const std::wstring& json) {
-    const std::wstring key = L"\"steps\":[";
+    // Find "steps" key, then skip optional whitespace before '['.
+    const std::wstring key = L"\"steps\"";
     auto start = json.find(key);
     if (start == std::wstring::npos) return {};
     start += key.size();
+    while (start < json.size() && iswspace(json[start])) ++start;
+    if (start >= json.size() || json[start] != L':') return {};
+    ++start;
+    while (start < json.size() && iswspace(json[start])) ++start;
+    if (start >= json.size() || json[start] != L'[') return {};
+    ++start;
 
     std::vector<std::wstring> items;
     size_t i = start;
