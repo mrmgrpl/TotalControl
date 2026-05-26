@@ -183,6 +183,7 @@ std::wstring SequencerEngine::Load(const std::wstring& path) {
     if (!err.empty()) return err;
 
     auto rawSteps = ExtractSteps(json);
+    Logf(L"[SEQ] ExtractSteps: %d obiektów w \"steps\"", (int)rawSteps.size());
     if (rawSteps.empty()) return L"No steps found — check \"steps\" array in file";
 
     std::vector<SeqStep> steps;
@@ -190,9 +191,16 @@ std::wstring SequencerEngine::Load(const std::wstring& path) {
 
     for (const auto& stepJson : rawSteps) {
         std::wstring atStr = SJStr(stepJson, L"at");
-        if (atStr.empty()) { ++skipped; continue; }
+        if (atStr.empty()) {
+            std::wstring lbl = SJStr(stepJson, L"label");
+            Logf(L"[SEQ] SKIP (brak 'at')  label='%s'", lbl.c_str());
+            ++skipped; continue;
+        }
         int64_t atMs = ParseUtcMs(atStr);
-        if (atMs < 0) { ++skipped; continue; }
+        if (atMs < 0) {
+            Logf(L"[SEQ] SKIP (błąd ParseUtcMs)  at='%s'", atStr.c_str());
+            ++skipped; continue;
+        }
 
         std::wstring label = SJStr(stepJson, L"label");
 
