@@ -87,6 +87,26 @@ static std::string FormatUtcMs(long long ms) {
     return buf;
 }
 
+// Format countdown: positive → "MM:SS.mmm" / "H:MM:SS.mmm",
+//                   zero/negative → "WYZWALANIE(+Xms)" while executing
+static std::string FormatCountdown(long long ms) {
+    if (ms <= 0) {
+        char b[28];
+        snprintf(b, sizeof(b), "WYZWALANIE(%+lldms)", ms);
+        return b;
+    }
+    long long mss = ms % 1000; ms /= 1000;
+    long long s   = ms % 60;   ms /= 60;
+    long long m   = ms % 60;   ms /= 60;
+    long long h   = ms;
+    char b[24];
+    if (h > 0)
+        snprintf(b, sizeof(b), "%lld:%02lld:%02lld.%03lld", h, m, s, mss);
+    else
+        snprintf(b, sizeof(b), "%02lld:%02lld.%03lld", m, s, mss);
+    return b;
+}
+
 // ─── Pipe ────────────────────────────────────────────────────────────────────
 
 static HANDLE TryOpenPipe() {
@@ -244,7 +264,8 @@ static void Usage() {
         "      Displays a TEST MODE banner and logs resolved UTC + offset.\n"
         "\n"
         "Global flags:\n"
-        "  --nolog    disable logging to TotalControlCLI.log\n"
+        "  --nolog      disable logging to TotalControlCLI.log\n"
+        "  --nomonitor  (seq_start) skip live countdown; return immediately\n"
         "\n"
         "gPhoto2-compatible aliases:\n"
         "  TotalControlCLI --trigger-capture            (= shoot)\n"
@@ -556,6 +577,76 @@ int wmain(int argc, wchar_t* argv[]) {
         auto fail  = JNum(resp, "seq_fail");
         auto file  = JStr(resp, "seq_file");
         auto err   = JStr(resp, "seq_error");
+
+        // ── Live monitoring loop (seq_start only, unless --nomonitor) ─────────
+        if (cmd == "seq_start" && state == "running" && !HasFlag(args, "--nomonitor")) {
+            printf("Sekwencja: uruchomiona  total:%s  %s\n", total.c_str(), file.c_str());
+            printf("Ctrl+C = wyjscie z monitorowania (sekwencja dziala dalej w tle)\n");
+            if (logging) Log("INF: MONITOR START  total=" + total);
+
+            while (true) {
+                Sleep(100);
+
+                HANDLE mp = TryOpenPipe();
+                if (mp == INVALID_HANDLE_VALUE) {
+                    printf("\n[MONITOR] Brak polaczenia z demonem.\n");
+                    break;
+                }
+                std::string sr;
+                bool mok = Talk(mp, R"({"cmd":"seq_status"})", sr);
+                CloseHandle(mp);
+                if (!mok) { printf("\n[MONITOR] Blad odczytu pipe.\n"); break; }
+
+                std::string mstate  = JStr(sr, "seq_state");
+                std::string mTotal  = JNum(sr, "seq_total");
+                std::string mDone   = JNum(sr, "seq_done");
+                std::string mSkip   = JNum(sr, "seq_skip");
+                std::string mFail   = JNum(sr, "seq_fail");
+                std::string mLbl    = JStr(sr, "next_label");
+                std::string mUtc    = JNum(sr, "next_utc_ms");
+                std::string mIdxS   = JNum(sr, "next_index");
+
+                if (mstate != "running") {
+                    printf("\n");
+                    printf("Sekwencja: %-8s  done:%-4s skip:%-4s fail:%-4s\n",
+                           mstate.c_str(), mDone.c_str(), mSkip.c_str(), mFail.c_str());
+                    if (logging)
+                        Log("INF: MONITOR END  state=" + mstate +
+                            "  done=" + mDone + "  skip=" + mSkip + "  fail=" + mFail);
+                    break;
+                }
+
+                // Countdown
+                int ntot  = mTotal.empty() ? 0 : std::stoi(mTotal);
+                int ndone = mDone.empty()  ? 0 : std::stoi(mDone);
+                int nskip = mSkip.empty()  ? 0 : std::stoi(mSkip);
+                int nfail = mFail.empty()  ? 0 : std::stoi(mFail);
+                int nidx  = mIdxS.empty()  ? 0 : (std::stoi(mIdxS) + 1); // 1-based
+
+                char line[120];
+                if (!mUtc.empty()) {
+                    long long waitMs = std::stoll(mUtc) - UtcNowMs();
+                    snprintf(line, sizeof(line),
+                             "[%3d/%-3d  d:%-3d s:%-2d f:%-2d]  %-34s  %s",
+                             nidx, ntot, ndone, nskip, nfail,
+                             mLbl.substr(0, 34).c_str(),
+                             FormatCountdown(waitMs).c_str());
+                } else {
+                    snprintf(line, sizeof(line),
+                             "[---/%-3d  d:%-3d s:%-2d f:%-2d]  oczekiwanie...",
+                             ntot, ndone, nskip, nfail);
+                }
+                // Pad to 79 chars and overwrite line in-place
+                int ln = (int)strlen(line);
+                while (ln < 79) line[ln++] = ' ';
+                line[79] = '\0';
+                printf("%s\r", line);
+                fflush(stdout);
+            }
+            return 0;
+        }
+
+        // ── Default one-shot output (seq_stop, seq_status, --nomonitor) ───────
         if (!state.empty()) printf("state=%s\n", state.c_str());
         if (!total.empty()) printf("total=%s  done=%s  skip=%s  fail=%s\n",
                                    total.c_str(), done.c_str(), skip.c_str(), fail.c_str());

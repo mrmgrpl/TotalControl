@@ -265,6 +265,7 @@ bool SequencerEngine::Start() {
     if (!m_dispatch) return false;
 
     m_stopReq.store(false);
+    m_nextStepIdx.store(0);
     {
         std::lock_guard<std::mutex> lk(m_statMutex);
         m_doneSteps = 0;
@@ -305,6 +306,8 @@ std::wstring SequencerEngine::StatusJson() const {
     default: break;
     }
 
+    int nextIdx = m_nextStepIdx.load();
+
     std::lock_guard<std::mutex> lk(m_statMutex);
     std::wostringstream ss;
     ss << L"\"seq_state\":\"" << stateStr << L"\""
@@ -315,6 +318,16 @@ std::wstring SequencerEngine::StatusJson() const {
        << L",\"seq_file\":\""  << m_loadedFile << L"\"";
     if (!m_lastError.empty())
         ss << L",\"seq_error\":\"" << m_lastError << L"\"";
+    // Next pending step (only when running; m_steps is read-only during execution)
+    if (m_state.load() == SeqState::Running &&
+        nextIdx < m_totalSteps && nextIdx < (int)m_steps.size()) {
+        const SeqStep& ns = m_steps[nextIdx];
+        std::wstring lbl = ns.label;
+        for (wchar_t& c : lbl) if (c == L'"' || c == L'\\') c = L'_';
+        ss << L",\"next_index\":"  << nextIdx
+           << L",\"next_utc_ms\":" << ns.utcMs
+           << L",\"next_label\":\"" << lbl << L"\"";
+    }
     return ss.str();
 }
 
@@ -329,8 +342,12 @@ void SequencerEngine::ThreadProc() {
         steps = m_steps; // local copy — safe to iterate without holding lock
     }
 
-    for (const auto& step : steps) {
+    for (int s = 0; s < (int)steps.size(); ++s) {
         if (m_stopReq.load()) break;
+
+        m_nextStepIdx.store(s); // set BEFORE wait — CLI countdown shows this step
+
+        const SeqStep& step = steps[s];
 
         // Wait until scheduled time, waking every 50ms to check stop flag.
         while (!m_stopReq.load()) {
@@ -372,6 +389,7 @@ void SequencerEngine::ThreadProc() {
         if (!contFlag) { m_stopReq.store(true); break; }
     }
 
+    m_nextStepIdx.store((int)steps.size()); // past-end → no pending step
     m_state.store(m_stopReq.load() ? SeqState::Idle : SeqState::Done);
     Log(m_stopReq.load() ? L"[SEQ] Zatrzymano." : L"[SEQ] Sekwencja zakończona.");
 }

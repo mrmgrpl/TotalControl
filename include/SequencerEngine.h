@@ -54,8 +54,9 @@ private:
     SeqLogFn              m_log;
     std::vector<SeqStep>  m_steps;
     std::thread           m_thread;
-    std::atomic<SeqState> m_state   { SeqState::Idle };
-    std::atomic<bool>     m_stopReq { false };
+    std::atomic<SeqState> m_state      { SeqState::Idle };
+    std::atomic<bool>     m_stopReq   { false };
+    std::atomic<int>      m_nextStepIdx { 0 };  // index of next step to execute (set before wait)
     mutable std::mutex    m_statMutex;
     std::wstring          m_loadedFile;
     std::wstring          m_lastError;
