@@ -38,11 +38,21 @@ CameraController* CommandHandler::RouteCamera(const std::wstring& req) const {
 
 // ─── JSON helpers ─────────────────────────────────────────────────────────────
 
+// Skip whitespace (spaces, tabs, newlines) at position pos in j.
+static void SkipWs(const std::wstring& j, size_t& pos) {
+    while (pos < j.size() &&
+           (j[pos] == L' ' || j[pos] == L'\t' || j[pos] == L'\r' || j[pos] == L'\n'))
+        ++pos;
+}
+
 std::wstring CommandHandler::JStr(const std::wstring& j, const wchar_t* key) {
-    std::wstring k = std::wstring(L"\"") + key + L"\":\"";
+    std::wstring k = std::wstring(L"\"") + key + L"\":";
     auto pos = j.find(k);
     if (pos == std::wstring::npos) return L"";
     pos += k.size();
+    SkipWs(j, pos);
+    if (pos >= j.size() || j[pos] != L'"') return L"";
+    ++pos;
     auto end = j.find(L'"', pos);
     return (end != std::wstring::npos) ? j.substr(pos, end - pos) : L"";
 }
@@ -52,6 +62,7 @@ int CommandHandler::JInt(const std::wstring& j, const wchar_t* key, int def) {
     auto pos = j.find(k);
     if (pos == std::wstring::npos) return def;
     pos += k.size();
+    SkipWs(j, pos);
     if (pos < j.size() && j[pos] == L'"') ++pos;
     try { return std::stoi(j.substr(pos)); } catch (...) { return def; }
 }
@@ -61,6 +72,7 @@ float CommandHandler::JFlt(const std::wstring& j, const wchar_t* key, float def)
     auto pos = j.find(k);
     if (pos == std::wstring::npos) return def;
     pos += k.size();
+    SkipWs(j, pos);
     if (pos < j.size() && j[pos] == L'"') ++pos;
     try { return std::stof(j.substr(pos)); } catch (...) { return def; }
 }
