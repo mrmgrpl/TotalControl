@@ -43,7 +43,7 @@ sequences/                   # pliki JSON sekwencji zdjęciowych
   eclipse2026_example.json         # przykładowa sekwencja TSE 2026
   eclipse2026_240mm_f56.json       # produkcja: 240mm f/5.6 korona zewnętrzna
   eclipse2026_900mm_f10.json       # produkcja: 900mm f/10 korona wewnętrzna (Earthshine ISO=400)
-  test_sequence.json               # sekwencja testowa (edytuj "at" timestamps)
+  test_sequence.json               # sekwencja testowa; C1=2026-08-12T12:00:00Z; uruchom z --test C1=...
 
 docs/
   solar_eclipse_exposure_model.md  # NASA/Espenak formuła, Q-values, Python/C++ kalkulator
@@ -114,6 +114,23 @@ Pole `"cam"` opcjonalne — bez niego komenda → kamera[0].
 `interval_ms` + `until` → krok jest ekspandowany do wielu powtórzeń przy Load().  
 Krok pominięty (SKIP) gdy spóźnienie > 30s. Drift logowany przy każdym kroku.
 
+### Tryb testowy — `--test Cx=<utc>`
+
+Przesuwa wszystkie czasy sekwencji o `simOffsetMs = (now + 15 000) − contactUtcMs`, tak by wskazany kontakt odpalił za ~15 s od startu. JSON nie jest modyfikowany — offset wstrzykiwany jako `sim_offset_ms` do komendy pipe.
+
+```
+# Test sekwencji produkcyjnej — C2 za 15 s od teraz:
+TotalControlCLI seq_start sequences/eclipse2026_240mm_f56.json --test C2=2026-08-12T20:29:02.100Z
+
+# Test z pliku testowego — step-1 za 15 s:
+TotalControlCLI seq_start sequences/test_sequence.json --test C1=2026-08-12T12:00:00.000Z
+
+# "now" — bieżący czas jako kontakt (sens: shift = +15 s, przydatne gdy sekwencja już jest blisko now):
+TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
+```
+
+**WAŻNE:** `--test C2 now` z sekwencją produkcyjną (sierpień 2026) daje `offset = +15 s`, NIE przesuwa kroków do teraz — kroki dalej czekają do sierpnia 2026. Użyj `--test C2=2026-08-12T20:29:02.100Z` (poda dużą ujemną różnicę ~−77 dni) żeby naprawdę przetestować sekvencję teraz.
+
 ## Konwencje kodu
 
 - C++17, MSVC, Unicode (`wchar_t`, `std::wstring`)
@@ -126,7 +143,7 @@ Krok pominięty (SKIP) gdy spóźnienie > 30s. Drift logowany przy każdym kroku
 - `TotalControlCLI.log` — CLI, obok exe, append; wyłącz: `--nolog`
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Stan aktualny (2026-05-26)
+## Stan aktualny (2026-05-27)
 
 | Moduł | Stan |
 |---|---|
@@ -142,6 +159,10 @@ Krok pominięty (SKIP) gdy spóźnienie > 30s. Drift logowany przy każdym kroku
 | DriveMode single | "drive":"single" w shoot → SetPropAndVerify(CrDrive_Single=0x01) |
 | **Singleton mutex** | **`TotalControl_DaemonRunning`** — SRV odrzuca drugi egzemplarz; CLI czeka zamiast odpalać drugi SRV |
 | **SequencerEngine** | **Zaimplementowany** — Load/Start/Stop, UTC ms, repeat steps, seq_* pipe API |
+| **ParseUtcMs** | **Naprawiono** — FILETIME epoch offset: 11 644 473 600 000 ms (był 10× za duży) |
+| **--test Cx=\<utc\>** | **Zaimplementowany** — symulacja sekwencji, przesuwa czasy bez modyfikacji JSON |
+| **--test Cx=now** | **Zaimplementowany** — `now` → bieżący UTC systemu jako czas kontaktu |
+| **Live monitor** | **Zaimplementowany** — po seq_start: odliczanie ms do kolejnego kroku (Ctrl+C = wyjście z monitora) |
 | sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — produkcyjne sekwencje TSE 2026 |
 | docs/ | solar_eclipse_exposure_model.md |
 | Renderer3D / Overlay2D / CameraPreview | Puste stubs |
