@@ -71,6 +71,22 @@ static long long ParseUtcMs(const std::string& s) {
     } catch (...) { return LLONG_MIN; }
 }
 
+// Format ms since Unix epoch → "2026-08-12T20:29:51.123Z"
+static std::string FormatUtcMs(long long ms) {
+    ULARGE_INTEGER ui;
+    ui.QuadPart = (ULONGLONG)(ms + kFileTimeEpochOffsetMs) * 10000ULL;
+    FILETIME ft;
+    ft.dwLowDateTime  = ui.LowPart;
+    ft.dwHighDateTime = ui.HighPart;
+    SYSTEMTIME st = {};
+    if (!FileTimeToSystemTime(&ft, &st)) return "????-??-??T??:??:??.???Z";
+    char buf[28];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+             st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    return buf;
+}
+
 // ─── Pipe ────────────────────────────────────────────────────────────────────
 
 static HANDLE TryOpenPipe() {
@@ -145,6 +161,29 @@ static bool HasFlag(const std::vector<std::string>& args, const std::string& fla
     return false;
 }
 
+// Parse --test argument in two forms:
+//   --test C2=2026-08-12T20:29:51.000Z   (contact=utc combined)
+//   --test C2 2026-08-12T20:29:51.000Z   (space-separated)
+//   --test C2=now  |  --test C2 now      ("now" = current UTC)
+// Returns true if --test was found; fills contact and utcStr.
+static bool ParseTestArg(const std::vector<std::string>& args,
+                          std::string& contact, std::string& utcStr) {
+    for (size_t i = 0; i + 1 < args.size(); ++i) {
+        if (args[i] != "--test") continue;
+        const std::string& val = args[i + 1];
+        auto eq = val.find('=');
+        if (eq != std::string::npos) {
+            contact = val.substr(0, eq);
+            utcStr  = val.substr(eq + 1);
+        } else {
+            contact = val;
+            utcStr  = (i + 2 < args.size()) ? args[i + 2] : "now";
+        }
+        return true;
+    }
+    return false;
+}
+
 // ─── Daemon auto-start ────────────────────────────────────────────────────────
 
 static std::wstring ExeDir() {
@@ -195,11 +234,14 @@ static void Usage() {
         "  TotalControlCLI seq_status\n"
         "\n"
         "Test mode (seq_start only):\n"
-        "  --test C2=2026-08-12T20:29:51.000Z\n"
+        "  --test C2=2026-08-12T20:29:51.000Z   explicit UTC contact time\n"
+        "  --test C2=now                         use current system UTC as contact\n"
+        "  --test C2 now                         same, space-separated\n"
         "      Shifts all step timestamps so that the specified contact\n"
         "      (C1/C2/C3/C4) occurs ~15 seconds after launch.\n"
+        "      'now' resolves to the system UTC at the moment of invocation.\n"
         "      The JSON file is never modified — offset is computed on-the-fly.\n"
-        "      Displays a TEST MODE banner and logs the offset.\n"
+        "      Displays a TEST MODE banner and logs resolved UTC + offset.\n"
         "\n"
         "Global flags:\n"
         "  --nolog    disable logging to TotalControlCLI.log\n"
@@ -329,41 +371,49 @@ int wmain(int argc, wchar_t* argv[]) {
     else if (cmd == "seq_start" && args.size() >= 2) {
         req = "{\"cmd\":\"seq_start\",\"file\":" + Q(args[1]);
 
-        std::string testArg = Arg(args, "--test");
-        if (!testArg.empty()) {
-            auto eq = testArg.find('=');
-            if (eq == std::string::npos) {
-                fprintf(stderr,
-                    "tc: --test wymaga formatu Cx=<utc>  np. --test C2=2026-08-12T20:29:51.000Z\n");
-                return 1;
+        std::string contact, utcStr;
+        if (ParseTestArg(args, contact, utcStr)) {
+            // Resolve "now" keyword → current UTC timestamp
+            bool isNow = (utcStr == "now" || utcStr == "NOW");
+            long long contactMs;
+            std::string displayUtc;
+            if (isNow) {
+                contactMs  = UtcNowMs();
+                displayUtc = FormatUtcMs(contactMs);
+            } else {
+                contactMs = ParseUtcMs(utcStr);
+                if (contactMs == LLONG_MIN) {
+                    fprintf(stderr, "tc: --test: nieprawidlowy czas UTC: %s\n", utcStr.c_str());
+                    return 1;
+                }
+                displayUtc = utcStr;
             }
-            std::string contact = testArg.substr(0, eq);
-            std::string utcStr  = testArg.substr(eq + 1);
-            long long contactMs = ParseUtcMs(utcStr);
-            if (contactMs == LLONG_MIN) {
-                fprintf(stderr, "tc: --test: nieprawidlowy czas UTC: %s\n", utcStr.c_str());
-                return 1;
-            }
+
             long long nowMs       = UtcNowMs();
             long long simOffsetMs = (nowMs + 15000LL) - contactMs;
             req += ",\"sim_offset_ms\":" + std::to_string(simOffsetMs);
 
-            // Baner trybu testowego
             double offsetMin = (double)simOffsetMs / 60000.0;
             printf("\n");
             printf("  ========================================================\n");
             printf("  ***  TRYB TESTOWY  ***  SYMULACJA SEKWENCJI          ***\n");
             printf("  ========================================================\n");
-            printf("  Kontakt referencyjny : %s = %s\n", contact.c_str(), utcStr.c_str());
+            if (isNow)
+                printf("  Kontakt referencyjny : %s = %s  [now]\n",
+                       contact.c_str(), displayUtc.c_str());
+            else
+                printf("  Kontakt referencyjny : %s = %s\n",
+                       contact.c_str(), displayUtc.c_str());
             printf("  Przesuniecie czasu   : %+lld ms  (%.1f min)\n",
                    (long long)simOffsetMs, offsetMin);
-            printf("  %s nastapi za       : ~15 sekund od uruchomienia\n", contact.c_str());
+            printf("  %s nastapi za        : ~15 sekund od uruchomienia\n", contact.c_str());
             printf("  ========================================================\n");
             printf("\n");
 
             if (logging)
-                Log("INF: TEST MODE  contact=" + contact + "  offset=" +
-                    std::to_string(simOffsetMs) + " ms");
+                Log("INF: TEST MODE  contact=" + contact +
+                    "  utc=" + displayUtc + (isNow ? "[now]" : "") +
+                    "  offset=" + std::to_string(simOffsetMs) + " ms");
         }
 
         req += "}";
