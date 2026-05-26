@@ -31,7 +31,9 @@ public:
 
     // Load sequence JSON file. Returns empty string on success, error message on failure.
     // Steps with "interval_ms"+"until" are expanded into individual timed steps.
-    std::wstring Load(const std::wstring& path);
+    // simOffsetMs != 0  activates test mode: all step times are shifted by that value.
+    // Pass (nowMs + 15000 - contactMs) from CLI --test to run as if contact is 15s away.
+    std::wstring Load(const std::wstring& path, int64_t simOffsetMs = 0);
 
     // Start execution thread. Requires prior Load() and SetDispatch().
     bool Start();

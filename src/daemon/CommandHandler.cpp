@@ -949,6 +949,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
     // ── seq_start ─────────────────────────────────────────────────────────────
     // {"cmd":"seq_start","file":"C:\\sequences\\eclipse.json"}
+    // {"cmd":"seq_start","file":"...","sim_offset_ms":-37926976000}  (--test mode)
     if (cmd == L"seq_start") {
         if (!m_seq) { resp = Err(L"no_sequencer", L"SequencerEngine not configured"); return true; }
         if (m_seq->State() == SeqState::Running) {
@@ -956,7 +957,19 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         }
         std::wstring file = JStr(req, L"file");
         if (file.empty()) { resp = Err(L"missing_file", L"seq_start requires \"file\""); return true; }
-        std::wstring err = m_seq->Load(file);
+
+        // Optional test-mode offset injected by CLI --test flag.
+        long long simOffsetMs = 0;
+        if (JHas(req, L"sim_offset_ms")) {
+            const std::wstring key = L"\"sim_offset_ms\":";
+            auto pos = req.find(key);
+            if (pos != std::wstring::npos) {
+                pos += key.size();
+                try { simOffsetMs = std::stoll(req.substr(pos)); } catch (...) {}
+            }
+        }
+
+        std::wstring err = m_seq->Load(file, (int64_t)simOffsetMs);
         if (!err.empty()) { resp = Err(L"load_failed", err.c_str()); return true; }
         if (!m_seq->Start()) { resp = Err(L"start_failed", L"no steps or dispatch not set"); return true; }
         resp = Ok(m_seq->StatusJson());

@@ -35,6 +35,42 @@ static std::string WtoU8(const std::wstring& w) {
     return s;
 }
 
+// ─── UTC helpers (for --test mode) ───────────────────────────────────────────
+
+static const long long kFileTimeEpochOffsetMs = 11644473600000LL;
+
+static long long UtcNowMs() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER ui;
+    ui.LowPart  = ft.dwLowDateTime;
+    ui.HighPart = ft.dwHighDateTime;
+    return (long long)(ui.QuadPart / 10000ULL) - kFileTimeEpochOffsetMs;
+}
+
+// Parse ISO-8601 UTC string "2026-08-12T20:29:51.000Z" → ms since Unix epoch.
+// Returns LLONG_MIN on error.
+static long long ParseUtcMs(const std::string& s) {
+    if (s.size() < 19) return LLONG_MIN;
+    try {
+        SYSTEMTIME st = {};
+        st.wYear         = (WORD)std::stoi(s.substr(0, 4));
+        st.wMonth        = (WORD)std::stoi(s.substr(5, 2));
+        st.wDay          = (WORD)std::stoi(s.substr(8, 2));
+        st.wHour         = (WORD)std::stoi(s.substr(11, 2));
+        st.wMinute       = (WORD)std::stoi(s.substr(14, 2));
+        st.wSecond       = (WORD)std::stoi(s.substr(17, 2));
+        st.wMilliseconds = (s.size() >= 23 && s[19] == '.')
+                           ? (WORD)std::stoi(s.substr(20, 3)) : 0;
+        FILETIME ft;
+        if (!SystemTimeToFileTime(&st, &ft)) return LLONG_MIN;
+        ULARGE_INTEGER ui;
+        ui.LowPart  = ft.dwLowDateTime;
+        ui.HighPart = ft.dwHighDateTime;
+        return (long long)(ui.QuadPart / 10000ULL) - kFileTimeEpochOffsetMs;
+    } catch (...) { return LLONG_MIN; }
+}
+
 // ─── Pipe ────────────────────────────────────────────────────────────────────
 
 static HANDLE TryOpenPipe() {
@@ -154,9 +190,16 @@ static void Usage() {
         "  TotalControlCLI set <prop> <val>\n"
         "  TotalControlCLI cmd <id> [--param 1] [--press]\n"
         "  TotalControlCLI quit\n"
-        "  TotalControlCLI seq_start <path/to/sequence.json>\n"
+        "  TotalControlCLI seq_start <path/to/sequence.json> [--test Cx=<utc>]\n"
         "  TotalControlCLI seq_stop\n"
         "  TotalControlCLI seq_status\n"
+        "\n"
+        "Test mode (seq_start only):\n"
+        "  --test C2=2026-08-12T20:29:51.000Z\n"
+        "      Shifts all step timestamps so that the specified contact\n"
+        "      (C1/C2/C3/C4) occurs ~15 seconds after launch.\n"
+        "      The JSON file is never modified — offset is computed on-the-fly.\n"
+        "      Displays a TEST MODE banner and logs the offset.\n"
         "\n"
         "Global flags:\n"
         "  --nolog    disable logging to TotalControlCLI.log\n"
@@ -284,7 +327,46 @@ int wmain(int argc, wchar_t* argv[]) {
         req += "}";
     }
     else if (cmd == "seq_start" && args.size() >= 2) {
-        req = "{\"cmd\":\"seq_start\",\"file\":" + Q(args[1]) + "}";
+        req = "{\"cmd\":\"seq_start\",\"file\":" + Q(args[1]);
+
+        std::string testArg = Arg(args, "--test");
+        if (!testArg.empty()) {
+            auto eq = testArg.find('=');
+            if (eq == std::string::npos) {
+                fprintf(stderr,
+                    "tc: --test wymaga formatu Cx=<utc>  np. --test C2=2026-08-12T20:29:51.000Z\n");
+                return 1;
+            }
+            std::string contact = testArg.substr(0, eq);
+            std::string utcStr  = testArg.substr(eq + 1);
+            long long contactMs = ParseUtcMs(utcStr);
+            if (contactMs == LLONG_MIN) {
+                fprintf(stderr, "tc: --test: nieprawidlowy czas UTC: %s\n", utcStr.c_str());
+                return 1;
+            }
+            long long nowMs       = UtcNowMs();
+            long long simOffsetMs = (nowMs + 15000LL) - contactMs;
+            req += ",\"sim_offset_ms\":" + std::to_string(simOffsetMs);
+
+            // Baner trybu testowego
+            double offsetMin = (double)simOffsetMs / 60000.0;
+            printf("\n");
+            printf("  ========================================================\n");
+            printf("  ***  TRYB TESTOWY  ***  SYMULACJA SEKWENCJI          ***\n");
+            printf("  ========================================================\n");
+            printf("  Kontakt referencyjny : %s = %s\n", contact.c_str(), utcStr.c_str());
+            printf("  Przesuniecie czasu   : %+lld ms  (%.1f min)\n",
+                   (long long)simOffsetMs, offsetMin);
+            printf("  %s nastapi za       : ~15 sekund od uruchomienia\n", contact.c_str());
+            printf("  ========================================================\n");
+            printf("\n");
+
+            if (logging)
+                Log("INF: TEST MODE  contact=" + contact + "  offset=" +
+                    std::to_string(simOffsetMs) + " ms");
+        }
+
+        req += "}";
     }
     else if (cmd == "seq_stop") {
         req = "{\"cmd\":\"seq_stop\"}";

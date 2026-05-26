@@ -174,7 +174,7 @@ void SequencerEngine::SetDispatch(SeqDispatchFn fn) {
     m_dispatch = std::move(fn);
 }
 
-std::wstring SequencerEngine::Load(const std::wstring& path) {
+std::wstring SequencerEngine::Load(const std::wstring& path, int64_t simOffsetMs) {
     if (m_state.load() == SeqState::Running)
         return L"Cannot load while sequence is running";
 
@@ -183,10 +183,13 @@ std::wstring SequencerEngine::Load(const std::wstring& path) {
     if (!err.empty()) return err;
 
     // ── Tryb symulacji ────────────────────────────────────────────────────────
-    // Jeśli JSON zawiera "c2_utc" i "sim_c2_utc", przesuń wszystkie timestampy
-    // tak by prawdziwe C2 wypadło w czasie symulacji. Produkcja: usuń sim_c2_utc.
+    // Priorytet: parametr simOffsetMs (z CLI --test). Fallback: JSON sim_c2_utc.
     int64_t simOffset = 0;
-    {
+    if (simOffsetMs != 0) {
+        simOffset = simOffsetMs;
+        Logf(L"[SEQ] SYMULACJA aktywna (--test) — offset %+lld ms (%.1f min)",
+             (long long)simOffset, (double)simOffset / 60000.0);
+    } else {
         std::wstring realC2Str = SJStr(json, L"c2_utc");
         std::wstring simC2Str  = SJStr(json, L"sim_c2_utc");
         if (!realC2Str.empty() && !simC2Str.empty()) {
@@ -194,7 +197,7 @@ std::wstring SequencerEngine::Load(const std::wstring& path) {
             int64_t simC2Ms  = ParseUtcMs(simC2Str);
             if (realC2Ms > 0 && simC2Ms > 0 && realC2Ms != simC2Ms) {
                 simOffset = simC2Ms - realC2Ms;
-                Logf(L"[SEQ] SYMULACJA aktywna — offset %+lld ms", (long long)simOffset);
+                Logf(L"[SEQ] SYMULACJA aktywna (JSON sim_c2_utc) — offset %+lld ms", (long long)simOffset);
                 Logf(L"[SEQ]   prod C2: %s", realC2Str.c_str());
                 Logf(L"[SEQ]   sim  C2: %s", simC2Str.c_str());
             }
