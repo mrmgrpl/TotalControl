@@ -1,0 +1,69 @@
+{
+  "name": "TSE-2026 | 240mm | TEST — pojedyncze ujecia, pipeline check",
+
+  "contacts": {
+    "C1": "2026-08-12T19:34:06.000Z",
+    "C2": "2026-08-12T20:29:02.100Z",
+    "C3": "2026-08-12T20:30:46.000Z",
+    "C4": "2026-08-12T21:25:42.000Z"
+  },
+
+  "notes": [
+    "TEST — uproszczona sekwencja do weryfikacji pipeline'u kamery.",
+    "Wszystkie ujecia: f/6.3, ISO 100, 1/1000s, drive=single.",
+    "",
+    "Faza czesc. przed  C1-60s  -> C2-5s  : 1 klatka / 60 s  (~56 kl.)",
+    "Totalnosc          C2-5s   -> C3+5s  : 1 klatka / 1 s   (~114 kl.)",
+    "Faza czesc. po     C3+5s   -> C4+60s : 1 klatka / 60 s  (~56 kl.)",
+    "",
+    "C4 = szacunek (symetria faz: C4-C3 ~= C2-C1 ~= 55 min).",
+    "Swit zachodzi o 21:18:51Z — ujecia po zachodzie moga byc ciemne.",
+    "",
+    "Test natychmiastowy (C2 nastapi za 0 s):",
+    "  TotalControlCLI seq_start sequences/eclipse2026_240mm_test.json --test C2-0s",
+    "  -> partial-pre[*] SKIP (>30s), totality[0..~113] wykona sie natychmiast"
+  ],
+
+  "steps": [
+
+    {
+      "_section": "=== FAZA CZESCIOWA przed totalnoscią (C1-60s -> C2-5s, co 60s) ===",
+      "at":          "2026-08-12T19:33:06.000Z",
+      "until":       "2026-08-12T20:28:57.100Z",
+      "interval_ms": 60000,
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "1/1000",
+      "iso":   100,
+      "f":     6.3,
+      "label": "partial-pre"
+    },
+
+    {
+      "_section": "=== TOTALNOSC (C2-5s -> C3+5s, co 1s) ===",
+      "at":          "2026-08-12T20:28:57.100Z",
+      "until":       "2026-08-12T20:30:51.000Z",
+      "interval_ms": 1000,
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "1/1000",
+      "iso":   100,
+      "f":     6.3,
+      "label": "totality"
+    },
+
+    {
+      "_section": "=== FAZA CZESCIOWA po totalnosci (C3+5s -> C4+60s, co 60s) ===",
+      "at":          "2026-08-12T20:30:51.000Z",
+      "until":       "2026-08-12T21:26:42.000Z",
+      "interval_ms": 60000,
+      "cmd":   "shoot",
+      "drive": "single",
+      "ss":    "1/1000",
+      "iso":   100,
+      "f":     6.3,
+      "label": "partial-post"
+    }
+
+  ]
+}
