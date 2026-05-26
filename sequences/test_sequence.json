@@ -1,14 +1,19 @@
 {
   "name": "TestSequence",
   "notes": [
-    "Test sequence — edit 'at' timestamps to be ~30s in the future before running.",
-    "Run: TotalControlCLI seq_start D:\\Dev\\TotalControl\\sequences\\test_sequence.json",
-    "Then: TotalControlCLI seq_status   (check progress)",
-    "Then: TotalControlCLI seq_stop     (abort if needed)"
+    "Test sequence for camera commands (bracket + single shoot).",
+    "Step 1 is the C1 reference; steps are spaced 15s apart.",
+    "",
+    "Recommended: use --test to shift times to near-now:",
+    "  TotalControlCLI seq_start sequences/test_sequence.json --test C1=2026-08-12T12:00:00.000Z",
+    "  -> step 1 fires ~15 s from launch, step 2 at ~30 s, step 3 at ~45 s",
+    "",
+    "Manual: edit 'at' timestamps to be ~30 s, ~45 s, ~60 s from now, then:",
+    "  TotalControlCLI seq_start sequences/test_sequence.json"
   ],
   "steps": [
     {
-      "at":    "2026-05-25T18:00:00.000Z",
+      "at":    "2026-08-12T12:00:00.000Z",
       "cmd":   "bracket",
       "ev":    "1ev",
       "count": 5,
@@ -18,7 +23,7 @@
       "label": "test-bracket-1"
     },
     {
-      "at":    "2026-05-25T18:00:15.000Z",
+      "at":    "2026-08-12T12:00:15.000Z",
       "cmd":   "bracket",
       "ev":    "1ev",
       "count": 5,
@@ -28,7 +33,7 @@
       "label": "test-bracket-2"
     },
     {
-      "at":    "2026-05-25T18:00:30.000Z",
+      "at":    "2026-08-12T12:00:30.000Z",
       "cmd":   "shoot",
       "drive": "single",
       "ss":    "1/50",
