@@ -8,7 +8,7 @@ namespace TotalControl {
 
 // ─── UTC helpers ──────────────────────────────────────────────────────────────
 
-static const ULONGLONG kFileTimeEpochOffsetMs = 116444736000000ULL; // ms from 1601 to 1970
+static const ULONGLONG kFileTimeEpochOffsetMs = 11644473600000ULL; // ms from 1601-01-01 to 1970-01-01
 
 static int64_t UtcNowMs() {
     FILETIME ft;
