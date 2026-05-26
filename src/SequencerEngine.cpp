@@ -183,25 +183,12 @@ std::wstring SequencerEngine::Load(const std::wstring& path, int64_t simOffsetMs
     if (!err.empty()) return err;
 
     // ── Tryb symulacji ────────────────────────────────────────────────────────
-    // Priorytet: parametr simOffsetMs (z CLI --test). Fallback: JSON sim_c2_utc.
+    // Aktywowany przez CLI --test Cx=<utc>  →  simOffsetMs = (now+15s) - contact_utc
     int64_t simOffset = 0;
     if (simOffsetMs != 0) {
         simOffset = simOffsetMs;
         Logf(L"[SEQ] SYMULACJA aktywna (--test) — offset %+lld ms (%.1f min)",
              (long long)simOffset, (double)simOffset / 60000.0);
-    } else {
-        std::wstring realC2Str = SJStr(json, L"c2_utc");
-        std::wstring simC2Str  = SJStr(json, L"sim_c2_utc");
-        if (!realC2Str.empty() && !simC2Str.empty()) {
-            int64_t realC2Ms = ParseUtcMs(realC2Str);
-            int64_t simC2Ms  = ParseUtcMs(simC2Str);
-            if (realC2Ms > 0 && simC2Ms > 0 && realC2Ms != simC2Ms) {
-                simOffset = simC2Ms - realC2Ms;
-                Logf(L"[SEQ] SYMULACJA aktywna (JSON sim_c2_utc) — offset %+lld ms", (long long)simOffset);
-                Logf(L"[SEQ]   prod C2: %s", realC2Str.c_str());
-                Logf(L"[SEQ]   sim  C2: %s", simC2Str.c_str());
-            }
-        }
     }
 
     auto rawSteps = ExtractSteps(json);
