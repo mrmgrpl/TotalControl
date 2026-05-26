@@ -49,6 +49,9 @@ static std::wstring ExeDir() {
     return buf;
 }
 
+// ─── Singleton mutex — zapobiega uruchomieniu drugiego egzemplarza SRV ────────
+static HANDLE g_singletonMutex = nullptr;
+
 // ─── Graceful shutdown on console close / Ctrl+C ─────────────────────────────
 static TotalControl::PipeServer*                       g_server       = nullptr;
 static std::vector<TotalControl::CameraController*>*   g_cams         = nullptr;
@@ -92,6 +95,14 @@ int main() {
     LogLine(L"║  pipe: \\\\.\\pipe\\TotalControl         ║");
     LogLine(L"║  zamknij: TotalControlCLI quit       ║");
     LogLine(L"╚══════════════════════════════════════╝");
+
+    // ── Singleton — blokuj drugi egzemplarz SRV ───────────────────────────────
+    g_singletonMutex = CreateMutexW(nullptr, TRUE, L"TotalControl_DaemonRunning");
+    if (g_singletonMutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
+        LogLine(L"BŁĄD: daemon już działa — drugi egzemplarz odrzucony");
+        if (g_singletonMutex) CloseHandle(g_singletonMutex);
+        return 4;
+    }
 
     // ── Init SDK ──────────────────────────────────────────────────────────────
     LogLine(L"Inicjalizacja SDK...");
@@ -203,6 +214,7 @@ int main() {
     TotalControl::CameraController::ReleaseSDK(); // finalny decrement (z InitSDK w main)
     LogLine(L"Daemon zakończony.");
     if (g_shutdownDone) { SetEvent(g_shutdownDone); CloseHandle(g_shutdownDone); }
+    if (g_singletonMutex) { ReleaseMutex(g_singletonMutex); CloseHandle(g_singletonMutex); }
     g_logFile.close();
     return 0;
 }

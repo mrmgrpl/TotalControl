@@ -309,15 +309,25 @@ int wmain(int argc, wchar_t* argv[]) {
             fprintf(stderr, "tc: pipe error %lu\n", err);
             return 1;
         }
-        Log("INF: pipe not found, launching TotalControlSRV.exe");
-        if (!LaunchDaemon()) {
-            Log("ERR: CreateProcess(TotalControlSRV.exe) failed, err=" +
-                std::to_string(GetLastError()));
-            fprintf(stderr, "tc: cannot start TotalControl.exe (dir: %s)\n",
-                    WtoU8(ExeDir()).c_str());
-            return 1;
+        // Sprawdź czy SRV jest już w trakcie startu (trzyma singleton mutex).
+        HANDLE srvMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"TotalControl_DaemonRunning");
+        bool srvAlreadyStarting = (srvMutex != nullptr);
+        if (srvMutex) CloseHandle(srvMutex);
+
+        if (srvAlreadyStarting) {
+            Log("INF: SRV już startuje (mutex znaleziony) — czekam na pipe");
+            fprintf(stderr, "tc: daemon already starting");
+        } else {
+            Log("INF: pipe not found, launching TotalControlSRV.exe");
+            if (!LaunchDaemon()) {
+                Log("ERR: CreateProcess(TotalControlSRV.exe) failed, err=" +
+                    std::to_string(GetLastError()));
+                fprintf(stderr, "tc: cannot start TotalControl.exe (dir: %s)\n",
+                        WtoU8(ExeDir()).c_str());
+                return 1;
+            }
+            fprintf(stderr, "tc: starting daemon");
         }
-        fprintf(stderr, "tc: starting daemon");
         for (int i = 0; i < 180 && pipe == INVALID_HANDLE_VALUE; ++i) {
             Sleep(500);
             if (i % 20 == 19) fputc('.', stderr);  // jeden '.' co 10s
