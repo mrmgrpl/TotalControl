@@ -40,8 +40,10 @@ include/
   SequencerEngine.h          # SeqStep, SeqState, SequencerEngine class
 
 sequences/                   # pliki JSON sekwencji zdjęciowych
-  eclipse2026_example.json   # przykładowa sekwencja TSE 2026
-  test_sequence.json         # sekwencja testowa (edytuj "at" timestamps)
+  eclipse2026_example.json         # przykładowa sekwencja TSE 2026
+  eclipse2026_240mm_f56.json       # produkcja: 240mm f/5.6 korona zewnętrzna
+  eclipse2026_900mm_f10.json       # produkcja: 900mm f/10 korona wewnętrzna (Earthshine ISO=400)
+  test_sequence.json               # sekwencja testowa (edytuj "at" timestamps)
 
 docs/
   solar_eclipse_exposure_model.md  # NASA/Espenak formuła, Q-values, Python/C++ kalkulator
@@ -124,7 +126,7 @@ Krok pominięty (SKIP) gdy spóźnienie > 30s. Drift logowany przy każdym kroku
 - `TotalControlCLI.log` — CLI, obok exe, append; wyłącz: `--nolog`
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Stan aktualny (2026-05-25)
+## Stan aktualny (2026-05-26)
 
 | Moduł | Stan |
 |---|---|
@@ -138,11 +140,20 @@ Krok pominięty (SKIP) gdy spóźnienie > 30s. Drift logowany przy każdym kroku
 | CountCapture CAS | Ochrona m_capturedCount przed stray late events |
 | WritingState | slot1_writing / slot2_writing w status + get |
 | DriveMode single | "drive":"single" w shoot → SetPropAndVerify(CrDrive_Single=0x01) |
+| **Singleton mutex** | **`TotalControl_DaemonRunning`** — SRV odrzuca drugi egzemplarz; CLI czeka zamiast odpalać drugi SRV |
 | **SequencerEngine** | **Zaimplementowany** — Load/Start/Stop, UTC ms, repeat steps, seq_* pipe API |
-| sequences/ | eclipse2026_example.json + test_sequence.json |
+| sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — produkcyjne sekwencje TSE 2026 |
 | docs/ | solar_eclipse_exposure_model.md |
 | Renderer3D / Overlay2D / CameraPreview | Puste stubs |
 | TotalControlGUI | Placeholder — nie zaimplementowane |
+
+### Znane pułapki parsera JSON sekwencji (SequencerEngine.cpp)
+
+Mini-parser ręczny (bez zewnętrznych bibliotek). Trzy pułapki napotykane przy testach:
+
+- `ExtractSteps`: szukaj `"steps"` potem skip whitespace + `:` + skip whitespace + `[` (nie `"steps":[` bezpośrednio)
+- `SJStr`: szukaj `"key":` potem skip whitespace potem sprawdź `"` (JSON formatowany z wcięciami ma spacje między `:` a wartością)
+- `SJInt64`: już toleruje whitespace po `:`
 
 ## Znane pułapki CrSDK
 
