@@ -18,11 +18,15 @@
     "After sequence ends, poll buffer drain manually:",
     "  TotalControlCLI get slot1_writing   (repeat until 'idle')",
     "",
-    "Expected figures (compressed RAW ~30 MB, UHS-II ~130 MB/s write):",
-    "  Buffer fill  : ~68 frames in ~7 s at 10 fps",
-    "  Write-limited: ~4 fps for remaining ~103 s  →  ~412 additional frames",
-    "  Total        : ~480 frames in 110 s window",
-    "  Drain time   : ~480 × 30 MB / 130 MB/s  ≈  110 s after burst release"
+    "MEASURED results (ILCE-7RM4A, 2026-05-27, lossless compressed RAW ~45 MB/frame, UHS-II):",
+    "  cont-hi+  buffer fill  : 73 frames in 7.2 s at ~10.0 fps",
+    "  cont-hi   buffer fill  : 73 frames in ~11 s at ~6.6 fps  (stopwatch, not logged)",
+    "  Write-limited rate     : ~2.4 fps  (card ~130 MB/s, ~45 MB/frame)",
+    "  Total frames (112 s)   : ~320 frames (cont-hi+); ~310 frames (cont-hi) estimated",
+    "  Buffer drain after burst: ~26 s  (stopwatch: 73 frames × 45 MB / 130 MB/s ≈ 25 s)",
+    "",
+    "Production decision: cont-hi chosen over cont-hi+ because the ~11 s fill window",
+    "fits all key C3 sub-phases; ND 5.0 filter goes on manually at C3+15 s."
   ],
 
   "steps": [
