@@ -18,6 +18,7 @@
 // ─── Log do pliku ─────────────────────────────────────────────────────────────
 static std::ofstream g_logFile;
 static std::mutex    g_logMutex;
+static bool          g_dotMode = false;  // true gdy ostatni output na konsoli to "."
 
 static std::string WtoU8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -27,6 +28,7 @@ static std::string WtoU8(const std::wstring& w) {
     return s;
 }
 
+// Plik + konsola + DebugView. Jeśli konsola była w trybie kropek, najpierw łamie linię.
 static void LogLine(const wchar_t* msg) {
     SYSTEMTIME st; GetLocalTime(&st);
     wchar_t ts[16];
@@ -35,8 +37,27 @@ static void LogLine(const wchar_t* msg) {
 
     std::lock_guard<std::mutex> lk(g_logMutex);
     if (g_logFile.is_open()) { g_logFile << WtoU8(line) << "\n"; g_logFile.flush(); }
+    if (g_dotMode) { wprintf(L"\n"); g_dotMode = false; }
     wprintf(L"%s\n", line.c_str());
     ::OutputDebugStringW((line + L"\n").c_str());
+}
+
+// Tylko plik (bez konsoli) — dla seq_status polling.
+static void LogFileOnly(const wchar_t* msg) {
+    SYSTEMTIME st; GetLocalTime(&st);
+    wchar_t ts[16];
+    swprintf_s(ts, L"%02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    std::wstring line = std::wstring(ts) + L"  " + msg;
+    std::lock_guard<std::mutex> lk(g_logMutex);
+    if (g_logFile.is_open()) { g_logFile << WtoU8(line) << "\n"; g_logFile.flush(); }
+}
+
+// Drukuje "." na konsoli bez nowej linii — zastępnik seq_status pollingu.
+static void ConsoleDot() {
+    std::lock_guard<std::mutex> lk(g_logMutex);
+    g_dotMode = true;
+    wprintf(L".");
+    fflush(stdout);
 }
 
 // ─── Pomocnik: katalog exe ────────────────────────────────────────────────────
@@ -190,6 +211,14 @@ int main() {
     TotalControl::PipeServer server(
         L"\\\\.\\pipe\\TotalControl",
         [&handler](const std::wstring& req, std::wstring& resp) -> bool {
+            const bool isStatus = req.find(L"\"seq_status\"") != std::wstring::npos;
+            if (isStatus) {
+                LogFileOnly((L"→ " + req).c_str());
+                bool cont = handler.Handle(req, resp);
+                LogFileOnly((L"← " + resp).c_str());
+                ConsoleDot();
+                return cont;
+            }
             LogLine((L"→ " + req).c_str());
             bool cont = handler.Handle(req, resp);
             LogLine((L"← " + resp).c_str());
