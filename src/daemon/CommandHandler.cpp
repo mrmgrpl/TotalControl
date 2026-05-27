@@ -246,11 +246,14 @@ static std::wstring DecodePropValue(uint32_t code, uint64_t raw) {
         switch (raw) {
         case 0x00000001: return L"single";
         case 0x00010001: return L"cont-hi";
-        case 0x00010002: return L"cont-hi-plus";  // confirmed on ILCE-7RM4A
-        case 0x00010006: return L"cont-hi-live";
-        case 0x00010004: return L"cont-lo";       // unconfirmed — swap if wrong
-        case 0x00010003: return L"cont";
-        case 0x00010007: return L"cont-mid";
+        case 0x00010002: return L"cont-hi-plus";  // CrDrive_Continuous_Hi_Plus  — confirmed ILCE-7RM4A
+        case 0x00010003: return L"cont-hi-live";  // CrDrive_Continuous_Hi_Live
+        case 0x00010004: return L"cont-lo";       // CrDrive_Continuous_Lo       — confirmed ILCE-7RM4A
+        case 0x00010005: return L"cont";          // CrDrive_Continuous
+        case 0x00010006: return L"cont-speed";    // CrDrive_Continuous_SpeedPriority
+        case 0x00010007: return L"cont-mid";      // CrDrive_Continuous_Mid      — confirmed ILCE-7RM4A
+        case 0x00010008: return L"cont-mid-live"; // CrDrive_Continuous_Mid_Live
+        case 0x00010009: return L"cont-lo-live";  // CrDrive_Continuous_Lo_Live
         case 0x00011001: return L"burst-lo";
         case 0x00011002: return L"burst-mid";
         case 0x00011003: return L"burst-hi";
@@ -638,12 +641,16 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         std::wstring driveStr = JHas(req, L"drive") ? JStr(req, L"drive") : L"";
 
         if (count > 1) {
-            // Burst: resolve drive mode string → code (default cont-hi)
-            uint32_t driveCode = 0x00010001; // cont-hi (default)
-            if      (driveStr == L"cont-hi-plus") driveCode = 0x00010002;  // confirmed on ILCE-7RM4A
-            else if (driveStr == L"cont-hi-live") driveCode = 0x00010006;
-            else if (driveStr == L"cont-lo")      driveCode = 0x00010004;  // unconfirmed — swap if wrong
-            else if (driveStr == L"cont-mid")     driveCode = 0x00010007;
+            // Burst: resolve drive mode string → CrDrive_* code (default cont-hi)
+            uint32_t driveCode = 0x00010001; // CrDrive_Continuous_Hi
+            if      (driveStr == L"cont-hi-plus")  driveCode = 0x00010002; // CrDrive_Continuous_Hi_Plus  — confirmed ILCE-7RM4A
+            else if (driveStr == L"cont-hi-live")  driveCode = 0x00010003; // CrDrive_Continuous_Hi_Live
+            else if (driveStr == L"cont-lo")       driveCode = 0x00010004; // CrDrive_Continuous_Lo       — confirmed ILCE-7RM4A
+            else if (driveStr == L"cont")          driveCode = 0x00010005; // CrDrive_Continuous
+            else if (driveStr == L"cont-speed")    driveCode = 0x00010006; // CrDrive_Continuous_SpeedPriority
+            else if (driveStr == L"cont-mid")      driveCode = 0x00010007; // CrDrive_Continuous_Mid      — confirmed ILCE-7RM4A
+            else if (driveStr == L"cont-mid-live") driveCode = 0x00010008; // CrDrive_Continuous_Mid_Live
+            else if (driveStr == L"cont-lo-live")  driveCode = 0x00010009; // CrDrive_Continuous_Lo_Live
             cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
                                   L"DriveMode(burst)", 2000);
             ok = cam->Shoot(&latency, timeout, count, /*holdForBurst=*/true);

@@ -10,13 +10,21 @@ Cel operacyjny: autonomiczne wykonanie sekwencji bracketów eksponometrycznych p
 **Wymagania:** CMake 3.20+, MSVC (Visual Studio 2026 / VS 18), Windows 10+
 
 ```
-cmake -B out/build/x64-Debug -S . -G "Visual Studio 17 2022" -A x64
+# Konfiguracja (jednorazowo lub po zmianach CMakeLists.txt):
+VsDevCmd.bat -arch=amd64
+cmake -B out/build/x64-Debug -S . -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+# Build:
+VsDevCmd.bat -arch=amd64
 cmake --build out/build/x64-Debug
 ```
 
 VS Developer Prompt: `C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat`
 
-Exeki lądują w `out/build/x64-Debug/Debug/`.  
+**WAŻNE: zawsze `-arch=amd64`** — bez tego VsDevCmd ustawia LIB=x86 i linker nie znajdzie CRT (199 LNK2019).  
+Jeśli link zablokowany przez działający SRV: najpierw `TotalControlCLI quit`, potem build.
+
+Exeki lądują w `out/build/x64-Debug/`.  
 Post-build kopiuje DLL-e CrSDK + `CrAdapter/` obok SRV, oraz CLI obok SRV.
 
 **CrSDK** jest w `external/CrSDK/{include,lib,bin}`. CMake weryfikuje obecność kluczowych plików — brak SDK = FATAL_ERROR.
