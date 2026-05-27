@@ -3,6 +3,9 @@ build/
 out/
 *.exe
 *.dll
+
+# Release binaries tracked explicitly
+!release/*.exe
 *.obj
 *.pdb
 *.ilk

@@ -151,30 +151,33 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 - `TotalControlCLI.log` — CLI, obok exe, append; wyłącz: `--nolog`
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Stan aktualny (2026-05-27)
+## Stan aktualny (2026-05-28)
 
 | Moduł | Stan |
 |---|---|
-| CMakeLists.txt | Gotowy — SRV + CLI targets |
+| CMakeLists.txt | SRV + CLI targets; Debug + Release (x64-Release z /O2) |
 | CameraController | Init/Connect/Disconnect + WarmCache + property cache + multi-cam |
 | PipeServer | Działa — named pipe, JSON Lines |
-| CommandHandler | shoot/bracket/burst/movie/af/get/set/cmd/quit/list_cameras/**seq_start/seq_stop/seq_status** |
+| CommandHandler | shoot/bracket/burst/movie/af/get/set/cmd/quit/list_cameras/seq_* |
 | Multi-camera | Enumerate + Connect(guid) + routing po "cam":guid/index |
-| Graceful shutdown | SetConsoleCtrlHandler → RequestShutdown na wszystkich kamerach → Shutdown() |
+| Graceful shutdown | SetConsoleCtrlHandler → RequestShutdown → Shutdown() |
 | GetId fallback | GuidOrIdHex() — USB kamera: GetId() jako UTF-16LE string |
-| CountCapture CAS | Ochrona m_capturedCount przed stray late events |
-| WritingState | slot1_writing / slot2_writing w status + get |
-| DriveMode single | "drive":"single" w shoot → SetPropAndVerify(CrDrive_Single=0x01) |
-| **Singleton mutex** | **`TotalControl_DaemonRunning`** — SRV odrzuca drugi egzemplarz; CLI czeka zamiast odpalać drugi SRV |
-| **SequencerEngine** | **Zaimplementowany** — Load/Start/Stop, UTC ms, repeat steps, seq_* pipe API |
-| **ParseUtcMs** | **Naprawiono** — FILETIME epoch offset: 11 644 473 600 000 ms (był 10× za duży) |
-| **--test Cx=\<utc\>** | **Zaimplementowany** — symulacja sekwencji, przesuwa czasy bez modyfikacji JSON |
-| **--test Cx=now** | **Zaimplementowany** — `now` → bieżący UTC systemu jako czas kontaktu |
-| **Live monitor** | **Zaimplementowany** — po seq_start: odliczanie ms do kolejnego kroku (Ctrl+C = wyjście z monitora) |
+| Singleton mutex | `TotalControl_DaemonRunning` — SRV odrzuca drugi egzemplarz |
+| SequencerEngine | Load/Start/Stop, UTC ms, repeat steps, seq_start/stop/status |
+| ParseUtcMs | Naprawiony FILETIME epoch: 11 644 473 600 000 ms |
+| --test Cx-Ns | Czyta czas kontaktu z JSON "contacts", lead = N sekund |
+| Live monitor | Countdown ms do kroku po seq_start; Ctrl+C = exit |
+| **Startup status table** | **Tabelka po połączeniu: battery/mode/SS/ISO/f/focus/drive/cards/store/WB/time** |
+| **ASCII logo + wersja** | **LogBanner() bez timestamp; kVersion = "2026.05.28"** |
+| **ANSI warnings** | **LogWarning() — czerwony tekst na konsoli; ENABLE_VIRTUAL_TERMINAL_PROCESSING** |
+| **Card status fix** | **CrSlotStatus_OK=0x0000 (nie "no-card"!) — mapowanie naprawione** |
+| **Battery level** | **Dodane warianty _PowerSupply (full+usb, 3/4+usb, …)** |
+| **f-number locale** | **Ręczne formatowanie int.dec zamiast %.1f (unika polskiego przecinka)** |
+| **Host UTC w statusie** | **GetSystemTimePreciseAsFileTime() — zawsze dostępny; cam_time n/a przez USB** |
 | sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — produkcyjne sekwencje TSE 2026 |
 | docs/ | solar_eclipse_exposure_model.md |
 | Renderer3D / Overlay2D / CameraPreview | Puste stubs |
-| TotalControlGUI | Placeholder — nie zaimplementowane |
+| **TotalControlGUI** | **Planowany — implementacja wkrótce** |
 
 ### Znane pułapki parsera JSON sekwencji (SequencerEngine.cpp)
 
@@ -194,6 +197,8 @@ Mini-parser ręczny (bez zewnętrznych bibliotek). Trzy pułapki napotykane przy
 - `StoreDestination = HostPC (0x01)` → CrNotify_Captured_Event NIE odpala
 - Transport DLL-e muszą być w podkatalogu `CrAdapter/` — CMake robi to w POST_BUILD
 - GetGuid() puste dla USB → GuidOrIdHex() fallback na GetId() jako UTF-16LE
+- `GetTimeZoneSetting()` zwraca `0x8003` (CrError_Generic_NotSupported) dla USB — czas kamery przez USB niedostępny; Host UTC z `GetSystemTimePreciseAsFileTime()` jest zawsze dostępny i wystarczy do korekcji dryftu (porównanie z EXIF DateTimeOriginal)
+- `CrSlotStatus_OK = 0x0000` (karta obecna), `CrSlotStatus_NoCard = 0x0001` — stara błędna kolejność dawała fałszywe "no-card" przy obecnej karcie
 
 ## Kolejność cleanup (ważne)
 

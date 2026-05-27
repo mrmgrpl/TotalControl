@@ -2,6 +2,7 @@
 #include "SequencerEngine.h"
 #include <algorithm>
 #include <cassert>
+#include <ctime>
 #include <cwctype>
 #include <sstream>
 
@@ -23,19 +24,20 @@ CameraController* CommandHandler::RouteCamera(const std::wstring& req) const {
     if (m_cams.empty()) return nullptr;
     if (!JHas(req, L"cam")) return m_cams[0];
 
-    // "cam":"<guid>" lub "cam":"<prefix_guid>"
     std::wstring guidOrIdx = JStr(req, L"cam");
-    if (!guidOrIdx.empty()) {
-        for (auto* c : m_cams)
-            if (c->Guid() == guidOrIdx) return c;
-        // dopasowanie po prefiksie (wygodne dla skróconych GUIDów)
-        for (auto* c : m_cams)
-            if (!c->Guid().empty() && c->Guid().rfind(guidOrIdx, 0) == 0) return c;
-        return nullptr;
-    }
-    // "cam":0  (indeks numeryczny)
-    int idx = JInt(req, L"cam", -1);
-    if (idx >= 0 && idx < static_cast<int>(m_cams.size())) return m_cams[idx];
+
+    // Numeric index — handles both "cam":"0" (string) and "cam":0 (number)
+    wchar_t* endPtr = nullptr;
+    long idx = wcstol(guidOrIdx.c_str(), &endPtr, 10);
+    if (endPtr != guidOrIdx.c_str() && endPtr == guidOrIdx.c_str() + guidOrIdx.size()
+        && idx >= 0 && idx < static_cast<long>(m_cams.size()))
+        return m_cams[static_cast<size_t>(idx)];
+
+    // GUID exact match, then prefix match
+    for (auto* c : m_cams)
+        if (c->Guid() == guidOrIdx) return c;
+    for (auto* c : m_cams)
+        if (!c->Guid().empty() && c->Guid().rfind(guidOrIdx, 0) == 0) return c;
     return nullptr;
 }
 
@@ -424,6 +426,18 @@ static bool EncodePropValue(uint32_t code, const std::wstring& val, long long& o
             if (val == L"pc" || val == L"PC") { outRaw = 0x0002; return true; }
             if (val == L"camera")             { outRaw = 0x0001; return true; }
             break;
+        case 0x010e: // DriveMode — named aliases matching DecodePropValue
+            if (val == L"single")       { outRaw = 0x00000001; return true; }
+            if (val == L"cont-hi")      { outRaw = 0x00010001; return true; }
+            if (val == L"cont-hi-plus") { outRaw = 0x00010002; return true; }
+            if (val == L"cont-hi-live") { outRaw = 0x00010003; return true; }
+            if (val == L"cont-lo")      { outRaw = 0x00010004; return true; }
+            if (val == L"cont")         { outRaw = 0x00010005; return true; }
+            if (val == L"cont-speed")   { outRaw = 0x00010006; return true; }
+            if (val == L"cont-mid")     { outRaw = 0x00010007; return true; }
+            if (val == L"cont-mid-live"){ outRaw = 0x00010008; return true; }
+            if (val == L"cont-lo-live") { outRaw = 0x00010009; return true; }
+            break;
         case 0x01fd: // BracketOrder
             if (val == L"minus-to-0-to-plus" || val == L"minus") { outRaw = 0x02; return true; }
             if (val == L"0-to-minus-to-plus" || val == L"zero")  { outRaw = 0x01; return true; }
@@ -574,10 +588,10 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         return true;
     }
 
-    // Wszystkie pozostałe komendy wymagają konkretnej kamery
+    // All other commands require a specific camera
     CameraController* cam = RouteCamera(req);
     if (!cam) {
-        resp = Err(L"camera_not_found", JHas(req, L"cam") ? JStr(req, L"cam").c_str() : L"brak kamer");
+        resp = Err(L"camera_not_found", JHas(req, L"cam") ? JStr(req, L"cam").c_str() : L"no cameras");
         return true;
     }
 
@@ -611,6 +625,49 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
            << L",\"file_type\":\"" << s.fileType    << L"\""
            << L",\"metering\":\"" << s.metering     << L"\""
            << L",\"store\":\""   << s.storeDestination << L"\"";
+
+        // Camera time vs host clock — for post-processing drift correction
+        if (!s.camTime.empty()) {
+            // Convert Sony compact datetime "YYYYMMDDTHHmmss[.s]" + area "+HHMM"
+            // → ISO 8601 extended "YYYY-MM-DDTHH:mm:ss[.s]+HH:MM"
+            std::wstring camIso;
+            if (s.camTime.size() >= 15) {
+                camIso.reserve(26);
+                camIso += s.camTime.substr(0, 4); camIso += L'-';  // YYYY-
+                camIso += s.camTime.substr(4, 2); camIso += L'-';  // MM-
+                camIso += s.camTime.substr(6, 2); camIso += L'T';  // DDT
+                camIso += s.camTime.substr(9, 2); camIso += L':';  // HH:
+                camIso += s.camTime.substr(11, 2); camIso += L':'; // mm:
+                camIso += s.camTime.substr(13, 2);                  // ss
+                if (s.camTime.size() > 16) {
+                    // Sony reports tenths of a second — expand to milliseconds (.d → .d00)
+                    wchar_t ms[8]; swprintf_s(ms, L".%c00", s.camTime[16]);
+                    camIso += ms;
+                }
+                if (s.camTimeArea.size() >= 5) {
+                    camIso += s.camTimeArea.substr(0, 3); camIso += L':'; // +HH:
+                    camIso += s.camTimeArea.substr(3, 2);                  // MM
+                } else {
+                    camIso += L'Z';
+                }
+            } else {
+                camIso = s.camTime; // fallback — unexpected format
+            }
+
+            // Host time in ISO 8601 UTC
+            const time_t t = static_cast<time_t>(s.camTimeHostMs / 1000);
+            struct tm utc{}; gmtime_s(&utc, &t);
+            wchar_t hostIso[32];
+            swprintf_s(hostIso, L"%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                       utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+                       utc.tm_hour, utc.tm_min, utc.tm_sec,
+                       static_cast<int>(s.camTimeHostMs % 1000));
+
+            ss << L",\"cam_time\":\"" << camIso << L"\""
+               << L",\"host_time_ms\":" << s.camTimeHostMs
+               << L",\"host_time_iso\":\"" << hostIso << L"\"";
+        }
+
         resp = Ok(ss.str()); return true;
     }
 
@@ -900,13 +957,22 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         if (prop == L"priority_key" && (val == L"pc" || val == L"PC")) {
             resp = cam->SetPCRemotePriority() ? Ok() : Err(L"set_failed"); return true;
         }
+        if (prop == L"drive_mode") {
+            long long driveRaw;
+            if (!EncodePropValue(0x010e, val, driveRaw)) {
+                resp = Err(L"invalid_value", (prop + L"=" + val).c_str()); return true;
+            }
+            resp = cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode", 2000)
+                       ? Ok() : Err(L"set_failed");
+            return true;
+        }
 
         // Generic table-driven set
         const PropDef* pd = FindProp(prop);
         if (!pd) { resp = Err(L"unknown_prop", prop.c_str()); return true; }
         if (!pd->writable) { resp = Err(L"read_only", prop.c_str()); return true; }
         if (!cam->SupportsProperty(pd->code)) {
-            resp = Err(L"not_supported", (cam->Model() + L" nie obsługuje: " + prop).c_str());
+            resp = Err(L"not_supported", (cam->Model() + L" does not support: " + prop).c_str());
             return true;
         }
         long long raw;
@@ -961,7 +1027,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         const PropDef* pd = FindProp(prop);
         if (!pd) { resp = Err(L"unknown_prop", prop.c_str()); return true; }
         if (!cam->SupportsProperty(pd->code)) {
-            resp = Err(L"not_supported", (cam->Model() + L" nie obsługuje: " + prop).c_str());
+            resp = Err(L"not_supported", (cam->Model() + L" does not support: " + prop).c_str());
             return true;
         }
         uint64_t raw = 0;

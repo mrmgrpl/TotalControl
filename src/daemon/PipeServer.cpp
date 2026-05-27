@@ -3,15 +3,15 @@
 
 namespace TotalControl {
 
-// Maksymalna długość jednej linii JSON w bajtach (UTF-8).
-// Klient wysyłający dłuższą linię otrzyma obcięte żądanie — celowe zabezpieczenie.
+// Maximum length of a single JSON line in bytes (UTF-8).
+// Clients sending a longer line get a truncated request — intentional safety cap.
 static constexpr size_t kMaxLineBytes = 65536U;
 
 PipeServer::PipeServer(const wchar_t* pipeName, PipeHandlerFn handler)
     : m_pipeName(pipeName), m_handler(std::move(handler))
 {
     m_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    // m_stopEvent == nullptr oznacza błąd — Stop() i Run() sprawdzają INVALID_HANDLE_VALUE
+    // m_stopEvent == nullptr signals error — Stop() and Run() guard against INVALID_HANDLE_VALUE
 }
 
 PipeServer::~PipeServer() {
@@ -40,7 +40,7 @@ void PipeServer::Run() {
 
         if (pipe == INVALID_HANDLE_VALUE) break;
 
-        // Czekaj na klienta lub sygnał stop
+        // Wait for a client connection or stop signal
         OVERLAPPED ov = {};
         ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (ov.hEvent == nullptr) {
@@ -59,7 +59,7 @@ void PipeServer::Run() {
             break;
         }
 
-        // Odczyt jednej linii JSON (do '\n') z górnym limitem kMaxLineBytes
+        // Read one JSON line (up to '\n') capped at kMaxLineBytes
         std::string buf;
         buf.reserve(256);
         char ch = '\0';
@@ -76,7 +76,7 @@ void PipeServer::Run() {
         if (wlen > 1)
             MultiByteToWideChar(CP_UTF8, 0, buf.c_str(), -1, req.data(), wlen);
 
-        // Wywołaj handler
+        // Invoke handler
         std::wstring resp;
         const bool continueRunning = m_handler(req, resp);
 
@@ -90,10 +90,10 @@ void PipeServer::Run() {
         respU8 += '\n';
 
         DWORD written = 0;
-        // Ignorujemy wynik WriteFile: błąd = klient rozłączył się; pipe i tak zamykamy poniżej
+        // Ignore WriteFile result: error means client disconnected; pipe is closed below regardless.
         if (!WriteFile(pipe, respU8.c_str(), static_cast<DWORD>(respU8.size()),
                        &written, nullptr)) {
-            // klient rozłączony podczas zapisu — kontynuujemy do CloseHandle
+            // client disconnected during write — fall through to CloseHandle
         }
         FlushFileBuffers(pipe);
         DisconnectNamedPipe(pipe);

@@ -190,17 +190,17 @@ std::wstring SequencerEngine::Load(const std::wstring& path, int64_t simOffsetMs
     std::wstring json = ReadFileW(path, err);
     if (!err.empty()) return err;
 
-    // ── Tryb symulacji ────────────────────────────────────────────────────────
-    // Aktywowany przez CLI --test Cx=<utc>  →  simOffsetMs = (now+15s) - contact_utc
+    // ── Simulation mode ────────────────────────────────────────────────────────
+    // Activated by CLI --test Cx=<utc>  →  simOffsetMs = (now+15s) - contact_utc
     int64_t simOffset = 0;
     if (simOffsetMs != 0) {
         simOffset = simOffsetMs;
-        Logf(L"[SEQ] SYMULACJA aktywna (--test) — offset %+lld ms (%.1f min)",
+        Logf(L"[SEQ] SIMULATION active (--test) — offset %+lld ms (%.1f min)",
              (long long)simOffset, (double)simOffset / 60000.0);
     }
 
     auto rawSteps = ExtractSteps(json);
-    Logf(L"[SEQ] ExtractSteps: %d obiektów w \"steps\"", (int)rawSteps.size());
+    Logf(L"[SEQ] ExtractSteps: %d objects in \"steps\"", (int)rawSteps.size());
     if (rawSteps.empty()) return L"No steps found — check \"steps\" array in file";
 
     std::vector<SeqStep> steps;
@@ -210,12 +210,12 @@ std::wstring SequencerEngine::Load(const std::wstring& path, int64_t simOffsetMs
         std::wstring atStr = SJStr(stepJson, L"at");
         if (atStr.empty()) {
             std::wstring lbl = SJStr(stepJson, L"label");
-            Logf(L"[SEQ] SKIP (brak 'at')  label='%s'", lbl.c_str());
+            Logf(L"[SEQ] SKIP (missing 'at')  label='%s'", lbl.c_str());
             ++skipped; continue;
         }
         int64_t atMs = ParseUtcMs(atStr) + simOffset;
         if (atMs < 0) {
-            Logf(L"[SEQ] SKIP (błąd ParseUtcMs)  at='%s'", atStr.c_str());
+            Logf(L"[SEQ] SKIP (ParseUtcMs error)  at='%s'", atStr.c_str());
             ++skipped; continue;
         }
 
@@ -259,7 +259,7 @@ std::wstring SequencerEngine::Load(const std::wstring& path, int64_t simOffsetMs
     }
     m_state.store(SeqState::Idle);
 
-    Logf(L"[SEQ] Załadowano %d kroków (%d pominięto) z: %s",
+    Logf(L"[SEQ] Loaded %d steps (%d skipped) from: %s",
          m_totalSteps, skipped, path.c_str());
     return L"";
 }
@@ -283,7 +283,7 @@ bool SequencerEngine::Start() {
     }
     m_state.store(SeqState::Running);
     m_thread = std::thread([this] { ThreadProc(); });
-    Log(L"[SEQ] Sekwencja uruchomiona.");
+    Log(L"[SEQ] Sequence started.");
     return true;
 }
 
@@ -402,7 +402,7 @@ void SequencerEngine::ThreadProc() {
 
     m_nextStepIdx.store((int)steps.size()); // past-end → no pending step
     m_state.store(m_stopReq.load() ? SeqState::Idle : SeqState::Done);
-    Log(m_stopReq.load() ? L"[SEQ] Zatrzymano." : L"[SEQ] Sekwencja zakończona.");
+    Log(m_stopReq.load() ? L"[SEQ] Stopped." : L"[SEQ] Sequence done.");
 }
 
 void SequencerEngine::Log(const wchar_t* msg) {

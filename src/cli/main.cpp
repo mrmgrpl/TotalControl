@@ -88,11 +88,11 @@ static std::string FormatUtcMs(long long ms) {
 }
 
 // Format countdown: positive → "MM:SS.mmm" / "H:MM:SS.mmm",
-//                   zero/negative → "WYZWALANIE(+Xms)" while executing
+//                   zero/negative → "FIRING(+Xms)" while executing
 static std::string FormatCountdown(long long ms) {
     if (ms <= 0) {
         char b[28];
-        snprintf(b, sizeof(b), "WYZWALANIE(%+lldms)", ms);
+        snprintf(b, sizeof(b), "FIRING(%+lldms)", ms);
         return b;
     }
     long long mss = ms % 1000; ms /= 1000;
@@ -456,15 +456,15 @@ int wmain(int argc, wchar_t* argv[]) {
                 displayUtc = ReadContactFromJson(args[1], contact);
                 if (displayUtc.empty()) {
                     fprintf(stderr,
-                        "tc: --test: kontakt \"%s\" nie znaleziony w sekcji \"contacts\" pliku:\n"
+                        "tc: --test: contact \"%s\" not found in \"contacts\" section of file:\n"
                         "           %s\n"
-                        "           Dodaj sekcje \"contacts\":{\"C2\":\"2026-...\"}  lub uzyj --test C2=<utc>\n",
+                        "           Add a \"contacts\":{\"C2\":\"2026-...\"} section or use --test C2=<utc>\n",
                         contact.c_str(), args[1].c_str());
                     return 1;
                 }
                 contactMs  = ParseUtcMs(displayUtc);
                 if (contactMs == LLONG_MIN) {
-                    fprintf(stderr, "tc: --test: nieprawidlowy czas w contacts JSON: %s\n",
+                    fprintf(stderr, "tc: --test: invalid time in contacts JSON: %s\n",
                             displayUtc.c_str());
                     return 1;
                 }
@@ -479,7 +479,7 @@ int wmain(int argc, wchar_t* argv[]) {
                 } else {
                     contactMs = ParseUtcMs(utcStr);
                     if (contactMs == LLONG_MIN) {
-                        fprintf(stderr, "tc: --test: nieprawidlowy czas UTC: %s\n",
+                        fprintf(stderr, "tc: --test: invalid UTC time: %s\n",
                                 utcStr.c_str());
                         return 1;
                     }
@@ -494,17 +494,17 @@ int wmain(int argc, wchar_t* argv[]) {
             double offsetDays = (double)simOffsetMs / 86400000.0;
             printf("\n");
             printf("  ========================================================\n");
-            printf("  ***  TRYB TESTOWY  ***  SYMULACJA SEKWENCJI          ***\n");
+            printf("  ***  TEST MODE    ***  SEQUENCE SIMULATION           ***\n");
             printf("  ========================================================\n");
-            printf("  Kontakt referencyjny : %s = %s%s\n",
+            printf("  Reference contact  : %s = %s%s\n",
                    contact.c_str(), displayUtc.c_str(), sourceTag.c_str());
-            printf("  Przesuniecie czasu   : %+lld ms  (%.1f dni)\n",
+            printf("  Time offset         : %+lld ms  (%.1f dni)\n",
                    simOffsetMs, offsetDays);
             if (leadMs >= 0)
-                printf("  %s nastapi za        : %lld s  od uruchomienia\n",
+                printf("  %s fires in          : %lld s  from now\n",
                        contact.c_str(), leadMs / 1000LL);
             else
-                printf("  %s minal             : %lld s  temu (sekwencja w toku)\n",
+                printf("  %s elapsed           : %lld s  ago (sequence in progress)\n",
                        contact.c_str(), (-leadMs) / 1000LL);
             printf("  ========================================================\n");
             printf("\n");
@@ -541,13 +541,13 @@ int wmain(int argc, wchar_t* argv[]) {
             fprintf(stderr, "tc: pipe error %lu\n", err);
             return 1;
         }
-        // Sprawdź czy SRV jest już w trakcie startu (trzyma singleton mutex).
+        // Check if SRV is already starting (holds the singleton mutex).
         HANDLE srvMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"TotalControl_DaemonRunning");
         bool srvAlreadyStarting = (srvMutex != nullptr);
         if (srvMutex) CloseHandle(srvMutex);
 
         if (srvAlreadyStarting) {
-            Log("INF: SRV już startuje (mutex znaleziony) — czekam na pipe");
+            Log("INF: SRV already starting (mutex found) — waiting for pipe");
             fprintf(stderr, "tc: daemon already starting");
         } else {
             Log("INF: pipe not found, launching TotalControlSRV.exe");
@@ -659,8 +659,8 @@ int wmain(int argc, wchar_t* argv[]) {
 
         // ── Live monitoring loop (seq_start only, unless --nomonitor) ─────────
         if (cmd == "seq_start" && state == "running" && !HasFlag(args, "--nomonitor")) {
-            printf("Sekwencja: uruchomiona  total:%s  %s\n", total.c_str(), file.c_str());
-            printf("Ctrl+C = wyjscie z monitorowania (sekwencja dziala dalej w tle)\n");
+            printf("Sequence: started  total:%s  %s\n", total.c_str(), file.c_str());
+            printf("Ctrl+C = exit monitor (sequence continues in background)\n");
             if (logging) Log("INF: MONITOR START  total=" + total);
 
             while (true) {
@@ -668,13 +668,13 @@ int wmain(int argc, wchar_t* argv[]) {
 
                 HANDLE mp = TryOpenPipe();
                 if (mp == INVALID_HANDLE_VALUE) {
-                    printf("\n[MONITOR] Brak polaczenia z demonem.\n");
+                    printf("\n[MONITOR] Lost connection to daemon.\n");
                     break;
                 }
                 std::string sr;
                 bool mok = Talk(mp, R"({"cmd":"seq_status"})", sr);
                 CloseHandle(mp);
-                if (!mok) { printf("\n[MONITOR] Blad odczytu pipe.\n"); break; }
+                if (!mok) { printf("\n[MONITOR] Pipe read error.\n"); break; }
 
                 std::string mstate  = JStr(sr, "seq_state");
                 std::string mTotal  = JNum(sr, "seq_total");
@@ -712,7 +712,7 @@ int wmain(int argc, wchar_t* argv[]) {
                              FormatCountdown(waitMs).c_str());
                 } else {
                     snprintf(line, sizeof(line),
-                             "[---/%-3d  d:%-3d s:%-2d f:%-2d]  oczekiwanie...",
+                             "[---/%-3d  d:%-3d s:%-2d f:%-2d]  waiting...",
                              ntot, ndone, nskip, nfail);
                 }
                 // Pad to 79 chars and overwrite line in-place

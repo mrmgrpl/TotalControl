@@ -53,6 +53,10 @@ struct CameraStatus {
     std::wstring metering;                  // "multi","center","spot"
     // Output
     std::wstring storeDestination;          // "card","pc","both"
+    // Camera clock vs host clock (for post-processing drift correction)
+    std::wstring camTime;                   // camera datetime e.g. "20260812T202900.0" (local)
+    std::wstring camTimeArea;               // timezone offset e.g. "+0200"
+    int64_t      camTimeHostMs = 0;         // host Unix ms (avg of before/after SDK call)
 };
 
 using LogFn = std::function<void(const wchar_t*)>;

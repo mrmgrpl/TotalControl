@@ -1,6 +1,6 @@
 #include "CameraController.h"
 
-// Sony CrSDK — zewnętrzne nagłówki, nie modyfikować; ostrzeżenia wyłączone celowo
+// Sony CrSDK — external headers, do not modify; warnings suppressed intentionally
 #pragma warning(push, 0)
 #include "CameraRemote_SDK.h"
 #include "IDeviceCallback.h"
@@ -200,21 +200,21 @@ void CameraController::Shutdown() {
 }
 
 bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int connectTimeoutMs) {
-    if (!m_initialized)       { Log(L"Connect: brak Init()");             return false; }
-    if (m_callback == nullptr){ Log(L"Connect: brak callback");           return false; }
-    if (enumTimeoutSec <= 0)  { Log(L"Connect: enumTimeout musi być > 0");return false; }
-    if (connectTimeoutMs <= 0){ Log(L"Connect: connTimeout musi być > 0");return false; }
+    if (!m_initialized)       { Log(L"Connect: Init() not called");       return false; }
+    if (m_callback == nullptr){ Log(L"Connect: callback is null");        return false; }
+    if (enumTimeoutSec <= 0)  { Log(L"Connect: enumTimeout must be > 0");return false; }
+    if (connectTimeoutMs <= 0){ Log(L"Connect: connTimeout must be > 0");return false; }
     if (m_connected) Disconnect();
 
     SDK::ICrEnumCameraObjectInfo* pEnum = nullptr;
     SDK::CrError err = SDK::EnumCameraObjects(&pEnum, static_cast<CrInt8u>(enumTimeoutSec));
     if (err != 0 || !pEnum || pEnum->GetCount() == 0) {
         if (pEnum) pEnum->Release();
-        Log(L"Connect: brak kamery");
+        Log(L"Connect: no cameras found");
         return false;
     }
 
-    // Znajdź kamerę po GUID lub weź pierwszą (guid==nullptr → compat tryb)
+    // Find camera by GUID, or take the first one (guid==nullptr → compat mode)
     const SDK::ICrCameraObjectInfo* target = nullptr;
     CrInt32u camCount = pEnum->GetCount();
     if (guid && *guid) {
@@ -226,7 +226,7 @@ bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int conn
         }
         if (!target) {
             pEnum->Release();
-            Logf(L"Connect: kamera GUID '%s' nie znaleziona", guid);
+            Logf(L"Connect: camera GUID '%s' not found", guid);
             return false;
         }
     } else {
@@ -252,15 +252,15 @@ bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int conn
 
     lk.unlock();
 
-    // Kamera potrzebuje chwili po OnConnected zanim zgłosi wszystkie właściwości.
-    // Czekamy max 5s aż liczba właściwości się ustabilizuje (≥50).
+    // Camera needs a moment after OnConnected before reporting all properties.
+    // Wait up to 5 s until property count stabilises (≥50).
     for (int attempt = 0; attempt < 10; ++attempt) {
         ::Sleep(500);
         PopulateSupportedCodes();
         if (m_supportedCodes.size() >= 50) break;
         Logf(L"PopulateSupportedCodes attempt %d: %zu props", attempt + 1, m_supportedCodes.size());
     }
-    Logf(L"Połączono: %s  (%zu właściwości)", m_model.c_str(), m_supportedCodes.size());
+    Logf(L"Connected: %s  (%zu properties)", m_model.c_str(), m_supportedCodes.size());
     WarmCache();
     return true;
 }
@@ -268,7 +268,7 @@ bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int conn
 void CameraController::Disconnect() {
     if (!m_connected) return;
     if (m_deviceHandle == 0) {
-        Log(L"Disconnect: połączona bez handle — niespójny stan");
+        Log(L"Disconnect: connected flag set but no handle — inconsistent state");
         m_connected = false;
         return;
     }
@@ -313,7 +313,7 @@ void CameraController::WarmCache() {
         m_propSetCache[code] = val;
     }
     SDK::ReleaseDeviceProperties(h, props);
-    Logf(L"WarmCache: %d właściwości → cache (pierwsze Set będzie Skip jeśli wartość zgodna)",
+    Logf(L"WarmCache: %d properties → cache (first Set will be Skip if value matches)",
          num);
 }
 
@@ -645,9 +645,14 @@ CameraStatus CameraController::GetStatus() {
             case SDK::CrBatteryLevel_1_3:                    s.batteryLevel = L"1/3";     break;
             case SDK::CrBatteryLevel_2_3:                    s.batteryLevel = L"2/3";     break;
             case SDK::CrBatteryLevel_3_3:                    s.batteryLevel = L"full";    break;
-            case SDK::CrBatteryLevel_USBPowerSupply:         s.batteryLevel = L"usb";     break;
-            case SDK::CrBatteryLevel_PreEnd_PowerSupply:     s.batteryLevel = L"pre-end-usb"; break;
-            default:                                         s.batteryLevel = L"?";       break;
+            case SDK::CrBatteryLevel_USBPowerSupply:         s.batteryLevel = L"usb";       break;
+            case SDK::CrBatteryLevel_PreEnd_PowerSupply:     s.batteryLevel = L"pre-end+usb"; break;
+            case SDK::CrBatteryLevel_1_4_PowerSupply:        s.batteryLevel = L"1/4+usb";   break;
+            case SDK::CrBatteryLevel_2_4_PowerSupply:        s.batteryLevel = L"2/4+usb";   break;
+            case SDK::CrBatteryLevel_3_4_PowerSupply:        s.batteryLevel = L"3/4+usb";   break;
+            case SDK::CrBatteryLevel_4_4_PowerSupply:        s.batteryLevel = L"full+usb";  break;
+            case SDK::CrBatteryLevel_BatteryNotInstalled:    s.batteryLevel = L"none";      break;
+            default:                                         s.batteryLevel = L"?";         break;
             }
             break;
         // ── Media ─────────────────────────────────────────────────────────────
@@ -657,19 +662,21 @@ CameraStatus CameraController::GetStatus() {
             s.slot2Remaining = static_cast<int>(cur); break;
         case SDK::CrDeviceProperty_MediaSLOT1_Status: {
             switch (cur) {
-            case 0x0000: s.slot1Status = L"no-card"; break;
-            case 0x0001: s.slot1Status = L"ok";      break;
-            case 0x0002: s.slot1Status = L"full";    break;
-            default:     s.slot1Status = L"error";   break;
+            case SDK::CrSlotStatus_OK:          s.slot1Status = L"ok";       break;
+            case SDK::CrSlotStatus_NoCard:      s.slot1Status = L"no-card";  break;
+            case SDK::CrSlotStatus_CardError:   s.slot1Status = L"error";    break;
+            case SDK::CrSlotStatus_CardRecognizing: s.slot1Status = L"recognizing"; break;
+            default:                            s.slot1Status = L"error";    break;
             }
             break;
         }
         case SDK::CrDeviceProperty_MediaSLOT2_Status: {
             switch (cur) {
-            case 0x0000: s.slot2Status = L"no-card"; break;
-            case 0x0001: s.slot2Status = L"ok";      break;
-            case 0x0002: s.slot2Status = L"full";    break;
-            default:     s.slot2Status = L"error";   break;
+            case SDK::CrSlotStatus_OK:          s.slot2Status = L"ok";       break;
+            case SDK::CrSlotStatus_NoCard:      s.slot2Status = L"no-card";  break;
+            case SDK::CrSlotStatus_CardError:   s.slot2Status = L"error";    break;
+            case SDK::CrSlotStatus_CardRecognizing: s.slot2Status = L"recognizing"; break;
+            default:                            s.slot2Status = L"error";    break;
             }
             break;
         }
@@ -820,6 +827,33 @@ CameraStatus CameraController::GetStatus() {
         }
     }
     SDK::ReleaseDeviceProperties(h, props);
+
+    // ── Host clock snapshot (always available) ────────────────────────────────
+    auto toUnixMs = [](const FILETIME& ft) -> int64_t {
+        return (static_cast<int64_t>(ft.dwHighDateTime) << 32 | ft.dwLowDateTime)
+               / 10000LL - 11644473600000LL;
+    };
+    FILETIME ftBefore, ftAfter;
+    GetSystemTimePreciseAsFileTime(&ftBefore);
+    s.camTimeHostMs = toUnixMs(ftBefore);
+
+    // ── Camera datetime (GetTimeZoneSetting — USB: not supported on ILCE-7RM4A) ─
+    SDK::CrTimeZoneSetting tz{};
+    const SDK::CrError tzErr = SDK::GetTimeZoneSetting(h, tz);
+    GetSystemTimePreciseAsFileTime(&ftAfter);
+    if (tzErr == 0) {
+        // Refine host timestamp to midpoint of SDK round-trip
+        s.camTimeHostMs = (toUnixMs(ftBefore) + toUnixMs(ftAfter)) / 2;
+        if (tz.dateTimeSetting.exists == SDK::CrTimeZoneSettingExists_True) {
+            const char* dt = tz.dateTimeSetting.dateTime;
+            s.camTime.assign(dt, dt + strnlen(dt, 17));
+        }
+        if (tz.areaSetting.exists == SDK::CrTimeZoneSettingExists_True) {
+            const char* area = tz.areaSetting.area;
+            s.camTimeArea.assign(area, area + strnlen(area, 5));
+        }
+    }
+
     return s;
 }
 
