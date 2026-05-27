@@ -1,5 +1,5 @@
 {
-  "name": "TSE-2026 | 240mm f/5.6 | ISO 100 | szerokokątna korona zewnętrzna",
+  "name": "TSE-2026 | 240mm f/5.6 | ISO 100 | wide outer corona + C3 burst",
 
   "contacts": {
     "C1": "2026-08-12T19:34:06.000Z",
@@ -9,46 +9,54 @@
   },
 
   "notes": [
-    "Setup    : Sony A7R IVA + 240mm f/5.6, ISO 100, stałe przez całą sesję",
-    "ND filter: wymagany dla faz częściowych (ND 5.0 = 1/100 000)",
-    "Lokalizacja: 003°33'07.88\"W, 41°56'40.51\"N, 1290m",
-    "C1  = 2026-08-12T19:34:06.000Z  h=18.1°",
-    "C2  = 2026-08-12T20:29:02.100Z  h= 8.0°",
-    "C3  = 2026-08-12T20:30:46.000Z  h= 7.7°",
-    "Max = 2026-08-12T20:29:54.050Z  (midpoint totality)",
-    "Totality = 103.9s",
-    "Sunset   = 2026-08-12T21:18:51Z",
+    "Setup      : Sony A7R IVa + 240mm f/5.6, ISO 100, fixed throughout",
+    "ND filter  : required for partial phases (ND 5.0 = 1/100 000)",
+    "Location   : 003°33'07.88\"W, 41°56'40.51\"N, 1290 m",
+    "C1  = 2026-08-12T19:34:06.000Z  alt=18.1°",
+    "C2  = 2026-08-12T20:29:02.100Z  alt= 8.0°",
+    "C3  = 2026-08-12T20:30:46.000Z  alt= 7.7°",
+    "Max = 2026-08-12T20:29:54.050Z  (totality midpoint)",
+    "Totality   = 103.9 s",
+    "Sunset     = 2026-08-12T21:18:51Z",
     "",
-    "Formula: t = f²/(ISO × 2^Q_eff), Q_eff = Q − ΔEV",
-    "ΔEV(h=8°) = 0.13/sin(8°) ≈ 0.94 EV",
+    "Exposure formula: t = f² / (ISO × 2^Q_eff),  Q_eff = Q − ΔEV",
+    "Altitude correction at h=8°: ΔEV = 0.13 / sin(8°) ≈ 0.94 EV",
     "",
-    "Ekspozycje (f/5.6, ISO 100, h=8°, ΔEV=0.94):",
-    "  Diamond Ring / Chromosphere  Q= 8  Q_eff= 7.06  t≈1/400s",
-    "  Prominences                  Q= 9  Q_eff= 8.06  t≈1/850s",
-    "  Inner corona < 0.1 R☉       Q= 7  Q_eff= 6.06  t≈1/213s",
-    "  Inner corona < 0.2 R☉       Q= 5  Q_eff= 4.06  t≈1/53s",
-    "  Middle corona < 0.5 R☉      Q= 3  Q_eff= 2.06  t≈1/13s",
-    "  Corona < 1.0 R☉             Q= 1  Q_eff= 0.06  t≈0.30s",
-    "  Corona < 2.0 R☉             Q= 0  Q_eff=-0.94  t≈0.60s",
-    "  Corona < 4.0 R☉             Q=-1  Q_eff=-1.94  t≈1.20s",
-    "  Corona < 8.0 R☉             Q=-3  Q_eff=-3.94  t≈4.79s  → single",
-    "  Earthshine                  Q=-5  Q_eff=-5.94  t≈19.3s  → single",
+    "Exposures (f/5.6, ISO 100, h=8°, ΔEV=0.94):",
+    "  Diamond Ring / Chromosphere  Q= 8  Q_eff= 7.06  t ≈ 1/400 s",
+    "  Prominences                  Q= 9  Q_eff= 8.06  t ≈ 1/850 s",
+    "  Inner corona < 0.1 R☉       Q= 7  Q_eff= 6.06  t ≈ 1/213 s",
+    "  Inner corona < 0.2 R☉       Q= 5  Q_eff= 4.06  t ≈  1/53 s",
+    "  Middle corona < 0.5 R☉      Q= 3  Q_eff= 2.06  t ≈  1/13 s",
+    "  Corona < 1.0 R☉             Q= 1  Q_eff= 0.06  t ≈   0.30 s",
+    "  Corona < 2.0 R☉             Q= 0  Q_eff=-0.94  t ≈   0.60 s",
+    "  Corona < 4.0 R☉             Q=-1  Q_eff=-1.94  t ≈   1.20 s",
+    "  Corona < 8.0 R☉             Q=-3  Q_eff=-3.94  t ≈   4.79 s  → single",
+    "  Earthshine                  Q=-5  Q_eff=-5.94  t ≈  19.3  s  → single",
     "",
-    "Budżet czasowy totalności (103.9s):",
-    "  Fazy szybkie (chromosphere→middle): ~15s",
-    "  Bracket 1R☉ (0.3s center, 5kl.):    ~4s",
-    "  Bracket 2R☉ (0.6s center, 5kl.):    ~6s",
-    "  Bracket 4R☉ (1.2s center, 5kl.):   ~11s",
-    "  Single 8R☉ (5s):                     ~6s",
-    "  Earthshine single (20s):            ~21s",
-    "  Mirror post-max (4R☉+2R☉+fast):    ~22s",
-    "  Razem: ~85s — zapas ~18s na overhead i C3 Diamond Ring"
+    "Totality time budget (103.9 s):",
+    "  Fast phase C2 (chromosphere → middle corona):  ~15 s",
+    "  Bracket 1 R☉ (0.3 s centre, 5 shots cont):     ~4 s",
+    "  Bracket 2 R☉ (0.6 s centre, 5 shots cont):     ~6 s",
+    "  Bracket 4 R☉ (1.2 s centre, 5 shots cont):    ~11 s",
+    "  Single 8 R☉ (5 s):                              ~6 s",
+    "  Earthshine single (20 s):                      ~21 s",
+    "  Mirror post-max (4R☉ + 2R☉ + inner):          ~22 s",
+    "  Total: ~85 s  —  ~18 s margin for overhead and inner-corona-post",
+    "",
+    "C3 strategy — continuous burst (cont-hi-plus, SS 1/8000, ISO 100):",
+    "  Burst starts at C3−10 s and runs for 112 s (until C3+102 s).",
+    "  Captures Diamond Ring + Baily's beads + first partial crescent in one unbroken run.",
+    "  Expected: ~68 frames at full speed (buffer fills in ~7 s),",
+    "            then ~4 fps write-limited → ~480 frames total over 112 s.",
+    "  IMPORTANT: ND 5.0 filter must be on before C3+120 s when the partial bracket resumes.",
+    "  Buffer drain time (compressed RAW ~30 MB, UHS-II ~130 MB/s): ≈ 110 s after burst."
   ],
 
   "steps": [
 
     {
-      "_section": "=== FAZA CZĘŚCIOWA C1 → C2-30s (z filtrem ND 5.0) ===",
+      "_section": "=== PARTIAL PHASE C1 → C2-30s (ND 5.0 filter required) ===",
       "at":          "2026-08-12T19:34:06.000Z",
       "until":       "2026-08-12T20:28:32.000Z",
       "interval_ms": 60000,
@@ -60,11 +68,11 @@
       "iso":   100,
       "f":     5.6,
       "store": "card",
-      "label": "C1-partial-ND5"
+      "label": "partial-pre-ND5"
     },
 
     {
-      "_section": "=== DIAMOND RING przed C2 ===",
+      "_section": "=== DIAMOND RING before C2 ===",
       "at":    "2026-08-12T20:28:56.000Z",
       "cmd":   "shoot",
       "drive": "single",
@@ -73,11 +81,11 @@
       "f":     5.6,
       "store": "card",
       "timeout_ms": 5000,
-      "label": "diamond-ring-pre-C2"
+      "label": "diamond-ring-C2"
     },
 
     {
-      "_section": "=== TOTALNOŚĆ — seria wstępująca ===",
+      "_section": "=== TOTALITY — ascending series ===",
 
       "at":    "2026-08-12T20:29:04.000Z",
       "cmd":   "bracket",
@@ -189,7 +197,7 @@
     },
 
     {
-      "_note": "Earthshine: t_NASA = 19.3s. Start 9.5s przed midpoint (20:29:54.05Z) → 20:29:44.5Z",
+      "_note": "Earthshine t_NASA=19.3 s. Start 9.5 s before midpoint (20:29:54.05Z) → 20:29:44.5Z",
       "at":    "2026-08-12T20:29:44.000Z",
       "cmd":   "shoot",
       "drive": "single",
@@ -198,11 +206,11 @@
       "f":     5.6,
       "store": "card",
       "timeout_ms": 30000,
-      "label": "Earthshine"
+      "label": "earthshine"
     },
 
     {
-      "_section": "=== TOTALNOŚĆ — seria zstępująca (post-max) ===",
+      "_section": "=== TOTALITY — descending series (post-max) ===",
 
       "at":    "2026-08-12T20:30:06.000Z",
       "cmd":   "bracket",
@@ -260,35 +268,27 @@
     },
 
     {
-      "at":    "2026-08-12T20:30:40.000Z",
-      "cmd":   "bracket",
-      "ev":    "1ev",
-      "count": 5,
-      "mode":  "cont",
-      "ss":    "1/1000",
-      "iso":   100,
-      "f":     5.6,
-      "store": "card",
-      "timeout_ms": 10000,
-      "label": "chromosphere-post"
+      "_section": "=== C3 DIAMOND RING + BAILY'S BEADS — continuous burst ===",
+      "_note": "Burst starts C3-10s, runs 112s (until C3+102s). Captures diamond ring and",
+      "_note2": "first partial crescent. count=5000 is never reached — timeout is the gate.",
+      "_note3": "IMPORTANT: ND 5.0 filter must be on before C3+120s (partial bracket below).",
+      "at":         "2026-08-12T20:30:36.000Z",
+      "cmd":        "shoot",
+      "drive":      "cont-hi-plus",
+      "count":      5000,
+      "ss":         "1/8000",
+      "iso":        100,
+      "f":          5.6,
+      "mode":       "M",
+      "store":      "card",
+      "timeout_ms": 112000,
+      "label":      "C3-burst"
     },
 
     {
-      "_section": "=== DIAMOND RING C3 ===",
-      "at":    "2026-08-12T20:30:46.000Z",
-      "cmd":   "shoot",
-      "drive": "single",
-      "ss":    "1/400",
-      "iso":   100,
-      "f":     5.6,
-      "store": "card",
-      "timeout_ms": 5000,
-      "label": "diamond-ring-C3"
-    },
-
-    {
-      "_section": "=== FAZA CZĘŚCIOWA C3+30s → zmrok (z filtrem ND 5.0) ===",
-      "at":          "2026-08-12T20:31:16.000Z",
+      "_section": "=== PARTIAL PHASE C3+120s → dusk (ND 5.0 filter required) ===",
+      "_note": "Starts C3+120s — 18s after burst ends, allowing time to fit ND filter.",
+      "at":          "2026-08-12T20:32:46.000Z",
       "until":       "2026-08-12T21:10:00.000Z",
       "interval_ms": 60000,
       "cmd":   "bracket",
@@ -299,7 +299,7 @@
       "iso":   100,
       "f":     5.6,
       "store": "card",
-      "label": "C3-partial-ND5"
+      "label": "partial-post-ND5"
     }
 
   ]

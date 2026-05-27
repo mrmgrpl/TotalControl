@@ -1,0 +1,44 @@
+{
+  "name": "C3 continuous burst — buffer fill/drain test | 240mm f/5.6 ISO 100 SS 1/8000",
+
+  "contacts": {
+    "C3": "2026-08-12T20:30:46.000Z"
+  },
+
+  "notes": [
+    "Purpose: measure how many RAW frames the A7R IVa buffer holds at cont-hi-plus",
+    "         and how long the card needs to drain after the burst ends.",
+    "",
+    "Run:  TotalControlCLI seq_start sequences/eclipse2026_C3_burst_test.json --test C3-10s",
+    "",
+    "The shutter is pressed at C3-10s and held for 112s (until C3+102s).",
+    "The sequence reports TIMEOUT (expected — count=5000 is never reached);",
+    "the log line 'Shoot: TIMEOUT captures=NNN/5000' gives the actual frame count.",
+    "",
+    "After sequence ends, poll buffer drain manually:",
+    "  TotalControlCLI get slot1_writing   (repeat until 'idle')",
+    "",
+    "Expected figures (compressed RAW ~30 MB, UHS-II ~130 MB/s write):",
+    "  Buffer fill  : ~68 frames in ~7 s at 10 fps",
+    "  Write-limited: ~4 fps for remaining ~103 s  →  ~412 additional frames",
+    "  Total        : ~480 frames in 110 s window",
+    "  Drain time   : ~480 × 30 MB / 130 MB/s  ≈  110 s after burst release"
+  ],
+
+  "steps": [
+    {
+      "_section": "=== Hold shutter from C3-10s to C3+102s (112s window) ===",
+      "at":         "2026-08-12T20:30:36.000Z",
+      "cmd":        "shoot",
+      "drive":      "cont-hi-plus",
+      "count":      5000,
+      "ss":         "1/8000",
+      "iso":        100,
+      "f":          5.6,
+      "mode":       "M",
+      "store":      "card",
+      "timeout_ms": 112000,
+      "label":      "C3-burst"
+    }
+  ]
+}
