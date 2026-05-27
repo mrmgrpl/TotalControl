@@ -222,22 +222,24 @@ static bool ParseTestArg(const std::vector<std::string>& args,
         const std::string& val = args[i + 1];
 
         // New form: Cx-Ns or Cx+Ns  (C2-0s, C3-20s, C2+5s …)
+        // '-' = start sequence N seconds before contact; '+' = N seconds after.
         if (val.size() >= 3 && val[0] == 'C' && isdigit((unsigned char)val[1])) {
             size_t signPos = val.find_first_of("+-", 1);
             if (signPos != std::string::npos && val.back() == 's') {
                 std::string numStr = val.substr(signPos + 1, val.size() - signPos - 2);
-                long long secs = 0;
-                try { secs = std::stoll(numStr); } catch (...) { goto legacy; }
-                contact = val.substr(0, signPos);
-                utcStr  = "";   // signal: read from JSON contacts
-                // '-' = before contact (positive lead), '+' = after (negative lead)
-                leadMs  = (val[signPos] == '-') ? secs * 1000LL : -secs * 1000LL;
-                return true;
+                try {
+                    long long secs = std::stoll(numStr);
+                    contact = val.substr(0, signPos);
+                    utcStr  = "";   // empty: read contact UTC from JSON "contacts" section
+                    leadMs  = (val[signPos] == '-') ? secs * 1000LL : -secs * 1000LL;
+                    return true;
+                } catch (...) {
+                    // numStr is not a valid integer — fall through to legacy form
+                }
             }
         }
 
-        legacy:
-        // Legacy: C2=<utc> or C2 <utc> or C2 now
+        // Legacy: C2=<utc>  or  C2 <utc>  or  C2 now
         {
             auto eq = val.find('=');
             if (eq != std::string::npos) {

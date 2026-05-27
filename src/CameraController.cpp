@@ -10,6 +10,7 @@
 #include "CrError.h"
 #pragma warning(pop)
 
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
@@ -177,6 +178,7 @@ void CameraController::Logf(const wchar_t* fmt, ...) {
 
 bool CameraController::Init() {
     if (m_initialized) return true;
+    assert(m_callback == nullptr);  // Init() must not be called twice without Shutdown()
     m_callback = new DeviceCallback(this);
     if (!InitSDK()) {
         Log(L"SDK::Init FAILED");
@@ -318,8 +320,10 @@ void CameraController::WarmCache() {
 // ─── Generic set / get ────────────────────────────────────────────────────────
 
 bool CameraController::SetPropRaw(unsigned code, unsigned type, long long value, const wchar_t* desc) {
-    if (!m_connected)       { Log(L"SetPropRaw: brak połączenia"); return false; }
-    if (m_deviceHandle == 0){ Log(L"SetPropRaw: brak handle");    return false; }
+    assert(code != 0);      // caller must supply a valid CrDevicePropertyCode
+    assert(type != 0);      // caller must supply a valid CrDataType
+    if (!m_connected)       { Log(L"SetPropRaw: not connected"); return false; }
+    if (m_deviceHandle == 0){ Log(L"SetPropRaw: no device handle"); return false; }
     auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     SDK::CrDeviceProperty prop;
     prop.SetCode(static_cast<SDK::CrDevicePropertyCode>(code));
@@ -569,10 +573,12 @@ void CameraController::RequestShutdown() {
 }
 
 bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures, bool holdForBurst) {
-    if (!m_connected)        { Log(L"Shoot: brak połączenia");       return false; }
-    if (m_deviceHandle == 0) { Log(L"Shoot: brak handle");           return false; }
-    if (timeoutMs <= 0)      { Log(L"Shoot: timeout musi być > 0");  return false; }
-    if (expectedCaptures < 1){ Log(L"Shoot: expectedCaptures < 1");  return false; }
+    assert(timeoutMs > 0);          // caller contract — negative timeout makes no sense
+    assert(expectedCaptures >= 1);  // caller contract — at least one capture expected
+    if (!m_connected)        { Log(L"Shoot: not connected");              return false; }
+    if (m_deviceHandle == 0) { Log(L"Shoot: no device handle");          return false; }
+    if (timeoutMs <= 0)      { Log(L"Shoot: timeout must be > 0");       return false; }
+    if (expectedCaptures < 1){ Log(L"Shoot: expectedCaptures must be >= 1"); return false; }
     auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
     m_capturedCount  = 0;
     m_capturedTarget = expectedCaptures;

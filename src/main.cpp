@@ -7,6 +7,7 @@
 #include <io.h>
 #include <fcntl.h>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -117,10 +118,11 @@ int main() {
     LogLine(L"║  zamknij: TotalControlCLI quit       ║");
     LogLine(L"╚══════════════════════════════════════╝");
 
-    // ── Singleton — blokuj drugi egzemplarz SRV ───────────────────────────────
+    // ── Singleton — reject second instance of SRV ─────────────────────────────
+    assert(g_singletonMutex == nullptr);  // main() must not be called more than once in a process
     g_singletonMutex = CreateMutexW(nullptr, TRUE, L"TotalControl_DaemonRunning");
     if (g_singletonMutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
-        LogLine(L"BŁĄD: daemon już działa — drugi egzemplarz odrzucony");
+        LogLine(L"ERROR: daemon already running — second instance rejected");
         if (g_singletonMutex) CloseHandle(g_singletonMutex);
         return 4;
     }

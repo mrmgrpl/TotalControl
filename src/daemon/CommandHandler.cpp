@@ -1,6 +1,7 @@
 #include "CommandHandler.h"
 #include "SequencerEngine.h"
 #include <algorithm>
+#include <cassert>
 #include <cwctype>
 #include <sstream>
 
@@ -10,7 +11,9 @@
 namespace TotalControl {
 
 CommandHandler::CommandHandler(std::vector<CameraController*> cams)
-    : m_cams(std::move(cams)) {}
+    : m_cams(std::move(cams)) {
+    assert(!m_cams.empty());  // daemon must connect at least one camera before constructing the handler
+}
 
 void CommandHandler::SetSequencer(SequencerEngine* seq) {
     m_seq = seq;
@@ -760,15 +763,19 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
     // ── movie ─────────────────────────────────────────────────────────────────
     // {"cmd":"movie","action":"start"|"stop"|"toggle"}
+    // Sony CrSDK does not have separate start/stop commands for movie recording.
+    // CrCommandId_MovieRec (id=1) is the physical record button — the camera toggles
+    // the recording state internally. "start" and "stop" both press this button;
+    // the caller is responsible for knowing whether the camera is currently recording.
     if (cmd == L"movie") {
         if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
         std::wstring action = JStr(req, L"action");
         bool ok;
-        if (action == L"start") {
+        if (action == L"start" || action == L"stop") {
+            // Both map to CrCommandId_MovieRec (id=1): press + release.
             ok = cam->SendCmd(1, 1); ::Sleep(50); cam->SendCmd(1, 0);
-        } else if (action == L"stop") {
-            ok = cam->SendCmd(1, 1); ::Sleep(50); cam->SendCmd(1, 0);
-        } else { // toggle
+        } else {
+            // "toggle" uses CrCommandId_movie_toggle (id=11), a software-level toggle.
             ok = cam->SendCmd(11, 1); ::Sleep(50); cam->SendCmd(11, 0);
         }
         resp = ok ? Ok() : Err(L"cmd_failed");

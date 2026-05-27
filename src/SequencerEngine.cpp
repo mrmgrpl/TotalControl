@@ -1,5 +1,6 @@
 #include "SequencerEngine.h"
 #include <algorithm>
+#include <cassert>
 #include <cstdarg>
 #include <cstdio>
 #include <sstream>
@@ -91,8 +92,15 @@ static std::wstring ReadFileW(const std::wstring& path, std::wstring& err) {
     fseek(f, 0, SEEK_SET);
     if (sz <= 0) { fclose(f); return L""; }
     std::string raw(sz, '\0');
-    (void)fread(raw.data(), 1, sz, f);
+    // Verify full read — a short read means the file changed size between ftell and fread,
+    // or we hit an I/O error; either way the JSON would be truncated and unparseable.
+    size_t nRead = fread(raw.data(), 1, static_cast<size_t>(sz), f);
     fclose(f);
+    if (nRead != static_cast<size_t>(sz)) {
+        err = L"File read incomplete (expected " + std::to_wstring(sz) +
+              L" bytes, got " + std::to_wstring(nRead) + L"): " + path;
+        return L"";
+    }
     // Skip UTF-8 BOM
     size_t off = 0;
     if (raw.size() >= 3 &&
@@ -257,6 +265,7 @@ std::wstring SequencerEngine::Load(const std::wstring& path, int64_t simOffsetMs
 }
 
 bool SequencerEngine::Start() {
+    assert(m_dispatch != nullptr);  // SetDispatch() must be called before Start()
     if (m_state.load() == SeqState::Running) return false;
     {
         std::lock_guard<std::mutex> lk(m_statMutex);
@@ -334,13 +343,15 @@ std::wstring SequencerEngine::StatusJson() const {
 // ─── Thread ───────────────────────────────────────────────────────────────────
 
 void SequencerEngine::ThreadProc() {
-    Log(L"[SEQ] Wątek sekwencera — start.");
+    Log(L"[SEQ] Sequencer thread start.");
 
     std::vector<SeqStep> steps;
     {
         std::lock_guard<std::mutex> lk(m_statMutex);
         steps = m_steps; // local copy — safe to iterate without holding lock
     }
+    assert(!steps.empty());  // Start() must not launch the thread with an empty step list
+    assert(m_dispatch);      // Start() must not launch the thread without a dispatch function
 
     for (int s = 0; s < (int)steps.size(); ++s) {
         if (m_stopReq.load()) break;
