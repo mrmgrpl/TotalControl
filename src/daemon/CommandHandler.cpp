@@ -246,9 +246,9 @@ static std::wstring DecodePropValue(uint32_t code, uint64_t raw) {
         switch (raw) {
         case 0x00000001: return L"single";
         case 0x00010001: return L"cont-hi";
-        case 0x00010004: return L"cont-hi-plus";
+        case 0x00010002: return L"cont-hi-plus";  // confirmed on ILCE-7RM4A
         case 0x00010006: return L"cont-hi-live";
-        case 0x00010002: return L"cont-lo";
+        case 0x00010004: return L"cont-lo";       // unconfirmed — swap if wrong
         case 0x00010003: return L"cont";
         case 0x00010007: return L"cont-mid";
         case 0x00011001: return L"burst-lo";
@@ -639,10 +639,10 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
         if (count > 1) {
             // Burst: resolve drive mode string → code (default cont-hi)
-            uint32_t driveCode = 0x00010001; // cont-hi
-            if      (driveStr == L"cont-hi-plus") driveCode = 0x00010004;
+            uint32_t driveCode = 0x00010001; // cont-hi (default)
+            if      (driveStr == L"cont-hi-plus") driveCode = 0x00010002;  // confirmed on ILCE-7RM4A
             else if (driveStr == L"cont-hi-live") driveCode = 0x00010006;
-            else if (driveStr == L"cont-lo")      driveCode = 0x00010002;
+            else if (driveStr == L"cont-lo")      driveCode = 0x00010004;  // unconfirmed — swap if wrong
             else if (driveStr == L"cont-mid")     driveCode = 0x00010007;
             cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
                                   L"DriveMode(burst)", 2000);
