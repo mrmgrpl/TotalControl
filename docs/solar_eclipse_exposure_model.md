@@ -1,27 +1,27 @@
 # Solar Eclipse Exposure Calculator — Model Reference
-## TSE 2026, Burgos/Lerma, 12 sierpnia 2026
+## TSE 2026, Burgos/Lerma, August 12 2026
 
-> **Źródła:** NASA RP-1457 (Espenak & Anderson 2004); NASA Table 40 — eclipse.gsfc.nasa.gov;
+> **Sources:** NASA RP-1457 (Espenak & Anderson 2004); NASA Table 40 — eclipse.gsfc.nasa.gov;
 > *Bulletin of the American Astronomical Society* 36, 1557 (2004).
-> Kalkulator Jubiera: http://xjubier.free.fr/en/site_pages/SolarEclipseExposure.html (v1.0.2, ostatnia aktualizacja 2017).
+> Jubier calculator: http://xjubier.free.fr/en/site_pages/SolarEclipseExposure.html (v1.0.2, last updated 2017).
 
 ---
 
-## 1. Wzór podstawowy (NASA/Espenak)
+## 1. Base formula (NASA/Espenak)
 
 ```
 t = f² / (ISO × 2^Q_eff)
 ```
 
-| Symbol    | Znaczenie                                           |
-|-----------|-----------------------------------------------------|
-| `t`       | Czas ekspozycji [s]                                 |
-| `f`       | Przesłona (f-number)                                |
-| `ISO`     | Czułość matrycy                                     |
-| `Q`       | Wykładnik jasności zjawiska (stała empiryczna NASA) |
-| `Q_eff`   | Q skorygowany o ekstynkcję atmosferyczną            |
+| Symbol    | Meaning                                              |
+|-----------|------------------------------------------------------|
+| `t`       | Exposure time [s]                                    |
+| `f`       | Aperture (f-number)                                  |
+| `ISO`     | Sensor sensitivity                                   |
+| `Q`       | Brightness exponent for the phenomenon (NASA empirical constant) |
+| `Q_eff`   | Q corrected for atmospheric extinction               |
 
-Przekształcenie na EV:
+Rearranged in EV:
 
 ```
 EV = Q_eff + log2(ISO) - 2·log2(f)
@@ -30,27 +30,27 @@ t  = 2^(-EV)
 
 ---
 
-## 2. Korekcja atmosferyczna
+## 2. Atmospheric correction
 
 ```
-X      = 1 / sin(h°)          # masa powietrzna (airmass)
-ΔEV    = k × X                # utrata jasności [EV]
-Q_eff  = Q - ΔEV              # (dla fazy totalnej; filtr ND dominuje fazę częściową)
+X      = 1 / sin(h°)          # airmass
+ΔEV    = k × X                # brightness loss [EV]
+Q_eff  = Q - ΔEV              # (totality phase; ND filter dominates partial phase)
 ```
 
-### Współczynniki ekstynkcji `k`
+### Extinction coefficients `k`
 
-| Stan nieba         | k [mag/airmass] |
+| Sky condition      | k [mag/airmass] |
 |--------------------|-----------------|
-| Czyste             | 0.13            |
-| Lekka mgiełka      | 0.25            |
-| Zamglone           | 0.50            |
+| Clear              | 0.13            |
+| Light haze         | 0.25            |
+| Hazy               | 0.50            |
 
-### TSE 2026 Burgos — parametry atmosferyczne
+### TSE 2026 Burgos — atmospheric parameters
 
 ```
-Lokalizacja : 42.34°N, 3.70°W  (Burgos/Lerma)
-Data/czas   : 12.08.2026, 20:29 CEST (18:29 UTC)
+Location    : 42.34°N, 3.70°W  (Burgos/Lerma)
+Date/time   : 2026-08-12, 20:29 CEST (18:29 UTC)
 h_sun       ≈ 8.0°
 X           ≈ 7.2
 ΔEV (clear) ≈ 0.94 EV
@@ -58,94 +58,94 @@ X           ≈ 7.2
 Totality    ≈ 104 s
 ```
 
-> ⚠️ Nisko wschodzące Słońce (h ≈ 8°) to największe wyzwanie TSE 2026.
-> Zewnętrzna korona przy Q = −3 wymaga wielosekundowych ekspozycji —
-> konieczny montaż paralaktyczny i tracking.
+> ⚠️ Low Sun altitude (h ≈ 8°) is the main challenge of TSE 2026.
+> Outer corona at Q = −3 requires multi-second exposures —
+> an equatorial mount with tracking is required.
 
 ---
 
-## 3. Tabela Q-values (NASA Table 40)
+## 3. Q-values table (NASA Table 40)
 
-| Zjawisko / obiekt               |  Q  | Filtr ND | Faza       |
-|---------------------------------|:---:|:--------:|------------|
-| Faza częściowa (ND 5.0 = 1/100k)|  8  | ✓        | częściowa  |
-| Faza częściowa (ND 4.0 = 1/10k) | 11  | ✓        | częściowa  |
-| Koraliki Bailey'ego             | 12  | —        | kontakt    |
-| Chromosfera                     | 11  | —        | totality   |
-| Protuberancje                   |  9  | —        | totality   |
-| Pierścień diamentowy (±6 s)     |  8  | —        | kontakt    |
-| Korona wewn. (< 0.1 R☉)        |  7  | —        | totality   |
-| Korona wewn. (< 0.2 R☉)        |  5  | —        | totality   |
-| Korona śr.   (< 0.5 R☉)        |  3  | —        | totality   |
-| Korona       (< 1.0 R☉)        |  1  | —        | totality   |
-| Korona zewn. (< 2.0 R☉)        |  0  | —        | totality   |
-| Korona zewn. (< 4.0 R☉)        | −1  | —        | totality   |
-| Korona zewn. (< 8.0 R☉)        | −3  | —        | totality   |
-| Earthshine                      | −5  | —        | totality   |
+| Phenomenon / object             |  Q  | ND filter | Phase    |
+|---------------------------------|:---:|:---------:|----------|
+| Partial phase (ND 5.0 = 1/100k) |  8  | ✓         | partial  |
+| Partial phase (ND 4.0 = 1/10k)  | 11  | ✓         | partial  |
+| Baily's Beads                   | 12  | —         | contact  |
+| Chromosphere                    | 11  | —         | totality |
+| Prominences                     |  9  | —         | totality |
+| Diamond ring (±6 s)             |  8  | —         | contact  |
+| Inner corona (< 0.1 R☉)        |  7  | —         | totality |
+| Inner corona (< 0.2 R☉)        |  5  | —         | totality |
+| Mid corona   (< 0.5 R☉)        |  3  | —         | totality |
+| Corona       (< 1.0 R☉)        |  1  | —         | totality |
+| Outer corona (< 2.0 R☉)        |  0  | —         | totality |
+| Outer corona (< 4.0 R☉)        | −1  | —         | totality |
+| Outer corona (< 8.0 R☉)        | −3  | —         | totality |
+| Earthshine                      | −5  | —         | totality |
 
 ---
 
-## 4. Parametry kamery — Sony A7R IVA
+## 4. Camera parameters — Sony A7R IVA
 
 ```
-Sensor         : Full Frame 35.9 × 24.0 mm
-Rozdzielczość  : 61 MP (9504 × 6336 px)
-Rozmiar piksela: 3.76 µm
-Migawka mech.  : 1/8000 s  (min)
-Migawka elektr.: 1/32000 s (min, tryb Silent)
-Maksymalny ISO : 51200 (natywny: 100–32000)
+Sensor          : Full Frame 35.9 × 24.0 mm
+Resolution      : 61 MP (9504 × 6336 px)
+Pixel size      : 3.76 µm
+Mechanical shutter : 1/8000 s  (min)
+Electronic shutter : 1/32000 s (min, Silent mode)
+Maximum ISO     : 51200 (native: 100–32000)
 ```
 
-### Skala piksela i pole widzenia
+### Pixel scale and field of view
 
 ```python
 pixel_scale_arcsec = (206265 * pixel_um / 1000) / focal_mm
 fov_w_arcmin       = (35.9 / focal_mm) * (180/pi) * 60
 fov_h_arcmin       = (24.0 / focal_mm) * (180/pi) * 60
-sun_fill_pct       = (32.0 / fov_w_arcmin) * 100   # średnica Słońca ≈ 32'
+sun_fill_pct       = (32.0 / fov_w_arcmin) * 100   # Sun diameter ≈ 32'
 ```
 
-| Ogniskowa | Skala ["/px] | FOV szer. | Słońce w kadrze |
-|----------:|:------------:|----------:|:---------------:|
-|   200 mm  |   3.88"      |  9.8°     |  ~5%            |
-|   300 mm  |   2.59"      |  6.5°     |  ~8%            |
-|   500 mm  |   1.55"      |  3.9°     | ~14%            |
-|   600 mm  |   1.29"      |  3.3°     | ~16%            |
-|   800 mm  |   0.97"      |  2.5°     | ~21%            |
-|  1200 mm  |   0.65"      |  1.6°     | ~33%            |
-|  2000 mm  |   0.39"      |  1.0°     | ~54%            |
+| Focal length | Scale ["/px] | FOV width | Sun in frame |
+|-------------:|:------------:|----------:|:------------:|
+|    200 mm    |   3.88"      |  9.8°     |  ~5%         |
+|    300 mm    |   2.59"      |  6.5°     |  ~8%         |
+|    500 mm    |   1.55"      |  3.9°     | ~14%         |
+|    600 mm    |   1.29"      |  3.3°     | ~16%         |
+|    800 mm    |   0.97"      |  2.5°     | ~21%         |
+|   1200 mm    |   0.65"      |  1.6°     | ~33%         |
+|   2000 mm    |   0.39"      |  1.0°     | ~54%         |
 
 ---
 
-## 5. Przykładowe czasy ekspozycji — setup referencyjny
+## 5. Sample exposure times — reference setup
 
-**Setup:** Sony A7R IVA + ogniskowa 500 mm, f/8, ISO 400, h = 8°, czyste niebo (ΔEV = 0.94)
+**Setup:** Sony A7R IVA + 500 mm focal length, f/8, ISO 400, h = 8°, clear sky (ΔEV = 0.94)
 
 ```
 Q_eff = Q - 0.94
 
-Zjawisko                    Q    Q_eff   t [s]         Czas
-─────────────────────────────────────────────────────────────
-Chromosfera                11   10.06   1/1000        1/1000 s
-Protuberancje               9    8.06   1/250         1/250 s
-Korona wewn. (< 0.1 R☉)    7    6.06   1/64         ~1/60 s
-Korona wewn. (< 0.2 R☉)    5    4.06   1/16         ~1/15 s
-Korona śr.   (< 0.5 R☉)    3    2.06   1/4           1/4 s
-Korona       (< 1.0 R☉)    1    0.06   1.0 s         1"
-Korona zewn. (< 2.0 R☉)    0   -0.94   1.9 s         2"
-Korona zewn. (< 4.0 R☉)   -1   -1.94   3.9 s         4"
-Korona zewn. (< 8.0 R☉)   -3   -3.94  15.6 s        16"
+Phenomenon                  Q    Q_eff   t [s]         Shutter
+────────────────────────────────────────────────────────────────
+Chromosphere               11   10.06   1/1000        1/1000 s
+Prominences                 9    8.06   1/250         1/250 s
+Inner corona (< 0.1 R☉)    7    6.06   1/64         ~1/60 s
+Inner corona (< 0.2 R☉)    5    4.06   1/16         ~1/15 s
+Mid corona   (< 0.5 R☉)    3    2.06   1/4           1/4 s
+Corona       (< 1.0 R☉)    1    0.06   1.0 s         1"
+Outer corona (< 2.0 R☉)    0   -0.94   1.9 s         2"
+Outer corona (< 4.0 R☉)   -1   -1.94   3.9 s         4"
+Outer corona (< 8.0 R☉)   -3   -3.94  15.6 s        16"
 Earthshine                 -5   -5.94  62.5 s        ⚠ >60"
-─────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────
 ```
 
-> Legenda: ⚡ = wymaga migawki elektronicznej | ⛔ = poza zasięgiem | ⚠ = krytyczne
+> Legend: ⚡ = electronic shutter required | ⛔ = out of range | ⚠ = critical
 
 ---
 
-## 6. Implementacja — funkcje Python/C++
+## 6. Implementation — Python/C++ functions
 
-### Python (referencja / skrypty planowania)
+### Python (reference / planning scripts)
 
 ```python
 import math
@@ -247,7 +247,7 @@ def build_sequence(
     return sequence
 
 
-# --- Użycie ---
+# --- Usage ---
 if __name__ == "__main__":
     seq = build_sequence(
         focal_mm=500,
@@ -260,7 +260,7 @@ if __name__ == "__main__":
         print(f"{s['phenomenon']:25s}  Q_eff={s['Q_eff']:+.2f}  t={s['t_s']:.4f}s  [{s['shutter_mode']}]")
 ```
 
-### C++ — szkielet dla TotalControl
+### C++ — skeleton for TotalControl
 
 ```cpp
 #include <cmath>
@@ -352,7 +352,7 @@ std::vector<ExposureEntry> build_sequence(
 
 ---
 
-## 7. JSON — format sekwencji dla TotalControl
+## 7. JSON — sequence format for TotalControl
 
 ```json
 {
@@ -393,16 +393,16 @@ std::vector<ExposureEntry> build_sequence(
 
 ---
 
-## 8. Źródła i linki
+## 8. Sources and links
 
-| Źródło | URL |
+| Source | URL |
 |--------|-----|
 | NASA Eclipse Photography (Espenak) | https://eclipse.gsfc.nasa.gov/SEhelp/eclipsePhoto.html |
 | NASA Table 40 — Exposure Guide | https://eclipse.gsfc.nasa.gov/SEpubs/19990811/tables/table_40.html |
 | Xavier Jubier Exposure Calculator | http://xjubier.free.fr/en/site_pages/SolarEclipseExposure.html |
 | Shaun Tarpley Exposure Spreadsheet | https://www.shaunctarpley.com/exposure-calculator |
-| TSE 2026 Interactive Map (Jubier) | http://xjubier.free.fr/en/site_pages/solar_eclipses/TSE_20260812_Google.html |
+| TSE 2026 Interactive Map (Jubier) | http://xjubier.free.fr/en/site_pages/solar_eclipses/xSE_GoogleMap3.php?Ecl=+20260812&Acc=1&Umb=1&Lmt=1&Mag=1 |
 
 ---
 
-*Wygenerowano: 2026-05-25 | Model: Claude Sonnet 4.6 | Do użytku w projekcie TotalControl*
+*Generated: 2026-05-25 | Model: Claude Sonnet 4.6 | TotalControl project*

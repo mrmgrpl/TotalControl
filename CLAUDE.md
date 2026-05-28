@@ -1,16 +1,16 @@
-# TotalControl — kontekst projektu dla Claude
+# TotalControl — project context for Claude
 
-## Cel projektu
+## Project goal
 
-Aplikacja Windows do sterowania aparatami Sony przez **Sony Camera Remote SDK (CrSDK)**.  
-Cel operacyjny: autonomiczne wykonanie sekwencji bracketów eksponometrycznych podczas zaćmienia Słońca TSE 2026-08-12 (Burgos/Lerma, totality 103.9s).
+Windows application for controlling Sony cameras via **Sony Camera Remote SDK (CrSDK)**.  
+Operational goal: autonomous execution of an exposure bracket sequence during the TSE 2026-08-12 solar eclipse (Burgos/Lerma, totality 103.9s).
 
 ## Build
 
-**Wymagania:** CMake 3.20+, MSVC (Visual Studio 2026 / VS 18), Windows 10+
+**Requirements:** CMake 3.20+, MSVC (Visual Studio 2026 / VS 18), Windows 10+
 
 ```
-# Konfiguracja (jednorazowo lub po zmianach CMakeLists.txt):
+# Configure (once, or after CMakeLists.txt changes):
 VsDevCmd.bat -arch=amd64
 cmake -B out/build/x64-Debug -S . -G Ninja -DCMAKE_BUILD_TYPE=Debug
 
@@ -21,61 +21,61 @@ cmake --build out/build/x64-Debug
 
 VS Developer Prompt: `C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat`
 
-**WAŻNE: zawsze `-arch=amd64`** — bez tego VsDevCmd ustawia LIB=x86 i linker nie znajdzie CRT (199 LNK2019).  
-Jeśli link zablokowany przez działający SRV: najpierw `TotalControlCLI quit`, potem build.
+**IMPORTANT: always `-arch=amd64`** — without it VsDevCmd sets LIB=x86 and the linker won't find CRT (199 LNK2019).  
+If link is blocked by a running SRV: first run `TotalControlCLI quit`, then build.
 
-Exeki lądują w `out/build/x64-Debug/`.  
-Post-build kopiuje DLL-e CrSDK + `CrAdapter/` obok SRV, oraz CLI obok SRV.
+Executables land in `out/build/x64-Debug/`.  
+Post-build copies CrSDK DLLs + `CrAdapter/` next to SRV, and CLI next to SRV.
 
-**CrSDK** jest w `external/CrSDK/{include,lib,bin}`. CMake weryfikuje obecność kluczowych plików — brak SDK = FATAL_ERROR.
+**CrSDK** is in `external/CrSDK/{include,lib,bin}`. CMake verifies the presence of key files — missing SDK = FATAL_ERROR.
 
-## Architektura
+## Architecture
 
 ```
 src/
   main.cpp                   # TotalControlSRV — daemon: SDK init + pipe server + SequencerEngine
-  CameraController.cpp       # warstwa CrSDK — jedyne miejsce z #include CrSDK
-  SequencerEngine.cpp        # sekwencer UTC: Load/Start/Stop, dispatch do CommandHandler
+  CameraController.cpp       # CrSDK layer — the only place with #include CrSDK
+  SequencerEngine.cpp        # UTC sequencer: Load/Start/Stop, dispatches to CommandHandler
   daemon/
     PipeServer.cpp           # named pipe \\.\pipe\TotalControl (JSON Lines, UTF-8)
     CommandHandler.cpp       # dispatcher: shoot/bracket/status/get/set/seq_*/...
   cli/
-    main.cpp                 # TotalControlCLI — cienki klient pipe
+    main.cpp                 # TotalControlCLI — thin pipe client
   visualization/             # stubs: Renderer3D, Overlay2D, CameraPreview
 
 include/
   CameraController.h         # zero #include CrSDK (forward-declare + pimpl)
   SequencerEngine.h          # SeqStep, SeqState, SequencerEngine class
 
-sequences/                   # pliki JSON sekwencji zdjęciowych
-  eclipse2026_example.json         # przykładowa sekwencja TSE 2026
-  eclipse2026_240mm_f56.json       # produkcja: 240mm f/5.6 korona zewnętrzna
-  eclipse2026_900mm_f10.json       # produkcja: 900mm f/10 korona wewnętrzna (Earthshine ISO=400)
-  test_sequence.json               # sekwencja testowa; C1=2026-08-12T12:00:00Z; uruchom z --test C1=...
+sequences/                   # JSON sequence files
+  eclipse2026_example.json         # example sequence TSE 2026
+  eclipse2026_240mm_f56.json       # production: 240mm f/5.6 outer corona
+  eclipse2026_900mm_f10.json       # production: 900mm f/10 inner corona (Earthshine ISO=400)
+  test_sequence.json               # test sequence; C1=2026-08-12T12:00:00Z; run with --test C1=...
 
 docs/
-  solar_eclipse_exposure_model.md  # NASA/Espenak formuła, Q-values, Python/C++ kalkulator
+  solar_eclipse_exposure_model.md  # NASA/Espenak formula, Q-values, Python/C++ calculator
 
-external/CrSDK/              # Sony SDK — nie modyfikować
+external/CrSDK/              # Sony SDK — do not modify
 ```
 
-### Kluczowa zasada izolacji SDK
+### Key SDK isolation rule
 
-Wszystkie `#include "CameraRemote_SDK.h"` **wyłącznie w `CameraController.cpp`**.  
-`CameraController.h` jest czysty — forward-declare `namespace SCRSDK`.
+All `#include "CameraRemote_SDK.h"` **exclusively in `CameraController.cpp`**.  
+`CameraController.h` is clean — forward-declares `namespace SCRSDK`.
 
 ## Property cache (m_propSetCache)
 
-Po `Connect()` wywoływana jest `WarmCache()` — wczytuje wszystkie aktualne wartości kamery do `m_propSetCache`. Kolejne `Set*` sprawdzają cache przed wywołaniem SDK:
+After `Connect()`, `WarmCache()` is called — it reads all current camera values into `m_propSetCache`. Subsequent `Set*` calls check the cache before calling the SDK:
 
-- **SetPropCached** — hit → `Skip (cached)`, brak SDK call; miss → SetPropRaw + cache update
-- **SetPropAndVerify** — hit → skip; miss → SetPropRaw + polling `GetPropRaw` do potwierdzenia + cache update po confirm; retry w połowie okresu
+- **SetPropCached** — hit → `Skip (cached)`, no SDK call; miss → SetPropRaw + cache update
+- **SetPropAndVerify** — hit → skip; miss → SetPropRaw + polling `GetPropRaw` for confirmation + cache update after confirm; retry at mid-interval
 
-Używają: SetPCRemotePriority, SetExposureMode, SetISO, SetFNumber, SetFocusMode, SetStoreDestination → `SetPropCached`; SetShutterSpeed (3s), DriveMode bracket/burst/single (2s) → `SetPropAndVerify`.
+Used by: SetPCRemotePriority, SetExposureMode, SetISO, SetFNumber, SetFocusMode, SetStoreDestination → `SetPropCached`; SetShutterSpeed (3s), DriveMode bracket/burst/single (2s) → `SetPropAndVerify`.
 
-## Protokół pipe (JSON Lines)
+## Pipe protocol (JSON Lines)
 
-Każde żądanie = jedna linia JSON + `\n`. Odpowiedź = jedna linia JSON + `\n`.
+Each request = one JSON line + `\n`. Response = one JSON line + `\n`.
 
 ```json
 {"cmd":"list_cameras"}
@@ -95,10 +95,10 @@ Każde żądanie = jedna linia JSON + `\n`. Odpowiedź = jedna linia JSON + `\n`
 {"cmd":"quit"}
 ```
 
-Pole `"cam"` opcjonalne — bez niego komenda → kamera[0].  
-`"cam"` akceptuje: pełny GUID, prefiks GUID, indeks numeryczny.
+The `"cam"` field is optional — without it the command targets camera[0].  
+`"cam"` accepts: full GUID, GUID prefix, numeric index.
 
-### Format pliku sekwencji
+### Sequence file format
 
 ```json
 {
@@ -119,112 +119,112 @@ Pole `"cam"` opcjonalne — bez niego komenda → kamera[0].
 }
 ```
 
-`interval_ms` + `until` → krok jest ekspandowany do wielu powtórzeń przy Load().  
-Krok pominięty (SKIP) gdy spóźnienie > 30s. Drift logowany przy każdym kroku.
+`interval_ms` + `until` → the step is expanded into multiple repetitions at Load().  
+Step skipped (SKIP) when late by > 30s. Drift is logged for each step.
 
-### Tryb testowy — `--test Cx=<utc>`
+### Test mode — `--test Cx=<utc>`
 
-Przesuwa wszystkie czasy sekwencji o `simOffsetMs = (now + 15 000) − contactUtcMs`, tak by wskazany kontakt odpalił za ~15 s od startu. JSON nie jest modyfikowany — offset wstrzykiwany jako `sim_offset_ms` do komendy pipe.
+Shifts all sequence times by `simOffsetMs = (now + 15 000) − contactUtcMs` so that the specified contact fires ~15 s after start. The JSON file is not modified — the offset is injected as `sim_offset_ms` in the pipe command.
 
 ```
-# Test sekwencji produkcyjnej — C2 za 15 s od teraz:
+# Production sequence test — C2 triggers in 15 s from now:
 TotalControlCLI seq_start sequences/eclipse2026_240mm_f56.json --test C2=2026-08-12T20:29:02.100Z
 
-# Test z pliku testowego — step-1 za 15 s:
+# Test from test file — step-1 triggers in 15 s:
 TotalControlCLI seq_start sequences/test_sequence.json --test C1=2026-08-12T12:00:00.000Z
 
-# "now" — bieżący czas jako kontakt (sens: shift = +15 s, przydatne gdy sekwencja już jest blisko now):
+# "now" — current time as contact (effect: shift = +15 s, useful when sequence is already close to now):
 TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 ```
 
-**WAŻNE:** `--test C2 now` z sekwencją produkcyjną (sierpień 2026) daje `offset = +15 s`, NIE przesuwa kroków do teraz — kroki dalej czekają do sierpnia 2026. Użyj `--test C2=2026-08-12T20:29:02.100Z` (poda dużą ujemną różnicę ~−77 dni) żeby naprawdę przetestować sekvencję teraz.
+**IMPORTANT:** `--test C2 now` with the production sequence (August 2026) gives `offset = +15 s` — it does NOT shift steps to the present; steps still wait until August 2026. Use `--test C2=2026-08-12T20:29:02.100Z` (which gives a large negative difference of ~−77 days) to actually test the sequence right now.
 
-## Konwencje kodu
+## Code conventions
 
 - C++17, MSVC, Unicode (`wchar_t`, `std::wstring`)
-- Namespace: `TotalControl`; alias SDK: `namespace SDK = SCRSDK;`
-- Flagi: `/W4 /WX /MP /utf-8`
+- Namespace: `TotalControl`; SDK alias: `namespace SDK = SCRSDK;`
+- Flags: `/W4 /WX /MP /utf-8`
 
-## Logowanie
+## Logging
 
-- `TotalControlSRV.log` — daemon, obok exe, trunc przy starcie
-- `TotalControlCLI.log` — CLI, obok exe, append; wyłącz: `--nolog`
+- `TotalControlSRV.log` — daemon, next to exe, truncated on start
+- `TotalControlCLI.log` — CLI, next to exe, append mode; disable with: `--nolog`
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Stan aktualny (2026-05-28)
+## Current status (2026-05-28)
 
-| Moduł | Stan |
+| Module | Status |
 |---|---|
-| CMakeLists.txt | SRV + CLI targets; Debug + Release (x64-Release z /O2) |
+| CMakeLists.txt | SRV + CLI targets; Debug + Release (x64-Release with /O2) |
 | CameraController | Init/Connect/Disconnect + WarmCache + property cache + multi-cam |
-| PipeServer | Działa — named pipe, JSON Lines |
+| PipeServer | Working — named pipe, JSON Lines |
 | CommandHandler | shoot/bracket/burst/movie/af/get/set/cmd/quit/list_cameras/seq_* |
-| Multi-camera | Enumerate + Connect(guid) + routing po "cam":guid/index |
+| Multi-camera | Enumerate + Connect(guid) + routing by "cam":guid/index |
 | Graceful shutdown | SetConsoleCtrlHandler → RequestShutdown → Shutdown() |
-| GetId fallback | GuidOrIdHex() — USB kamera: GetId() jako UTF-16LE string |
-| Singleton mutex | `TotalControl_DaemonRunning` — SRV odrzuca drugi egzemplarz |
+| GetId fallback | GuidOrIdHex() — USB camera: GetId() as UTF-16LE string |
+| Singleton mutex | `TotalControl_DaemonRunning` — SRV rejects second instance |
 | SequencerEngine | Load/Start/Stop, UTC ms, repeat steps, seq_start/stop/status |
-| ParseUtcMs | Naprawiony FILETIME epoch: 11 644 473 600 000 ms |
-| --test Cx-Ns | Czyta czas kontaktu z JSON "contacts", lead = N sekund |
-| Live monitor | Countdown ms do kroku po seq_start; Ctrl+C = exit |
-| **Startup status table** | **Tabelka po połączeniu: battery/mode/SS/ISO/f/focus/drive/cards/store/WB/time** |
-| **ASCII logo + wersja** | **LogBanner() bez timestamp; kVersion = "2026.05.28"** |
-| **ANSI warnings** | **LogWarning() — czerwony tekst na konsoli; ENABLE_VIRTUAL_TERMINAL_PROCESSING** |
-| **Card status fix** | **CrSlotStatus_OK=0x0000 (nie "no-card"!) — mapowanie naprawione** |
-| **Battery level** | **Dodane warianty _PowerSupply (full+usb, 3/4+usb, …)** |
-| **f-number locale** | **Ręczne formatowanie int.dec zamiast %.1f (unika polskiego przecinka)** |
-| **Host UTC w statusie** | **GetSystemTimePreciseAsFileTime() — zawsze dostępny; cam_time n/a przez USB** |
-| sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — produkcyjne sekwencje TSE 2026 |
+| ParseUtcMs | Fixed FILETIME epoch: 11 644 473 600 000 ms |
+| --test Cx-Ns | Reads contact time from JSON "contacts", lead = N seconds |
+| Live monitor | Countdown ms to step after seq_start; Ctrl+C = exit |
+| **Startup status table** | **Status table on connect: battery/mode/SS/ISO/f/focus/drive/cards/store/WB/time** |
+| **ASCII logo + version** | **LogBanner() without timestamp; kVersion = "2026.05.28"** |
+| **ANSI warnings** | **LogWarning() — red text on console; ENABLE_VIRTUAL_TERMINAL_PROCESSING** |
+| **Card status fix** | **CrSlotStatus_OK=0x0000 (not "no-card"!) — mapping fixed** |
+| **Battery level** | **Added _PowerSupply variants (full+usb, 3/4+usb, …)** |
+| **f-number locale** | **Manual int.dec formatting instead of %.1f (avoids locale decimal separator)** |
+| **Host UTC in status** | **GetSystemTimePreciseAsFileTime() — always available; cam_time n/a over USB** |
+| sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — production sequences TSE 2026 |
 | docs/ | solar_eclipse_exposure_model.md |
-| Renderer3D / Overlay2D / CameraPreview | Puste stubs |
-| **TotalControlGUI** | **Planowany — implementacja wkrótce** |
+| Renderer3D / Overlay2D / CameraPreview | Empty stubs |
+| **TotalControlGUI** | **Planned — implementation coming soon** |
 
-### Znane pułapki parsera JSON sekwencji (SequencerEngine.cpp)
+### Known pitfalls in the sequence JSON parser (SequencerEngine.cpp)
 
-Mini-parser ręczny (bez zewnętrznych bibliotek). Trzy pułapki napotykane przy testach:
+Hand-written mini-parser (no external libraries). Three pitfalls encountered during tests:
 
-- `ExtractSteps`: szukaj `"steps"` potem skip whitespace + `:` + skip whitespace + `[` (nie `"steps":[` bezpośrednio)
-- `SJStr`: szukaj `"key":` potem skip whitespace potem sprawdź `"` (JSON formatowany z wcięciami ma spacje między `:` a wartością)
-- `SJInt64`: już toleruje whitespace po `:`
+- `ExtractSteps`: search for `"steps"` then skip whitespace + `:` + skip whitespace + `[` (not `"steps":[` directly)
+- `SJStr`: search for `"key":` then skip whitespace then check `"` (indented JSON has spaces between `:` and value)
+- `SJInt64`: already tolerates whitespace after `:`
 
-## Znane pułapki CrSDK
+## Known CrSDK pitfalls
 
-- `DeviceConnectionVersioin` — literówka w SDK (podwójne `i`), tak ma być
-- `Connect()` jest **asynchroniczne** — czekaj na `OnConnected`, nie na `err==0`
-- `ICrCameraObjectInfo*` wymaga `const_cast` przy przekazaniu do `Connect()`
-- `EnumCameraObjects` — drugi arg = timeout w sekundach, bez niego może zawiesić wątek
-- ShutterSpeed i DriveMode mogą być odroczone gdy kamera zapisuje RAW — polling GetPropRaw
-- `StoreDestination = HostPC (0x01)` → CrNotify_Captured_Event NIE odpala
-- Transport DLL-e muszą być w podkatalogu `CrAdapter/` — CMake robi to w POST_BUILD
-- GetGuid() puste dla USB → GuidOrIdHex() fallback na GetId() jako UTF-16LE
-- `GetTimeZoneSetting()` zwraca `0x8003` (CrError_Generic_NotSupported) dla USB — czas kamery przez USB niedostępny; Host UTC z `GetSystemTimePreciseAsFileTime()` jest zawsze dostępny i wystarczy do korekcji dryftu (porównanie z EXIF DateTimeOriginal)
-- `CrSlotStatus_OK = 0x0000` (karta obecna), `CrSlotStatus_NoCard = 0x0001` — stara błędna kolejność dawała fałszywe "no-card" przy obecnej karcie
+- `DeviceConnectionVersioin` — typo in SDK (double `i`), intentional
+- `Connect()` is **asynchronous** — wait for `OnConnected`, not `err==0`
+- `ICrCameraObjectInfo*` requires `const_cast` when passed to `Connect()`
+- `EnumCameraObjects` — second arg = timeout in seconds; omitting it may hang the thread
+- ShutterSpeed and DriveMode may be deferred while camera is writing RAW — poll via GetPropRaw
+- `StoreDestination = HostPC (0x01)` → CrNotify_Captured_Event does NOT fire
+- Transport DLLs must be in `CrAdapter/` subdirectory — CMake does this in POST_BUILD
+- GetGuid() empty for USB → GuidOrIdHex() fallback to GetId() as UTF-16LE
+- `GetTimeZoneSetting()` returns `0x8003` (CrError_Generic_NotSupported) for USB — camera time unavailable over USB; host UTC from `GetSystemTimePreciseAsFileTime()` is always available and sufficient for drift correction (compare with EXIF DateTimeOriginal)
+- `CrSlotStatus_OK = 0x0000` (card present), `CrSlotStatus_NoCard = 0x0001` — old wrong ordering produced false "no-card" with card present
 
-## Kolejność cleanup (ważne)
+## Cleanup order (important)
 
 ```cpp
 Cr::Disconnect(hDev);
 Cr::ReleaseDevice(hDev);
-Cr::Release();      // zatrzymuje wewnętrzne wątki SDK
-delete cb;          // dopiero po Release()
+Cr::Release();      // stops internal SDK threads
+delete cb;          // only after Release()
 ```
 
-## Ekspozycja — TSE 2026 (NASA/Espenak, f/8, ISO 100, h=8°, ΔEV=0.94)
+## Exposure — TSE 2026 (NASA/Espenak, f/8, ISO 100, h=8°, ΔEV=0.94)
 
 ```
 t = f² / (ISO × 2^Q_eff)    Q_eff = Q_NASA - ΔEV
 
-Zjawisko          Q   Q_eff   t@ISO100,f8
-Chromosfera      11   10.06   ~1/2000s
-Protuberancje     9    8.06   ~1/500s
-Korona <0.1R☉     7    6.06   ~1/100s
-Korona <0.2R☉     5    4.06   ~1/25s
-Korona <0.5R☉     3    2.06   ~1/6s
-Korona <1.0R☉     1    0.06   ~0.6s
-Korona <2.0R☉     0   -0.94   ~1.2s
-Korona <4.0R☉    -1   -1.94   ~2.4s
-Korona <8.0R☉    -3   -3.94   ~10s
+Phenomenon        Q   Q_eff   t@ISO100,f8
+Chromosphere     11   10.06   ~1/2000s
+Prominences       9    8.06   ~1/500s
+Corona <0.1R☉     7    6.06   ~1/100s
+Corona <0.2R☉     5    4.06   ~1/25s
+Corona <0.5R☉     3    2.06   ~1/6s
+Corona <1.0R☉     1    0.06   ~0.6s
+Corona <2.0R☉     0   -0.94   ~1.2s
+Corona <4.0R☉    -1   -1.94   ~2.4s
+Corona <8.0R☉    -3   -3.94   ~10s
 Earthshine       -5   -5.94   ~40s  ← ISO 400 = ~10s, ISO 1600 = ~2.5s
 ```
 
-Earthshine przy ISO 100 wymaga ~40s. Dla 7s ekspozycji użyć ISO 1600 (~2.5s) lub ISO 400 (~10s).
+Earthshine at ISO 100 requires ~40s. For a 7s exposure use ISO 1600 (~2.5s) or ISO 400 (~10s).
