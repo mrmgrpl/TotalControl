@@ -182,11 +182,10 @@ void App::OnFrame() {
 
     ImGui::End();
 
-    // Auto-reconnect pipe only — never auto-launch SRV (user must press "Launch SRV")
+    // Auto-reconnect pipe silently — never auto-launch SRV (user must press "Launch SRV")
     if (m_pipe.GetState() == PipeClient::State::Disconnected) {
         if (m_reconnectCountdown <= 0) {
-            if (m_pipe.Connect())
-                LogLine("pipe: reconnected");
+            m_pipe.Connect(); // state change logged by poll thread
             m_reconnectCountdown = 60; // retry every ~1s at 60fps
         } else {
             --m_reconnectCountdown;
