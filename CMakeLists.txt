@@ -112,6 +112,7 @@ add_library(imgui STATIC
     "${IMGUI_ROOT}/imgui_draw.cpp"
     "${IMGUI_ROOT}/imgui_tables.cpp"
     "${IMGUI_ROOT}/imgui_widgets.cpp"
+    "${IMGUI_ROOT}/imgui_demo.cpp"
     "${IMGUI_BACKENDS}/imgui_impl_win32.cpp"
     "${IMGUI_BACKENDS}/imgui_impl_dx11.cpp"
 )
