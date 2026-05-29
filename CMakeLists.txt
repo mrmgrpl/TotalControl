@@ -103,9 +103,70 @@ add_custom_command(TARGET TotalControlCLI POST_BUILD
     COMMENT "Kopiowanie TotalControlCLI.exe -> output SRV"
 )
 
-# ─── TotalControlGUI.exe — graficzny interfejs (placeholder) ─────────────────
-# add_executable(TotalControlGUI src/gui/main.cpp)
-# ... (do implementacji)
+# ─── Dear ImGui — built as a static library (no /WX, no warnings) ────────────
+set(IMGUI_ROOT     "${CMAKE_SOURCE_DIR}/external/imgui")
+set(IMGUI_BACKENDS "${IMGUI_ROOT}/backends")
+
+add_library(imgui STATIC
+    "${IMGUI_ROOT}/imgui.cpp"
+    "${IMGUI_ROOT}/imgui_draw.cpp"
+    "${IMGUI_ROOT}/imgui_tables.cpp"
+    "${IMGUI_ROOT}/imgui_widgets.cpp"
+    "${IMGUI_BACKENDS}/imgui_impl_win32.cpp"
+    "${IMGUI_BACKENDS}/imgui_impl_dx11.cpp"
+)
+
+target_include_directories(imgui PUBLIC
+    ${IMGUI_ROOT}
+    ${IMGUI_BACKENDS}
+)
+
+target_compile_definitions(imgui PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
+    _WIN32_WINNT=0x0A00
+)
+
+# No /WX — third-party code, warnings suppressed
+target_compile_options(imgui PRIVATE /W0 /MP /utf-8)
+
+# ─── TotalControlGUI.exe — mission control GUI ───────────────────────────────
+add_executable(TotalControlGUI WIN32
+    src/gui/main_gui.cpp
+    src/gui/App.cpp
+    src/gui/PipeClient.cpp
+)
+
+target_include_directories(TotalControlGUI PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/gui
+    ${IMGUI_ROOT}
+    ${IMGUI_BACKENDS}
+)
+
+target_compile_definitions(TotalControlGUI PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
+    _WIN32_WINNT=0x0A00
+)
+
+target_compile_options(TotalControlGUI PRIVATE
+    /W4 /WX /MP /utf-8
+)
+
+target_link_libraries(TotalControlGUI PRIVATE
+    imgui
+    d3d11.lib dxgi.lib
+    kernel32.lib user32.lib gdi32.lib
+    ole32.lib oleaut32.lib uuid.lib shell32.lib
+)
+
+# Copy GUI exe next to SRV exe
+add_custom_command(TARGET TotalControlGUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:TotalControlGUI>"
+        "$<TARGET_FILE_DIR:TotalControlSRV>/TotalControlGUI.exe"
+    COMMENT "Copy TotalControlGUI.exe -> SRV output dir"
+)
 
 message(STATUS "TotalControl | CrSDK include : ${CRSDK_INCLUDE}")
 message(STATUS "TotalControl | CrSDK lib     : ${CRSDK_LIB}")

@@ -12,8 +12,15 @@ out/
 *.exp
 *.lib
 
-# CrSDK — nie commitujemy
+# External SDKs — not committed
 external/CrSDK/
+
+# Large HTML API reference docs (234 MB)
+docs/CrSDK_API_Reference_v2.01.00/
+
+# Dev artifacts
+TotalControl_Context_Prompt.docx
+build_debug.bat
 
 # Visual Studio
 .vs/
