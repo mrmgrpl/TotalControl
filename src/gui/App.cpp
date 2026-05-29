@@ -75,15 +75,35 @@ static std::wstring ExeDir() {
     return (slash != std::wstring::npos) ? s.substr(0, slash) : s;
 }
 
+// ─── Logging ─────────────────────────────────────────────────────────────────
+
+void App::LogLine(const char* msg) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char ts[32];
+    snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
+        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    std::lock_guard<std::mutex> lk(m_logMutex);
+    if (m_logFile.is_open()) {
+        m_logFile << ts << "  " << msg << "\n";
+        m_logFile.flush();
+    }
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
-App::App() = default;
+App::App() {
+    std::wstring logPath = ExeDir() + L"\\TotalControlGUI.log";
+    m_logFile.open(logPath, std::ios::app);  // append mode — accumulate across sessions
+    LogLine("=== TotalControlGUI start ===");
+}
 
 App::~App() {
     StopPollThread();
     if (m_pipe.GetState() == PipeClient::State::Connected)
         m_pipe.Send("{\"cmd\":\"quit\"}");
     m_pipe.Disconnect();
+    LogLine("=== TotalControlGUI exit ===");
 }
 
 void App::OnInit() {
@@ -162,23 +182,15 @@ void App::OnFrame() {
 
     ImGui::End();
 
-    // Auto-reconnect
+    // Auto-reconnect pipe only — never auto-launch SRV (user must press "Launch SRV")
     if (m_pipe.GetState() == PipeClient::State::Disconnected) {
         if (m_reconnectCountdown <= 0) {
-            if (!m_pipe.Connect() && !m_srvLaunched) {
-                TryLaunchDaemon();
-                m_srvLaunched = true;
-                m_reconnectCountdown = 120; // wait ~2s at 60fps before retrying
-            } else if (m_pipe.GetState() == PipeClient::State::Disconnected) {
-                m_reconnectCountdown = 30;
-            } else {
-                m_srvLaunched = false;
-            }
+            if (m_pipe.Connect())
+                LogLine("pipe: reconnected");
+            m_reconnectCountdown = 60; // retry every ~1s at 60fps
         } else {
             --m_reconnectCountdown;
         }
-    } else {
-        m_srvLaunched = false;
     }
 }
 
@@ -226,6 +238,7 @@ void App::DrawConnectionPanel() {
     if (st == PipeClient::State::Connected) {
         ImGui::TextColored(ImVec4(0.20f, 0.85f, 0.30f, 1.0f), "Connected to TotalControlSRV");
         if (ImGui::Button("Disconnect")) {
+            LogLine("user: disconnect");
             StopPollThread();
             m_pipe.Disconnect();
             StartPollThread();
@@ -234,15 +247,18 @@ void App::DrawConnectionPanel() {
         ImGui::TextColored(ImVec4(0.85f, 0.40f, 0.20f, 1.0f), "Not connected");
         ImGui::SameLine();
         if (ImGui::Button("Connect")) {
-            if (!m_pipe.Connect()) {
-                TryLaunchDaemon();
-                m_reconnectCountdown = 60;
-            }
+            if (m_pipe.Connect())
+                LogLine("user: connect OK");
+            else
+                LogLine("user: connect failed");
         }
         ImGui::SameLine();
         if (ImGui::Button("Launch SRV")) {
-            TryLaunchDaemon();
-            m_reconnectCountdown = 60;
+            LogLine("user: launch SRV");
+            if (TryLaunchDaemon())
+                m_reconnectCountdown = 90; // give SRV ~1.5s to start before reconnect
+            else
+                LogLine("launch SRV: CreateProcess failed");
         }
     }
 
@@ -389,8 +405,18 @@ void App::StopPollThread() {
 }
 
 void App::PollStatus() {
+    PipeClient::State lastState = PipeClient::State::Disconnected;
+
     while (m_pollRun.load()) {
-        if (m_pipe.GetState() == PipeClient::State::Connected) {
+        // Log state transitions
+        PipeClient::State curState = m_pipe.GetState();
+        if (curState != lastState) {
+            LogLine(curState == PipeClient::State::Connected
+                ? "pipe: connected" : "pipe: disconnected");
+            lastState = curState;
+        }
+
+        if (curState == PipeClient::State::Connected) {
             std::string resp;
 
             // Camera status

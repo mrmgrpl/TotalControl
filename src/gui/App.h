@@ -3,6 +3,8 @@
 #include <string>
 #include <atomic>
 #include <chrono>
+#include <fstream>
+#include <mutex>
 
 // ImGui forward declarations (avoid including imgui.h in the header)
 struct ImFont;
@@ -78,11 +80,15 @@ private:
 
     // Connection management
     int  m_reconnectCountdown = 0;  // frames until next Connect() attempt
-    bool m_srvLaunched = false;
 
     // Fonts (set during OnInit from ImGui context)
-    ImFont* m_fontMono = nullptr;
+    ImFont* m_fontMono  = nullptr;
     ImFont* m_fontLarge = nullptr;
+
+    // Log file — append mode, next to exe
+    std::ofstream m_logFile;
+    std::mutex    m_logMutex;
+    void LogLine(const char* msg);
 };
 
 } // namespace TotalControl
