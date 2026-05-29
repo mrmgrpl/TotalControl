@@ -1,13 +1,15 @@
 #include "App.h"
+#include "Timezones.h"
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 
 #include <windows.h>
-#include <cstdio>
 #include <chrono>
-#include <thread>
+#include <cstdio>
+#include <format>
+#include <string_view>
 
 namespace TotalControl {
 
@@ -21,6 +23,7 @@ static std::wstring ExeDir() {
     return (slash != std::wstring::npos) ? s.substr(0, slash) : s;
 }
 
+// Returns UTC milliseconds since Unix epoch using high-resolution Windows clock.
 static int64_t UtcNowMs() {
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
@@ -30,42 +33,87 @@ static int64_t UtcNowMs() {
     return static_cast<int64_t>(ui.QuadPart / 10000) - 11644473600000LL;
 }
 
-static void FormatUtcHms(int64_t ms, char* buf, int bufLen) {
-    int64_t s   = ms / 1000;
-    int     mss = static_cast<int>(ms % 1000);
+// Formats HH:MM:SS.mmm for the UTC clock (millisecond precision).
+static void FormatUtcHms(int64_t ms, char* buf, int len) {
+    int64_t s  = ms / 1000;
+    int     ms3 = static_cast<int>(ms % 1000);
     int     hh  = static_cast<int>((s / 3600) % 24);
-    int     mm  = static_cast<int>((s / 60) % 60);
+    int     mm  = static_cast<int>((s / 60)   % 60);
     int     sc  = static_cast<int>(s % 60);
-    snprintf(buf, bufLen, "%02d:%02d:%02d.%03d", hh, mm, sc, mss);
+    snprintf(buf, len, "%02d:%02d:%02d.%03d", hh, mm, sc, ms3);
+}
+
+// Formats HH:MM:SS for a local clock identified by an IANA timezone name.
+// Uses std::chrono::locate_zone (C++20) — DST is handled by the MSVC runtime
+// which maps IANA names to Windows registry zones (updated by Windows Update).
+// Falls back to "--:--:--" for unknown or invalid timezone names.
+static void FormatLocalHms(int64_t utcMs, const std::string& ianaName,
+                            char* buf, int len) {
+    using namespace std::chrono;
+    try {
+        const time_zone* tz = locate_zone(ianaName);
+        auto sys_tp = system_clock::time_point{milliseconds{utcMs}};
+        auto zoned  = zoned_time{tz, sys_tp};
+        auto local  = zoned.get_local_time();
+        auto day_start = floor<days>(local);
+        hh_mm_ss tod{local - day_start};
+        snprintf(buf, len, "%02d:%02d:%02d",
+            static_cast<int>(tod.hours().count()),
+            static_cast<int>(tod.minutes().count()),
+            static_cast<int>(tod.seconds().count()));
+    } catch (...) {
+        snprintf(buf, len, "--:--:--");
+    }
 }
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
-void App::LogLine(const char* msg) {
+void App::LogLine(std::string_view msg) {
     SYSTEMTIME st;
     GetLocalTime(&st);
-    char ts[32];
-    snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
-        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    std::lock_guard<std::mutex> lk(m_logMutex);
+    std::lock_guard lk(m_logMutex);
     if (m_logFile.is_open()) {
-        m_logFile << ts << "  " << msg << "\n";
+        m_logFile << std::format("{:02d}:{:02d}:{:02d}.{:03d}  {}\n",
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
         m_logFile.flush();
     }
+}
+
+// ─── Persistent settings ──────────────────────────────────────────────────────
+
+void App::SaveClockSettings() {
+    m_db.SetSettingInt("show_home_clock", m_showHomeClock ? 1 : 0);
+    m_db.SetSettingInt("show_ecl_clock",  m_showEclClock  ? 1 : 0);
+    m_db.SetSetting("home_tz_iana", m_homeTzIana.c_str());
+    m_db.SetSetting("ecl_tz_iana",  m_eclTzIana.c_str());
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 App::App() {
-    std::wstring logPath = ExeDir() + L"\\TotalControlGUI.log";
-    m_logFile.open(logPath, std::ios::app);
+    std::wstring dir = ExeDir();
+
+    m_logFile.open(dir + L"\\TotalControlGUI.log", std::ios::app);
     LogLine("=== TotalControlGUI start ===");
+
+    if (m_db.Open(dir + L"\\TotalControl.db")) {
+        m_showHomeClock = m_db.GetSettingInt("show_home_clock", 1) != 0;
+        m_showEclClock  = m_db.GetSettingInt("show_ecl_clock",  1) != 0;
+
+        std::string home = m_db.GetSetting("home_tz_iana", "");
+        std::string ecl  = m_db.GetSetting("ecl_tz_iana",  "");
+        if (!home.empty()) m_homeTzIana = home;
+        if (!ecl.empty())  m_eclTzIana  = ecl;
+
+        LogLine(std::format("DB: home={}  ecl={}", m_homeTzIana, m_eclTzIana));
+    } else {
+        LogLine("WARNING: could not open TotalControl.db — settings not persisted");
+    }
 }
 
 App::~App() {
     if (m_pipe.GetState() == PipeClient::State::Connected) {
-        std::string resp;
-        m_pipe.SendRequest("{\"cmd\":\"quit\"}", resp);
+        (void)m_pipe.Send("{\"cmd\":\"quit\"}");
         m_pipe.Disconnect();
     }
     LogLine("=== TotalControlGUI exit ===");
@@ -99,10 +147,94 @@ void App::OnInit() {
     c[ImGuiCol_Border]        = ImVec4(0.22f, 0.22f, 0.28f, 1.0f);
 }
 
+// ─── Extra clock row ──────────────────────────────────────────────────────────
+//
+// Panel layout (content width ~176px):
+//
+//   HH:MM:SS            [=]   ← coloured time  +  gear button right-aligned
+//   [✓]  CODE                 ← checkbox  +  IANA code tag
+
+void App::RenderExtraClock(const char* clockId, const char* popupId,
+                            bool& show, std::string& tzIana) {
+    // Find current list entry for this IANA name
+    int curIdx = TzFindByIana(tzIana.c_str());
+    const TzDef& cur = kTzList[curIdx];
+
+    ImGuiStyle& style = ImGui::GetStyle();
+
+    // ── row 1: time + gear button ─────────────────────────────────────────
+    ImGui::PushFont(m_fontMono);
+
+    char timeBuf[12];
+    FormatLocalHms(UtcNowMs(), tzIana, timeBuf, sizeof(timeBuf));
+
+    static const ImVec4 kColorHome{ 0.45f, 0.75f, 1.00f, 1.0f };  // soft blue
+    static const ImVec4 kColorEcl { 0.40f, 1.00f, 0.80f, 1.0f };  // cyan-green
+    ImVec4 timeColor = (clockId[0] == 'H') ? kColorHome : kColorEcl;
+
+    if (!show) {
+        ImVec4 dim = timeColor;  dim.w = 0.35f;
+        ImGui::TextColored(dim, "%s", timeBuf);
+    } else {
+        ImGui::TextColored(timeColor, "%s", timeBuf);
+    }
+
+    // Gear button — right-aligned on the same line
+    {
+        char gearId[48];
+        snprintf(gearId, sizeof(gearId), "=##gear_%s", popupId);
+        float gearW = ImGui::CalcTextSize("=").x
+                    + style.FramePadding.x * 2.0f
+                    + style.ItemSpacing.x;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - gearW + style.ItemSpacing.x);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.18f, 0.26f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.32f, 0.48f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.55f, 0.65f, 0.85f, 1.0f));
+        if (ImGui::SmallButton(gearId))
+            ImGui::OpenPopup(popupId);
+        ImGui::PopStyleColor(3);
+    }
+
+    ImGui::PopFont();
+
+    // ── row 2: checkbox + IANA code ───────────────────────────────────────
+    bool prevShow = show;
+    ImGui::Checkbox(clockId, &show);
+    if (show != prevShow) SaveClockSettings();
+
+    ImGui::SameLine(0, 6);
+    ImGui::PushFont(m_fontMono);
+    ImGui::TextColored(ImVec4(0.38f, 0.38f, 0.44f, 1.0f), "%s", cur.code);
+    ImGui::PopFont();
+
+    // ── timezone picker popup ─────────────────────────────────────────────
+    ImGui::SetNextWindowSizeConstraints(ImVec2(300, 0), ImVec2(300, 480));
+    if (ImGui::BeginPopup(popupId)) {
+        ImGui::TextColored(ImVec4(0.55f, 0.65f, 0.85f, 1.0f), "Select timezone");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        for (int i = 0; i < kTzCount; ++i) {
+            bool sel = (i == curIdx);
+            char entry[80];
+            snprintf(entry, sizeof(entry), "%-5s  %-20s  %s",
+                     kTzList[i].code, kTzList[i].label, kTzList[i].iana);
+            if (ImGui::Selectable(entry, sel)) {
+                tzIana = kTzList[i].iana;
+                SaveClockSettings();
+                ImGui::CloseCurrentPopup();
+            }
+            if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// ─── Main frame ───────────────────────────────────────────────────────────────
+
 void App::OnFrame() {
     ImGuiIO& io = ImGui::GetIO();
 
-    // ── full-screen host (no decoration, no padding) ─────────────────────────
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(io.DisplaySize);
     ImGui::SetNextWindowBgAlpha(1.0f);
@@ -110,12 +242,12 @@ void App::OnFrame() {
     ImGui::Begin("##host", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
-    const float sideW    = 200.0f;
-    const float totalH   = io.DisplaySize.y;
-    const float rightW   = io.DisplaySize.x - sideW;
+    const float sideW  = 200.0f;
+    const float totalH = io.DisplaySize.y;
+    const float rightW = io.DisplaySize.x - sideW;
 
     bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
 
@@ -128,28 +260,38 @@ void App::OnFrame() {
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
-    // ── app name ─────────────────────────────────────────────────────────────
+    // ── app name ─────────────────────────────────────────────────────────
     ImGui::PushFont(m_fontMono);
     ImGui::TextColored(ImVec4(0.90f, 0.90f, 0.92f, 1.0f), "TotalControl");
     ImGui::PopFont();
 
     ImGui::Spacing();
 
-    // ── UTC clock (updates every frame) ──────────────────────────────────────
+    // ── UTC clock (always on, no options) ─────────────────────────────────
     {
-        char clockBuf[20];
-        FormatUtcHms(UtcNowMs(), clockBuf, sizeof(clockBuf));
+        char buf[20];
+        FormatUtcHms(UtcNowMs(), buf, sizeof(buf));
         ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(ImVec4(0.90f, 0.75f, 0.20f, 1.0f), "%s", clockBuf);
+        ImGui::TextColored(ImVec4(0.90f, 0.75f, 0.20f, 1.0f), "%s", buf);
         ImGui::TextColored(ImVec4(0.40f, 0.40f, 0.45f, 1.0f), "UTC");
         ImGui::PopFont();
     }
 
     ImGui::Spacing();
+
+    // ── Home clock ────────────────────────────────────────────────────────
+    RenderExtraClock("HOME##chk", "##popup_home", m_showHomeClock, m_homeTzIana);
+
+    ImGui::Spacing();
+
+    // ── Eclipse clock ─────────────────────────────────────────────────────
+    RenderExtraClock("ECL##chk",  "##popup_ecl",  m_showEclClock,  m_eclTzIana);
+
+    ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // ── connection status ─────────────────────────────────────────────────────
+    // ── connection status ─────────────────────────────────────────────────
     ImGui::PushFont(m_fontMono);
     if (connected)
         ImGui::TextColored(ImVec4(0.20f, 0.85f, 0.30f, 1.0f), "● connected");
@@ -161,24 +303,23 @@ void App::OnFrame() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // ── buttons ───────────────────────────────────────────────────────────────
-    const ImVec2 btnSz(-1, 38);  // full panel width
+    // ── buttons ───────────────────────────────────────────────────────────
+    const ImVec2 btnSz(-1, 38);
 
-    // Button 1 — Start TotalControlSRV
     {
         bool srvRunning = false;
         HANDLE hm = OpenMutexW(SYNCHRONIZE, FALSE, L"TotalControl_DaemonRunning");
         if (hm) { srvRunning = true; CloseHandle(hm); }
 
         if (srvRunning) ImGui::BeginDisabled();
-        if (ImGui::Button("Start SRV", btnSz)) {
+        if (ImGui::Button("Connect cameras", btnSz)) {
             LogLine("user: Start TotalControlSRV");
             if (TryLaunchDaemon()) {
                 m_lastResult = "SRV launched — connecting...";
                 m_reconnectCountdown = 0;
             } else {
                 m_lastResult = "ERROR: cannot launch TotalControlSRV.exe";
-                LogLine(m_lastResult.c_str());
+                LogLine(m_lastResult);
             }
         }
         if (srvRunning) ImGui::EndDisabled();
@@ -186,7 +327,6 @@ void App::OnFrame() {
 
     ImGui::Spacing();
 
-    // Button 2 — Take test picture
     if (!connected) ImGui::BeginDisabled();
     if (ImGui::Button("Test picture", btnSz)) {
         LogLine("user: take test picture");
@@ -194,24 +334,22 @@ void App::OnFrame() {
             "{\"cmd\":\"shoot\",\"drive\":\"single\","
             "\"ss\":\"1/8000\",\"iso\":100,\"f\":8.0}";
         std::string resp;
-        if (m_pipe.SendRequest(req, resp)) {
-            m_lastResult = resp;
-            LogLine(("shoot: " + resp).c_str());
+        if (auto res = m_pipe.SendRequest(req)) {
+            m_lastResult = *res;
+            LogLine(std::format("shoot: {}", *res));
         } else {
-            m_lastResult = "ERROR: pipe send failed";
-            LogLine(m_lastResult.c_str());
+            m_lastResult = std::format("ERROR: {}", PipeErrorMessage(res.error()));
+            LogLine(m_lastResult);
         }
     }
     if (!connected) ImGui::EndDisabled();
 
     ImGui::Spacing();
 
-    // Button 3 — Disconnect and close server
     if (!connected) ImGui::BeginDisabled();
-    if (ImGui::Button("Disconnect & quit", btnSz)) {
+    if (ImGui::Button("Disconnect cameras", btnSz)) {
         LogLine("user: disconnect & quit SRV");
-        std::string resp;
-        m_pipe.SendRequest("{\"cmd\":\"quit\"}", resp);
+        (void)m_pipe.Send("{\"cmd\":\"quit\"}");
         m_pipe.Disconnect();
         m_lastResult = "Server stopped.";
         LogLine("SRV quit sent");
@@ -219,10 +357,10 @@ void App::OnFrame() {
     if (!connected) ImGui::EndDisabled();
 
     ImGui::EndChild();
-    ImGui::PopStyleColor(); // ChildBg
+    ImGui::PopStyleColor();
 
     // ════════════════════════════════════════════════════════════════════════
-    // RIGHT AREA  (content will grow here in future steps)
+    // RIGHT AREA
     // ════════════════════════════════════════════════════════════════════════
     ImGui::SameLine(0, 0);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
@@ -230,13 +368,12 @@ void App::OnFrame() {
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
-    // last result feedback
     if (!m_lastResult.empty()) {
         ImGui::PushFont(m_fontMono);
         bool ok = m_lastResult.find("ERROR") == std::string::npos;
         ImGui::TextColored(
             ok ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f)
-               : ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+               : ImVec4(1.0f,  0.35f, 0.25f, 1.0f),
             "%s", m_lastResult.c_str());
         ImGui::PopFont();
     }
@@ -245,7 +382,6 @@ void App::OnFrame() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // ── dev tools toggles ────────────────────────────────────────────────────
     ImGui::PushFont(m_fontMono);
     ImGui::TextColored(ImVec4(0.40f, 0.40f, 0.45f, 1.0f), "dev tools");
     ImGui::PopFont();
@@ -256,7 +392,6 @@ void App::OnFrame() {
 
     ImGui::EndChild();
 
-    // ── floating ImGui tool windows ──────────────────────────────────────────
     if (m_showStyleEditor) {
         ImGui::Begin("Style Editor", &m_showStyleEditor);
         ImGui::ShowStyleEditor();
@@ -267,7 +402,7 @@ void App::OnFrame() {
 
     ImGui::End();
 
-    // ── silent auto-reconnect ────────────────────────────────────────────────
+    // ── silent auto-reconnect ─────────────────────────────────────────────
     if (!connected) {
         if (m_reconnectCountdown <= 0) {
             m_pipe.Connect();
@@ -278,9 +413,7 @@ void App::OnFrame() {
     }
 }
 
-bool App::OnCloseRequest() {
-    return true;
-}
+bool App::OnCloseRequest() { return true; }
 
 // ─── Daemon launch ────────────────────────────────────────────────────────────
 

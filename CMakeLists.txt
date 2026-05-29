@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.20)
-project(TotalControl VERSION 1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 4.3.3)
+project(TotalControl VERSION 1.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─── CrSDK ───────────────────────────────────────────────────────────────────
@@ -103,6 +103,16 @@ add_custom_command(TARGET TotalControlCLI POST_BUILD
     COMMENT "Kopiowanie TotalControlCLI.exe -> output SRV"
 )
 
+# ─── SQLite3 — amalgamation, static lib ──────────────────────────────────────
+set(SQLITE_ROOT "${CMAKE_SOURCE_DIR}/external/sqlite")
+add_library(sqlite3 STATIC "${SQLITE_ROOT}/sqlite3.c")
+target_include_directories(sqlite3 PUBLIC ${SQLITE_ROOT})
+target_compile_options(sqlite3 PRIVATE /W0 /MP)
+target_compile_definitions(sqlite3 PRIVATE
+    SQLITE_THREADSAFE=1
+    SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+)
+
 # ─── Dear ImGui — built as a static library (no /WX, no warnings) ────────────
 set(IMGUI_ROOT     "${CMAKE_SOURCE_DIR}/external/imgui")
 set(IMGUI_BACKENDS "${IMGUI_ROOT}/backends")
@@ -135,6 +145,7 @@ add_executable(TotalControlGUI WIN32
     src/gui/main_gui.cpp
     src/gui/App.cpp
     src/gui/PipeClient.cpp
+    src/gui/Database.cpp
 )
 
 target_include_directories(TotalControlGUI PRIVATE
@@ -156,6 +167,7 @@ target_compile_options(TotalControlGUI PRIVATE
 
 target_link_libraries(TotalControlGUI PRIVATE
     imgui
+    sqlite3
     d3d11.lib dxgi.lib
     kernel32.lib user32.lib gdi32.lib
     ole32.lib oleaut32.lib uuid.lib shell32.lib

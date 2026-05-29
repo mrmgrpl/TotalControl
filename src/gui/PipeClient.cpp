@@ -1,34 +1,45 @@
 #include "PipeClient.h"
-#include <cstring>
 
 namespace TotalControl {
 
-static constexpr DWORD kReadBuf = 4096;
+static constexpr DWORD  kReadBufSize  = 4096;
+static constexpr size_t kMaxResponse  = 1024 * 1024; // 1 MiB safety limit
 
-PipeClient::PipeClient() = default;
-
-PipeClient::~PipeClient() {
-    Disconnect();
+std::string_view PipeErrorMessage(PipeError e) noexcept {
+    switch (e) {
+        case PipeError::NotConnected:    return "not connected";
+        case PipeError::WriteFailed:     return "write failed — pipe broken";
+        case PipeError::ReadFailed:      return "read failed — pipe broken";
+        case PipeError::ResponseTooLarge:return "response too large";
+    }
+    return "unknown error";
 }
 
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+void PipeClient::BreakPipe() noexcept {
+    if (m_pipe != INVALID_HANDLE_VALUE) {
+        CloseHandle(m_pipe);
+        m_pipe = INVALID_HANDLE_VALUE;
+    }
+    m_state.store(State::Disconnected);
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 bool PipeClient::Connect() {
-    std::lock_guard<std::mutex> lk(m_pipeMutex);
+    std::lock_guard lk(m_pipeMutex);
     if (m_pipe != INVALID_HANDLE_VALUE) return true;
 
     HANDLE h = CreateFileW(
         L"\\\\.\\pipe\\TotalControl",
         GENERIC_READ | GENERIC_WRITE,
-        0, nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
+        0, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
 
     if (h == INVALID_HANDLE_VALUE) {
-        DWORD err = GetLastError();
-        if (err == ERROR_PIPE_BUSY) {
-            // Pipe exists but all instances busy — try WaitNamedPipe
+        if (GetLastError() == ERROR_PIPE_BUSY)
             WaitNamedPipeW(L"\\\\.\\pipe\\TotalControl", 200);
-        }
         return false;
     }
 
@@ -41,57 +52,59 @@ bool PipeClient::Connect() {
 }
 
 void PipeClient::Disconnect() {
-    std::lock_guard<std::mutex> lk(m_pipeMutex);
-    if (m_pipe != INVALID_HANDLE_VALUE) {
-        CloseHandle(m_pipe);
-        m_pipe = INVALID_HANDLE_VALUE;
-    }
-    m_state.store(State::Disconnected);
+    std::lock_guard lk(m_pipeMutex);
+    BreakPipe();
 }
 
-bool PipeClient::SendRequest(const std::string& request, std::string& response) {
-    std::lock_guard<std::mutex> lk(m_pipeMutex);
-    if (m_pipe == INVALID_HANDLE_VALUE) return false;
+std::expected<std::string, PipeError>
+PipeClient::SendRequest(std::string_view request) {
+    std::lock_guard lk(m_pipeMutex);
 
-    // Write: request + newline
-    std::string line = request;
+    if (m_pipe == INVALID_HANDLE_VALUE)
+        return std::unexpected(PipeError::NotConnected);
+
+    // Append newline if missing
+    std::string line{request};
     if (line.empty() || line.back() != '\n') line += '\n';
 
     DWORD written = 0;
-    if (!WriteFile(m_pipe, line.data(), static_cast<DWORD>(line.size()), &written, nullptr)) {
-        CloseHandle(m_pipe);
-        m_pipe = INVALID_HANDLE_VALUE;
-        m_state.store(State::Disconnected);
-        return false;
+    if (!WriteFile(m_pipe, line.data(), static_cast<DWORD>(line.size()),
+                   &written, nullptr)) {
+        BreakPipe();
+        return std::unexpected(PipeError::WriteFailed);
     }
 
     // Read until newline
-    response.clear();
-    char buf[kReadBuf];
+    std::string response;
+    char buf[kReadBufSize];
+
     while (true) {
         DWORD read = 0;
-        BOOL ok = ReadFile(m_pipe, buf, sizeof(buf), &read, nullptr);
+        BOOL  ok   = ReadFile(m_pipe, buf, sizeof(buf), &read, nullptr);
         if (!ok || read == 0) {
-            CloseHandle(m_pipe);
-            m_pipe = INVALID_HANDLE_VALUE;
-            m_state.store(State::Disconnected);
-            return false;
+            BreakPipe();
+            return std::unexpected(PipeError::ReadFailed);
         }
         response.append(buf, read);
         if (response.find('\n') != std::string::npos) break;
-        if (response.size() > 1024 * 1024) break; // safety
+        if (response.size() > kMaxResponse) {
+            BreakPipe();
+            return std::unexpected(PipeError::ResponseTooLarge);
+        }
     }
 
-    // Strip trailing newline
-    while (!response.empty() && (response.back() == '\n' || response.back() == '\r'))
+    // Strip trailing whitespace
+    while (!response.empty() &&
+           (response.back() == '\n' || response.back() == '\r'))
         response.pop_back();
 
-    return true;
+    return response;
 }
 
-bool PipeClient::Send(const std::string& request) {
-    std::string resp;
-    return SendRequest(request, resp);
+std::expected<void, PipeError>
+PipeClient::Send(std::string_view request) {
+    return SendRequest(request)
+        .transform([](const std::string&) {});  // drop response, keep error
 }
 
 } // namespace TotalControl

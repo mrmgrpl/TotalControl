@@ -1,47 +1,57 @@
 #pragma once
 #include <windows.h>
+#include <expected>
 #include <string>
-#include <functional>
+#include <string_view>
 #include <atomic>
-#include <thread>
 #include <mutex>
-#include <deque>
 
 namespace TotalControl {
 
+enum class PipeError {
+    NotConnected,    // pipe handle is INVALID_HANDLE_VALUE
+    WriteFailed,     // WriteFile() returned false
+    ReadFailed,      // ReadFile() returned false or read == 0
+    ResponseTooLarge // response exceeded safety limit (1 MiB)
+};
+
+std::string_view PipeErrorMessage(PipeError e) noexcept;
+
 // Synchronous JSON-Lines client for \\.\pipe\TotalControl.
-// Connect() / Disconnect() are called from the main thread.
-// SendRequest() is thread-safe (blocking).
+// SendRequest() is thread-safe (blocking, holds mutex for duration of call).
 class PipeClient {
 public:
-    enum class State { Disconnected, Connecting, Connected };
+    enum class State { Disconnected, Connected };
 
-    PipeClient();
-    ~PipeClient();
+    PipeClient()  = default;
+    ~PipeClient() { Disconnect(); }
 
-    // Non-copyable
-    PipeClient(const PipeClient&) = delete;
+    PipeClient(const PipeClient&)            = delete;
     PipeClient& operator=(const PipeClient&) = delete;
 
-    // Try to open the pipe. Returns true on success. Non-blocking.
+    // Open the pipe. Returns true on success. Non-blocking.
     bool Connect();
 
     // Close the pipe handle.
     void Disconnect();
 
     // Send one JSON request line, receive one JSON response line.
-    // Returns false if pipe is broken (sets state to Disconnected).
-    bool SendRequest(const std::string& request, std::string& response);
+    // On error the pipe is closed and state set to Disconnected.
+    std::expected<std::string, PipeError>
+    SendRequest(std::string_view request);
 
-    State GetState() const { return m_state.load(); }
+    // Fire-and-forget: sends request, discards response.
+    std::expected<void, PipeError>
+    Send(std::string_view request);
 
-    // Convenience: send without caring about response (fire-and-forget with log).
-    bool Send(const std::string& request);
+    State GetState() const noexcept { return m_state.load(); }
 
 private:
-    HANDLE          m_pipe = INVALID_HANDLE_VALUE;
+    HANDLE             m_pipe = INVALID_HANDLE_VALUE;
     std::atomic<State> m_state{State::Disconnected};
     mutable std::mutex m_pipeMutex;
+
+    void BreakPipe() noexcept;
 };
 
 } // namespace TotalControl

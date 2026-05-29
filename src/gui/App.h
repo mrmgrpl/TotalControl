@@ -1,5 +1,6 @@
 #pragma once
 #include "PipeClient.h"
+#include "Database.h"
 #include <string>
 #include <atomic>
 #include <fstream>
@@ -21,7 +22,10 @@ public:
 private:
     void TryAutoConnect();
     bool TryLaunchDaemon();
-    void LogLine(const char* msg);
+    void LogLine(std::string_view msg);
+    void RenderExtraClock(const char* clockId, const char* popupId,
+                          bool& show, std::string& tzIana);
+    void SaveClockSettings();
 
     PipeClient m_pipe;
 
@@ -39,6 +43,14 @@ private:
 
     std::ofstream m_logFile;
     std::mutex    m_logMutex;
+
+    // ── Persistent settings (SQLite) ─────────────────────────────────────
+    Database    m_db;
+
+    bool        m_showHomeClock = true;
+    bool        m_showEclClock  = true;
+    std::string m_homeTzIana   = "Europe/Warsaw";   // IANA name, loaded from DB at startup
+    std::string m_eclTzIana    = "Europe/Madrid";   // IANA name, loaded from DB at startup
 };
 
 } // namespace TotalControl
