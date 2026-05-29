@@ -6,6 +6,20 @@
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
+-- ── Timezones (IANA, RFC 6557) ───────────────────────────────────────────────
+-- Loaded by TotalControlGUI at startup into the clock timezone picker.
+-- If this table is empty, the app falls back to TzEntry.h hardcoded list.
+
+CREATE TABLE IF NOT EXISTS timezones (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT NOT NULL,        -- short UI tag  (e.g. "WAW")
+    label      TEXT NOT NULL,        -- display name  (e.g. "Warsaw")
+    iana       TEXT NOT NULL,        -- IANA TZ name  (e.g. "Europe/Warsaw")
+    sort_order INTEGER DEFAULT 0     -- ordering in picker (lower = first)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tz_iana ON timezones (iana);
+
 -- ── Schema version ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS schema_version (
     version  INTEGER NOT NULL

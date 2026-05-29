@@ -173,6 +173,14 @@ target_link_libraries(TotalControlGUI PRIVATE
     ole32.lib oleaut32.lib uuid.lib shell32.lib
 )
 
+# Copy TotalControlData.db next to SRV exe (read-only reference database)
+add_custom_command(TARGET TotalControlGUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/data/TotalControlData.db"
+        "$<TARGET_FILE_DIR:TotalControlSRV>/TotalControlData.db"
+    COMMENT "Copy TotalControlData.db -> SRV output dir"
+)
+
 # Copy GUI exe next to SRV exe
 add_custom_command(TARGET TotalControlGUI POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

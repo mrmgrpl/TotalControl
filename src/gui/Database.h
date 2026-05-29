@@ -1,6 +1,8 @@
 #pragma once
+#include "TzEntry.h"
 #include <string>
 #include <string_view>
+#include <vector>
 
 struct sqlite3;
 
@@ -27,6 +29,9 @@ public:
     void        SetSetting(const char* key, const char* value);
     int         GetSettingInt(const char* key, int def = 0) const;
     void        SetSettingInt(const char* key, int value);
+
+    // reference data queries
+    std::vector<TzEntry> LoadTimezones() const;
 
 private:
     sqlite3* m_db = nullptr;

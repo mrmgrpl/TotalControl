@@ -1,11 +1,13 @@
 #pragma once
 #include "PipeClient.h"
 #include "Database.h"
+#include "TzEntry.h"
 #include <string>
 #include <atomic>
 #include <fstream>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 struct ImFont;
 
@@ -51,6 +53,9 @@ private:
     Database m_configDb;  // TotalControlConfig.db       — active user settings
     Database m_dataDb;    // TotalControlData.db          — reference data (read-only)
     //       TotalControlDefaultConfig.db — factory defaults, not kept open
+
+    // ── Timezone list (loaded from DB, fallback to hardcoded) ────────────────
+    std::vector<TzEntry> m_tzList;
 
     // ── Settings loaded from m_configDb ──────────────────────────────────────
     bool        m_showHomeClock = true;

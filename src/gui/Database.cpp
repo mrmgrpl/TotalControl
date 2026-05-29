@@ -2,6 +2,7 @@
 #include "sqlite3.h"
 #include <windows.h>
 #include <format>
+#include <vector>
 
 namespace TotalControl {
 
@@ -86,6 +87,33 @@ int Database::GetSettingInt(const char* key, int def) const {
 
 void Database::SetSettingInt(const char* key, int value) {
     SetSetting(key, std::format("{}", value).c_str());
+}
+
+// ─── Reference data ───────────────────────────────────────────────────────────
+
+std::vector<TzEntry> Database::LoadTimezones() const {
+    std::vector<TzEntry> result;
+    if (!m_db) return result;
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT code, label, iana FROM timezones ORDER BY sort_order, id;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        TzEntry e;
+        auto col = [&](int i) -> std::string {
+            const auto* p = sqlite3_column_text(st, i);
+            return p ? reinterpret_cast<const char*>(p) : "";
+        };
+        e.code  = col(0);
+        e.label = col(1);
+        e.iana  = col(2);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
 }
 
 } // namespace TotalControl

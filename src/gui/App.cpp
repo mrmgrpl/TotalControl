@@ -1,5 +1,5 @@
 #include "App.h"
-#include "Timezones.h"
+#include "TzEntry.h"
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -147,12 +147,20 @@ App::App() {
     // ── TotalControlData.db — reference data (read-only, optional) ────────
     std::wstring dataPath = dir + L"\\TotalControlData.db";
     if (std::filesystem::exists(dataPath)) {
-        if (m_dataDb.OpenReadOnly(dataPath))
-            LogLine("Data DB: TotalControlData.db opened (read-only)");
-        else
+        if (m_dataDb.OpenReadOnly(dataPath)) {
+            m_tzList = m_dataDb.LoadTimezones();
+            LogLine(std::format("Data DB: opened — {} timezones loaded", m_tzList.size()));
+        } else {
             LogLine("WARNING: TotalControlData.db found but could not be opened");
+        }
     } else {
         LogLine("Data DB: TotalControlData.db not found — skipped");
+    }
+
+    // Fallback: if DB had no timezones, use hardcoded list
+    if (m_tzList.empty()) {
+        m_tzList = TzFallbackList();
+        LogLine(std::format("Timezones: using fallback ({} entries)", m_tzList.size()));
     }
 }
 
@@ -202,8 +210,8 @@ void App::OnInit() {
 void App::RenderExtraClock(const char* clockId, const char* popupId,
                             bool& show, std::string& tzIana) {
     // Find current list entry for this IANA name
-    int curIdx = TzFindByIana(tzIana.c_str());
-    const TzDef& cur = kTzList[curIdx];
+    int curIdx = TzFindByIana(m_tzList, tzIana);
+    const TzEntry& cur = m_tzList[curIdx];
 
     ImGuiStyle& style = ImGui::GetStyle();
 
@@ -249,7 +257,7 @@ void App::RenderExtraClock(const char* clockId, const char* popupId,
 
     ImGui::SameLine(0, 6);
     ImGui::PushFont(m_fontMono);
-    ImGui::TextColored(ImVec4(0.38f, 0.38f, 0.44f, 1.0f), "%s", cur.code);
+    ImGui::TextColored(ImVec4(0.38f, 0.38f, 0.44f, 1.0f), "%s", cur.code.c_str());
     ImGui::PopFont();
 
     // ── timezone picker popup ─────────────────────────────────────────────
@@ -259,13 +267,15 @@ void App::RenderExtraClock(const char* clockId, const char* popupId,
         ImGui::Separator();
         ImGui::Spacing();
 
-        for (int i = 0; i < kTzCount; ++i) {
+        for (int i = 0; i < static_cast<int>(m_tzList.size()); ++i) {
             bool sel = (i == curIdx);
             char entry[80];
             snprintf(entry, sizeof(entry), "%-5s  %-20s  %s",
-                     kTzList[i].code, kTzList[i].label, kTzList[i].iana);
+                     m_tzList[i].code.c_str(),
+                     m_tzList[i].label.c_str(),
+                     m_tzList[i].iana.c_str());
             if (ImGui::Selectable(entry, sel)) {
-                tzIana = kTzList[i].iana;
+                tzIana = m_tzList[i].iana;
                 SaveClockSettings();
                 ImGui::CloseCurrentPopup();
             }
