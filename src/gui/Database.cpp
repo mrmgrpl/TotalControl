@@ -14,22 +14,44 @@ static std::string WideToUtf8(const std::wstring& w) {
     return s;
 }
 
+// ─── Open ─────────────────────────────────────────────────────────────────────
+
 bool Database::Open(const std::wstring& path) {
     std::string p = WideToUtf8(path);
     if (sqlite3_open(p.c_str(), &m_db) != SQLITE_OK) {
         m_db = nullptr;
         return false;
     }
-    sqlite3_exec(m_db,
-        "CREATE TABLE IF NOT EXISTS settings"
-        " (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    return true;
+}
+
+bool Database::OpenReadOnly(const std::wstring& path) {
+    std::string p = WideToUtf8(path);
+    int rc = sqlite3_open_v2(p.c_str(), &m_db,
+                              SQLITE_OPEN_READONLY, nullptr);
+    if (rc != SQLITE_OK) {
+        m_db = nullptr;
+        return false;
+    }
     return true;
 }
 
 void Database::Close() {
     if (m_db) { sqlite3_close(m_db); m_db = nullptr; }
 }
+
+// ─── Exec ─────────────────────────────────────────────────────────────────────
+
+bool Database::Exec(std::string_view sql) {
+    if (!m_db) return false;
+    char* err = nullptr;
+    int rc = sqlite3_exec(m_db, sql.data(), nullptr, nullptr, &err);
+    if (err) sqlite3_free(err);
+    return rc == SQLITE_OK;
+}
+
+// ─── Settings helpers ─────────────────────────────────────────────────────────
 
 std::string Database::GetSetting(const char* key, const char* def) const {
     if (!m_db) return def ? def : "";

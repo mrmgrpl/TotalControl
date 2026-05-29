@@ -20,12 +20,15 @@ public:
     bool OnCloseRequest();
 
 private:
-    void TryAutoConnect();
     bool TryLaunchDaemon();
     void LogLine(std::string_view msg);
     void RenderExtraClock(const char* clockId, const char* popupId,
                           bool& show, std::string& tzIana);
     void SaveClockSettings();
+
+    // Creates TotalControlDefaultConfig.db at given path if it does not exist.
+    // Populates it with factory-default settings via embedded SQL.
+    void EnsureDefaultConfig(const std::wstring& path);
 
     PipeClient m_pipe;
 
@@ -44,13 +47,16 @@ private:
     std::ofstream m_logFile;
     std::mutex    m_logMutex;
 
-    // ── Persistent settings (SQLite) ─────────────────────────────────────
-    Database    m_db;
+    // ── Databases ────────────────────────────────────────────────────────────
+    Database m_configDb;  // TotalControlConfig.db       — active user settings
+    Database m_dataDb;    // TotalControlData.db          — reference data (read-only)
+    //       TotalControlDefaultConfig.db — factory defaults, not kept open
 
+    // ── Settings loaded from m_configDb ──────────────────────────────────────
     bool        m_showHomeClock = true;
     bool        m_showEclClock  = true;
-    std::string m_homeTzIana   = "Europe/Warsaw";   // IANA name, loaded from DB at startup
-    std::string m_eclTzIana    = "Europe/Madrid";   // IANA name, loaded from DB at startup
+    std::string m_homeTzIana   = "Europe/Warsaw";
+    std::string m_eclTzIana    = "Europe/Madrid";
 };
 
 } // namespace TotalControl

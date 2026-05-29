@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <format>
 #include <string_view>
 
@@ -79,13 +80,37 @@ void App::LogLine(std::string_view msg) {
     }
 }
 
+// ─── Default config ───────────────────────────────────────────────────────────
+
+void App::EnsureDefaultConfig(const std::wstring& path) {
+    if (std::filesystem::exists(path)) return;
+
+    Database db;
+    if (!db.Open(path)) return;
+
+    db.Exec(R"SQL(
+        CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
+        INSERT OR IGNORE INTO schema_version VALUES (1);
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO settings VALUES ('show_home_clock', '1');
+        INSERT OR IGNORE INTO settings VALUES ('show_ecl_clock',  '1');
+        INSERT OR IGNORE INTO settings VALUES ('home_tz_iana', 'Europe/Warsaw');
+        INSERT OR IGNORE INTO settings VALUES ('ecl_tz_iana',  'Europe/Madrid');
+    )SQL");
+}
+
 // ─── Persistent settings ──────────────────────────────────────────────────────
 
 void App::SaveClockSettings() {
-    m_db.SetSettingInt("show_home_clock", m_showHomeClock ? 1 : 0);
-    m_db.SetSettingInt("show_ecl_clock",  m_showEclClock  ? 1 : 0);
-    m_db.SetSetting("home_tz_iana", m_homeTzIana.c_str());
-    m_db.SetSetting("ecl_tz_iana",  m_eclTzIana.c_str());
+    m_configDb.SetSettingInt("show_home_clock", m_showHomeClock ? 1 : 0);
+    m_configDb.SetSettingInt("show_ecl_clock",  m_showEclClock  ? 1 : 0);
+    m_configDb.SetSetting("home_tz_iana", m_homeTzIana.c_str());
+    m_configDb.SetSetting("ecl_tz_iana",  m_eclTzIana.c_str());
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
@@ -96,18 +121,38 @@ App::App() {
     m_logFile.open(dir + L"\\TotalControlGUI.log", std::ios::app);
     LogLine("=== TotalControlGUI start ===");
 
-    if (m_db.Open(dir + L"\\TotalControl.db")) {
-        m_showHomeClock = m_db.GetSettingInt("show_home_clock", 1) != 0;
-        m_showEclClock  = m_db.GetSettingInt("show_ecl_clock",  1) != 0;
+    // ── TotalControlDefaultConfig.db — factory defaults ───────────────────
+    std::wstring defaultCfgPath = dir + L"\\TotalControlDefaultConfig.db";
+    EnsureDefaultConfig(defaultCfgPath);
 
-        std::string home = m_db.GetSetting("home_tz_iana", "");
-        std::string ecl  = m_db.GetSetting("ecl_tz_iana",  "");
+    // ── TotalControlConfig.db — active config ─────────────────────────────
+    std::wstring configPath = dir + L"\\TotalControlConfig.db";
+    if (!std::filesystem::exists(configPath)) {
+        std::filesystem::copy_file(defaultCfgPath, configPath);
+        LogLine("First run: TotalControlConfig.db created from defaults");
+    }
+
+    if (m_configDb.Open(configPath)) {
+        m_showHomeClock = m_configDb.GetSettingInt("show_home_clock", 1) != 0;
+        m_showEclClock  = m_configDb.GetSettingInt("show_ecl_clock",  1) != 0;
+        std::string home = m_configDb.GetSetting("home_tz_iana", "");
+        std::string ecl  = m_configDb.GetSetting("ecl_tz_iana",  "");
         if (!home.empty()) m_homeTzIana = home;
         if (!ecl.empty())  m_eclTzIana  = ecl;
-
-        LogLine(std::format("DB: home={}  ecl={}", m_homeTzIana, m_eclTzIana));
+        LogLine(std::format("Config DB: home={}  ecl={}", m_homeTzIana, m_eclTzIana));
     } else {
-        LogLine("WARNING: could not open TotalControl.db — settings not persisted");
+        LogLine("WARNING: cannot open TotalControlConfig.db — settings not persisted");
+    }
+
+    // ── TotalControlData.db — reference data (read-only, optional) ────────
+    std::wstring dataPath = dir + L"\\TotalControlData.db";
+    if (std::filesystem::exists(dataPath)) {
+        if (m_dataDb.OpenReadOnly(dataPath))
+            LogLine("Data DB: TotalControlData.db opened (read-only)");
+        else
+            LogLine("WARNING: TotalControlData.db found but could not be opened");
+    } else {
+        LogLine("Data DB: TotalControlData.db not found — skipped");
     }
 }
 
