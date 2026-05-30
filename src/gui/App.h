@@ -31,6 +31,7 @@ struct CamStatus {
     int         slot1Remaining = -1;
     int         slot2Remaining = -1;
     std::string store;           // "MemCard","HostPC"
+    int         latencyMs    = -1;  // pipe round-trip for this camera's status poll
 };
 
 class App {

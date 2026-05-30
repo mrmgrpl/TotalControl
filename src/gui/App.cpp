@@ -344,10 +344,14 @@ void App::PollCameraStatus() {
 
     for (auto& guid : guids) {
         std::string req = std::format(R"({{"cmd":"status","cam":"{}"}})", guid);
+        auto t0  = std::chrono::steady_clock::now();
         auto res = m_pipe.SendRequest(req);
+        auto t1  = std::chrono::steady_clock::now();
         if (!res) continue;
 
         CamStatus s;
+        s.latencyMs      = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
         s.valid          = JStr(*res, "connected") == "true";
         s.guid           = guid;
         s.model          = JStr(*res, "model");
@@ -406,6 +410,16 @@ void App::RenderCameraSection() {
         const char* modelStr = s.model.empty() ? "Camera" : s.model.c_str();
         ImGui::TextColored(kWhite, "[%d] %s", ci + 1, modelStr);
         ImGui::PopFont();
+
+        // Latency — always shown, even if status invalid
+        if (s.latencyMs >= 0) {
+            char latBuf[16];
+            snprintf(latBuf, sizeof(latBuf), "%d ms", s.latencyMs);
+            ImVec4 latCol = s.latencyMs < 200  ? kGreen
+                          : s.latencyMs < 600  ? kYellow
+                                               : kRed;
+            Row("Lat", latBuf, latCol);
+        }
 
         if (!s.valid) {
             ImGui::TextColored(kRed, "    disconnected");
