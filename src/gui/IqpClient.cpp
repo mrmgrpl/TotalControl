@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <format>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -15,8 +16,19 @@ static constexpr const char* kApiKeyDefault =
     "be98861b670a78e46d64f54b4e1d11f37fcf6f5f65788604caf9cf275d0e89d9"
     "8c49c0fcc366e96c71b46b15051e9f4ea1f649180da4f4880bf11b460a4e82a1";
 
-static std::string s_apiKey   = kApiKeyDefault;
-static std::mutex  s_keyMutex;
+static std::string   s_apiKey   = kApiKeyDefault;
+static std::mutex    s_keyMutex;
+static std::function<void(std::string_view)> s_logger;
+
+static void IqpLog(std::string msg) {
+    if (s_logger) s_logger(msg);
+}
+
+// Returns first N + "..." + last N chars of a long string (for key display).
+static std::string Truncate(const std::string& s, size_t n = 8) {
+    if (s.size() <= n * 2) return s;
+    return s.substr(0, n) + "..." + s.substr(s.size() - n);
+}
 
 // ─── String helpers ───────────────────────────────────────────────────────────
 
@@ -158,23 +170,34 @@ static int64_t ToUtcMs(const std::string& timeStr, int year, int month, int day,
 
 // ─── WinHTTP GET ──────────────────────────────────────────────────────────────
 
-static std::string HttpsGet(const wchar_t* host, const std::wstring& path) {
+static std::string HttpsGet(const wchar_t* host, const std::string& path) {
+    // URL paths are always ASCII — safe narrow→wide conversion
+    std::wstring wpath(path.begin(), path.end());
+
     HINTERNET hSes = WinHttpOpen(L"TotalControl/1.0",
                                   WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                   WINHTTP_NO_PROXY_NAME,
                                   WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSes) return {};
+    if (!hSes) {
+        IqpLog(std::format("IQP GET {} -> WinHttpOpen failed ({})", path, GetLastError()));
+        return {};
+    }
 
     HINTERNET hCon = WinHttpConnect(hSes, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hCon) { WinHttpCloseHandle(hSes); return {}; }
+    if (!hCon) {
+        IqpLog(std::format("IQP GET {} -> WinHttpConnect failed ({})", path, GetLastError()));
+        WinHttpCloseHandle(hSes); return {};
+    }
 
-    HINTERNET hReq = WinHttpOpenRequest(hCon, L"GET", path.c_str(),
+    HINTERNET hReq = WinHttpOpenRequest(hCon, L"GET", wpath.c_str(),
                                          nullptr, WINHTTP_NO_REFERER,
                                          WINHTTP_DEFAULT_ACCEPT_TYPES,
                                          WINHTTP_FLAG_SECURE);
-    if (!hReq) { WinHttpCloseHandle(hCon); WinHttpCloseHandle(hSes); return {}; }
+    if (!hReq) {
+        IqpLog(std::format("IQP GET {} -> WinHttpOpenRequest failed ({})", path, GetLastError()));
+        WinHttpCloseHandle(hCon); WinHttpCloseHandle(hSes); return {};
+    }
 
-    // Add headers matching the browser request observed
     WinHttpAddRequestHeaders(hReq,
         L"X-Requested-With: XMLHttpRequest\r\n"
         L"Referer: https://maps.besselianelements.com/\r\n",
@@ -183,6 +206,15 @@ static std::string HttpsGet(const wchar_t* host, const std::wstring& path) {
     bool ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
            && WinHttpReceiveResponse(hReq, nullptr);
+
+    DWORD httpStatus = 0;
+    if (ok) {
+        DWORD len = sizeof(httpStatus);
+        WinHttpQueryHeaders(hReq,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX,
+            &httpStatus, &len, WINHTTP_NO_HEADER_INDEX);
+    }
 
     std::string body;
     if (ok) {
@@ -198,6 +230,18 @@ static std::string HttpsGet(const wchar_t* host, const std::wstring& path) {
     WinHttpCloseHandle(hReq);
     WinHttpCloseHandle(hCon);
     WinHttpCloseHandle(hSes);
+
+    if (!ok) {
+        IqpLog(std::format("IQP GET {} -> request failed ({})", path, GetLastError()));
+    } else {
+        IqpLog(std::format("IQP GET {} -> HTTP {} ({} bytes)", path, httpStatus, body.size()));
+        // Log first 300 chars of response for diagnostics
+        if (!body.empty()) {
+            std::string snippet = body.substr(0, std::min(body.size(), size_t{300}));
+            IqpLog(std::format("IQP body: {}", snippet));
+        }
+    }
+
     return body;
 }
 
@@ -248,15 +292,19 @@ static std::string ExtractKeyFromContent(const std::string& content) {
 // Fetch one map page and its JS files; extract the API key.
 // Returns true and updates s_apiKey on success.
 static bool TryRefreshFromPage(const std::string& eclipseId) {
-    std::wstring mapPath = L"/map/"
-        + std::wstring(eclipseId.begin(), eclipseId.end()) + L"/";
+    IqpLog(std::format("IQP key refresh: fetching map page for {}", eclipseId));
+    std::string mapPath = "/map/" + eclipseId + "/";
     std::string html = HttpsGet(L"maps.besselianelements.com", mapPath);
-    if (html.empty()) return false;
+    if (html.empty()) {
+        IqpLog("IQP key refresh: map page empty");
+        return false;
+    }
 
     // Check inline scripts first
     {
         auto k = ExtractKeyFromContent(html);
         if (!k.empty()) {
+            IqpLog(std::format("IQP key refresh: found key in inline script: {}", Truncate(k)));
             std::lock_guard lk(s_keyMutex);
             s_apiKey = k;
             return true;
@@ -287,16 +335,17 @@ static bool TryRefreshFromPage(const std::string& eclipseId) {
 
     // Fetch each JS and search for the key
     for (auto& path : jsPaths) {
-        std::wstring wpath(path.begin(), path.end());
-        std::string js = HttpsGet(L"maps.besselianelements.com", wpath);
+        std::string js = HttpsGet(L"maps.besselianelements.com", path);
         if (js.empty()) continue;
         auto k = ExtractKeyFromContent(js);
         if (!k.empty()) {
+            IqpLog(std::format("IQP key refresh: found key in JS {}: {}", path, Truncate(k)));
             std::lock_guard lk(s_keyMutex);
             s_apiKey = k;
             return true;
         }
     }
+    IqpLog(std::format("IQP key refresh: key not found in {} JS files for {}", jsPaths.size(), eclipseId));
     return false;
 }
 
@@ -304,7 +353,11 @@ static bool TryRefreshFromPage(const std::string& eclipseId) {
 static bool RefreshApiKey(const std::string& eclipseId) {
     if (TryRefreshFromPage(eclipseId)) return true;
     static const std::string kFallback = "TSE20260812";
-    if (eclipseId != kFallback && TryRefreshFromPage(kFallback)) return true;
+    if (eclipseId != kFallback) {
+        IqpLog(std::format("IQP key refresh: trying fallback page {}", kFallback));
+        if (TryRefreshFromPage(kFallback)) return true;
+    }
+    IqpLog("IQP key refresh: FAILED — key not found on any page");
     return false;
 }
 
@@ -320,6 +373,10 @@ std::string BuildEclipseId(char typeChar, int year, int month, int day) {
     return buf;
 }
 
+void SetIqpLogger(std::function<void(std::string_view)> fn) {
+    s_logger = std::move(fn);
+}
+
 void SetApiKey(const std::string& key) {
     if (key.empty()) return;
     std::lock_guard lk(s_keyMutex);
@@ -331,13 +388,12 @@ std::string GetCurrentApiKey() {
     return s_apiKey;
 }
 
-static std::wstring BuildPath(const std::string& eclipseId, double lat, double lon) {
+static std::string BuildPath(const std::string& eclipseId, double lat, double lon) {
     std::string key;
     { std::lock_guard lk(s_keyMutex); key = s_apiKey; }
-    std::string p = std::format(
+    return std::format(
         "/api/local_circumstances_map/{0}/?latitude={1:.6f}&longitude={2:.6f}&key={3}",
         eclipseId, lat, lon, key);
-    return std::wstring(p.begin(), p.end());
 }
 
 ContactTimes FetchContactTimes(const std::string& eclipseId,
@@ -345,27 +401,44 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
                                int year, int month, int day) {
     ContactTimes result;
 
+    {
+        std::lock_guard lk(s_keyMutex);
+        IqpLog(std::format("IQP fetch: {} lat={:.4f} lon={:.4f}  key={}",
+                           eclipseId, lat, lon, Truncate(s_apiKey)));
+    }
+
     std::string body = HttpsGet(L"maps.besselianelements.com",
                                  BuildPath(eclipseId, lat, lon));
 
     // Auto-refresh key on any non-OK response (wrong key, expired key, etc.)
     if (!body.empty() && JsonStr(body, "message") != "OK") {
+        IqpLog(std::format("IQP: non-OK message=\"{}\" — triggering key refresh",
+                           JsonStr(body, "message")));
         if (RefreshApiKey(eclipseId)) {
+            {
+                std::lock_guard lk(s_keyMutex);
+                IqpLog(std::format("IQP retry with new key={}", Truncate(s_apiKey)));
+            }
             body = HttpsGet(L"maps.besselianelements.com",
                             BuildPath(eclipseId, lat, lon));
+        } else {
+            IqpLog("IQP: key refresh failed, aborting");
+            return result;
         }
     }
-    if (body.empty()) return result;
+    if (body.empty()) { IqpLog("IQP: empty response, aborting"); return result; }
 
     // Verify "message":"OK"
     auto msg = JsonStr(body, "message");
+    IqpLog(std::format("IQP: final message=\"{}\"", msg));
     if (msg != "OK") return result;
 
     std::string html = JsonStr(body, "message1");
-    if (html.empty()) return result;
+    if (html.empty()) { IqpLog("IQP: message1 empty"); return result; }
 
     result.apiOk   = true;
     result.eclType = EclipseType(html);
+    IqpLog(std::format("IQP: eclType=\"{}\"", result.eclType));
 
     // "NO ECLIPSE" — API OK but nothing to see at this location
     if (result.eclType == "NO ECLIPSE") return result;
@@ -377,14 +450,16 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
     };
 
     result.c1Ms     = toMs("C1");
-    result.c2Ms     = toMs("C2");   // -1 for partial eclipse
-    result.c3Ms     = toMs("C3");   // -1 for partial eclipse
+    result.c2Ms     = toMs("C2");
+    result.c3Ms     = toMs("C3");
     result.c4Ms     = toMs("C4");
     result.maxMs    = toMs("Max");
     result.duration = ParseDuration(html);
     result.valid    = result.c1Ms > 0;
     result.source   = ContactSource::IQP;
 
+    IqpLog(std::format("IQP: done — valid={} C1={} duration=\"{}\"",
+                       result.valid, result.c1Ms, result.duration));
     return result;
 }
 

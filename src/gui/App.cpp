@@ -234,6 +234,9 @@ App::App() {
     m_logFile.open(dir + L"\\TotalControlGUI.log", std::ios::app);
     LogLine("=== TotalControlGUI start ===");
 
+    // Route IQP HTTP diagnostics through the same log file (called from bg thread).
+    SetIqpLogger([this](std::string_view msg) { LogLine(msg); });
+
     // ── TotalControlDefaultConfig.db — factory defaults ───────────────────
     std::wstring defaultCfgPath = dir + L"\\TotalControlDefaultConfig.db";
     EnsureDefaultConfig(defaultCfgPath);

@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <string_view>
 
 namespace TotalControl {
 
@@ -34,5 +36,8 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
 // GetCurrentApiKey() returns the key currently in use (may have been auto-refreshed).
 void        SetApiKey(const std::string& key);
 std::string GetCurrentApiKey();
+
+// Optional logger — set once on startup. Called from background thread; must be thread-safe.
+void SetIqpLogger(std::function<void(std::string_view)> fn);
 
 } // namespace TotalControl
