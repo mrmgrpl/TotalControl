@@ -141,9 +141,11 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 
 ## Code conventions
 
-- C++17, MSVC, Unicode (`wchar_t`, `std::wstring`)
+- **C++23** (ISO/IEC 14882:2024), MSVC, Unicode (`wchar_t`, `std::wstring`)
 - Namespace: `TotalControl`; SDK alias: `namespace SDK = SCRSDK;`
 - Flags: `/W4 /WX /MP /utf-8`
+- Use `std::expected<T,E>` for error propagation, `std::format` for string building
+- `(void)expr` required when discarding `[[nodiscard]]` `std::expected` results
 
 ## Logging
 
@@ -151,33 +153,41 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 - `TotalControlCLI.log` — CLI, next to exe, append mode; disable with: `--nolog`
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Current status (2026-05-28)
+## Current status (2026-05-30)
 
 | Module | Status |
 |---|---|
-| CMakeLists.txt | SRV + CLI targets; Debug + Release (x64-Release with /O2) |
+| CMakeLists.txt | SRV + CLI + GUI; C++23; CMake 4.3.3; LANGUAGES C CXX |
 | CameraController | Init/Connect/Disconnect + WarmCache + property cache + multi-cam |
-| PipeServer | Working — named pipe, JSON Lines |
+| PipeServer | Working — named pipe, JSON Lines, persistent connection |
 | CommandHandler | shoot/bracket/burst/movie/af/get/set/cmd/quit/list_cameras/seq_* |
 | Multi-camera | Enumerate + Connect(guid) + routing by "cam":guid/index |
 | Graceful shutdown | SetConsoleCtrlHandler → RequestShutdown → Shutdown() |
-| GetId fallback | GuidOrIdHex() — USB camera: GetId() as UTF-16LE string |
 | Singleton mutex | `TotalControl_DaemonRunning` — SRV rejects second instance |
 | SequencerEngine | Load/Start/Stop, UTC ms, repeat steps, seq_start/stop/status |
-| ParseUtcMs | Fixed FILETIME epoch: 11 644 473 600 000 ms |
 | --test Cx-Ns | Reads contact time from JSON "contacts", lead = N seconds |
 | Live monitor | Countdown ms to step after seq_start; Ctrl+C = exit |
-| **Startup status table** | **Status table on connect: battery/mode/SS/ISO/f/focus/drive/cards/store/WB/time** |
-| **ASCII logo + version** | **LogBanner() without timestamp; kVersion = "2026.05.28"** |
-| **ANSI warnings** | **LogWarning() — red text on console; ENABLE_VIRTUAL_TERMINAL_PROCESSING** |
-| **Card status fix** | **CrSlotStatus_OK=0x0000 (not "no-card"!) — mapping fixed** |
-| **Battery level** | **Added _PowerSupply variants (full+usb, 3/4+usb, …)** |
-| **f-number locale** | **Manual int.dec formatting instead of %.1f (avoids locale decimal separator)** |
-| **Host UTC in status** | **GetSystemTimePreciseAsFileTime() — always available; cam_time n/a over USB** |
-| sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — production sequences TSE 2026 |
+| Startup status table | battery/mode/SS/ISO/f/focus/drive/cards/store/WB/time |
+| sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — production TSE 2026 |
 | docs/ | solar_eclipse_exposure_model.md |
 | Renderer3D / Overlay2D / CameraPreview | Empty stubs |
-| **TotalControlGUI** | **Planned — implementation coming soon** |
+| **TotalControlGUI Phase 0+0.5+1** | **DONE — see details below** |
+
+### TotalControlGUI — Phase 1 complete (2026-05-30)
+
+**Left panel sections:**
+- **TIME**: UTC (Universal Time Zone) + Home Time Zone + Local Time Zone; 598 IANA zones from DB; RFC 6557 compliant; DST via Windows TZ registry; settings persisted in SQLite
+- **CONNECTION**: ●/○ status + Connect cameras / Test picture / Disconnect cameras
+- **CAMERA STATUS**: multi-camera polling ~2s; per camera: model, battery bar+%, Mode/SS/ISO/f/Focus/Drive, C1/C2 with shot count, `Shot Nms` (full-stack latency after each shoot)
+
+**Three SQLite databases** (next to exe):
+- `TotalControlDefaultConfig.db` — factory defaults, created by app
+- `TotalControlConfig.db` — active user config, copied from Default on first run
+- `TotalControlData.db` — reference data (read-only): 11 898 eclipses (Besselian elements, NASA -1999→+3000), 598 IANA timezones; schema: `data/schema_data.sql`
+
+**Tech:** C++23, SQLite 3.53.1, CMake 4.3.3, `std::expected` in PipeClient, `std::format` logging
+
+**Next: Phase 2** — C1/C2/C3/C4 countdown computed from Besselian elements + observer GPS
 
 ### Known pitfalls in the sequence JSON parser (SequencerEngine.cpp)
 
