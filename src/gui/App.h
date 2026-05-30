@@ -2,6 +2,8 @@
 #include "PipeClient.h"
 #include "Database.h"
 #include "TzEntry.h"
+#include "EclipseEntry.h"
+#include "IqpClient.h"
 #include <string>
 #include <atomic>
 #include <fstream>
@@ -49,10 +51,13 @@ private:
     void RenderExtraClock(const char* clockId, const char* popupId,
                           bool& show, std::string& tzIana);
     void SaveClockSettings();
+    void SaveObserverSettings();
+    void TriggerIqpFetch();
     void EnsureDefaultConfig(const std::wstring& path);
 
     void PollCameraStatus();          // send "status", parse response
     void RenderCameraSection();       // draw CAMERA section in left panel
+    void RenderEclipseSection();      // draw ECLIPSE selector in left panel
 
     PipeClient m_pipe;
 
@@ -87,6 +92,24 @@ private:
 
     // ── Camera status — one entry per connected camera ────────────────────────
     std::vector<CamStatus> m_cameras;
+
+    // ── Eclipse selector ──────────────────────────────────────────────────────
+    std::vector<EclipseEntry> m_eclipses;
+    int                        m_eclipseIdx = -1;
+
+    // ── Observer location ─────────────────────────────────────────────────────
+    float m_obsLat  = 0.f;   // decimal degrees N (+) / S (-)
+    float m_obsLon  = 0.f;   // decimal degrees E (+) / W (-)
+    int   m_obsAltM = 0;     // metres above sea level
+
+    // ── IQP contact times (fetched in background) ─────────────────────────────
+    std::thread        m_iqpThread;
+    std::mutex         m_iqpMutex;
+    ContactTimes       m_contacts;
+    std::atomic<int>   m_iqpState{0};  // 0=Idle 1=Loading 2=Ready 3=Error
+    float              m_iqpFetchedLat = 1e9f;
+    float              m_iqpFetchedLon = 1e9f;
+    int                m_iqpFetchedIdx = -2;
 };
 
 } // namespace TotalControl

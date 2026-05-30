@@ -1,5 +1,6 @@
 #pragma once
 #include "TzEntry.h"
+#include "EclipseEntry.h"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -31,7 +32,8 @@ public:
     void        SetSettingInt(const char* key, int value);
 
     // reference data queries
-    std::vector<TzEntry> LoadTimezones() const;
+    std::vector<TzEntry>    LoadTimezones() const;
+    std::vector<EclipseEntry> LoadEclipses() const;
 
 private:
     sqlite3* m_db = nullptr;

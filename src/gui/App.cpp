@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <format>
@@ -139,6 +140,9 @@ void App::EnsureDefaultConfig(const std::wstring& path) {
         INSERT OR IGNORE INTO settings VALUES ('show_ecl_clock',  '1');
         INSERT OR IGNORE INTO settings VALUES ('home_tz_iana', 'Europe/Warsaw');
         INSERT OR IGNORE INTO settings VALUES ('ecl_tz_iana',  'Europe/Madrid');
+        INSERT OR IGNORE INTO settings VALUES ('obs_lat',   '0.0');
+        INSERT OR IGNORE INTO settings VALUES ('obs_lon',   '0.0');
+        INSERT OR IGNORE INTO settings VALUES ('obs_alt_m', '0');
     )SQL");
 }
 
@@ -149,6 +153,41 @@ void App::SaveClockSettings() {
     m_configDb.SetSettingInt("show_ecl_clock",  m_showEclClock  ? 1 : 0);
     m_configDb.SetSetting("home_tz_iana", m_homeTzIana.c_str());
     m_configDb.SetSetting("ecl_tz_iana",  m_eclTzIana.c_str());
+}
+
+void App::SaveObserverSettings() {
+    m_configDb.SetSetting("obs_lat",   std::format("{:.6f}", m_obsLat).c_str());
+    m_configDb.SetSetting("obs_lon",   std::format("{:.6f}", m_obsLon).c_str());
+    m_configDb.SetSettingInt("obs_alt_m", m_obsAltM);
+}
+
+void App::TriggerIqpFetch() {
+    if (m_eclipseIdx < 0 || m_eclipseIdx >= static_cast<int>(m_eclipses.size())) return;
+
+    const auto& e  = m_eclipses[m_eclipseIdx];
+    float lat      = m_obsLat;
+    float lon      = m_obsLon;
+    int   y = e.year, mo = e.month, d = e.day;
+    std::string id = BuildEclipseId(e.type.empty() ? 'T' : e.type[0], y, mo, d);
+
+    m_iqpFetchedLat = lat;
+    m_iqpFetchedLon = lon;
+    m_iqpFetchedIdx = m_eclipseIdx;
+    m_iqpState.store(1); // Loading
+
+    if (m_iqpThread.joinable()) m_iqpThread.detach();
+
+    auto* statePtr   = &m_iqpState;
+    auto* mutexPtr   = &m_iqpMutex;
+    auto* contactPtr = &m_contacts;
+
+    m_iqpThread = std::thread([id, lat, lon, y, mo, d,
+                                statePtr, mutexPtr, contactPtr]() {
+        auto ct = FetchContactTimes(id, lat, lon, y, mo, d);
+        { std::lock_guard lk(*mutexPtr); *contactPtr = ct; }
+        statePtr->store(ct.valid ? 2 : 3);
+    });
+    LogLine(std::format("IQP fetch: {} lat={:.4f} lon={:.4f}", id, lat, lon));
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
@@ -177,7 +216,13 @@ App::App() {
         std::string ecl  = m_configDb.GetSetting("ecl_tz_iana",  "");
         if (!home.empty()) m_homeTzIana = home;
         if (!ecl.empty())  m_eclTzIana  = ecl;
-        LogLine(std::format("Config DB: home={}  ecl={}", m_homeTzIana, m_eclTzIana));
+
+        try { m_obsLat = std::stof(m_configDb.GetSetting("obs_lat", "0")); } catch (...) {}
+        try { m_obsLon = std::stof(m_configDb.GetSetting("obs_lon", "0")); } catch (...) {}
+        m_obsAltM = m_configDb.GetSettingInt("obs_alt_m", 0);
+
+        LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",
+                            m_homeTzIana, m_eclTzIana, m_obsLat, m_obsLon, m_obsAltM));
     } else {
         LogLine("WARNING: cannot open TotalControlConfig.db — settings not persisted");
     }
@@ -186,8 +231,10 @@ App::App() {
     std::wstring dataPath = dir + L"\\TotalControlData.db";
     if (std::filesystem::exists(dataPath)) {
         if (m_dataDb.OpenReadOnly(dataPath)) {
-            m_tzList = m_dataDb.LoadTimezones();
-            LogLine(std::format("Data DB: opened — {} timezones loaded", m_tzList.size()));
+            m_tzList   = m_dataDb.LoadTimezones();
+            m_eclipses = m_dataDb.LoadEclipses();
+            LogLine(std::format("Data DB: {} timezones, {} eclipses loaded",
+                                m_tzList.size(), m_eclipses.size()));
         } else {
             LogLine("WARNING: TotalControlData.db found but could not be opened");
         }
@@ -200,9 +247,24 @@ App::App() {
         m_tzList = TzFallbackList();
         LogLine(std::format("Timezones: using fallback ({} entries)", m_tzList.size()));
     }
+
+    // Default eclipse: nearest future (UTC date comparison)
+    if (!m_eclipses.empty()) {
+        SYSTEMTIME st{};
+        GetSystemTime(&st);
+        int today = st.wYear * 10000 + st.wMonth * 100 + st.wDay;
+        m_eclipseIdx = static_cast<int>(m_eclipses.size()) - 1; // fallback: last
+        for (int i = 0; i < static_cast<int>(m_eclipses.size()); ++i) {
+            if (m_eclipses[i].DateInt() >= today) { m_eclipseIdx = i; break; }
+        }
+        const auto& e = m_eclipses[m_eclipseIdx];
+        LogLine(std::format("Default eclipse: {}-{:02d}-{:02d} {}",
+                            e.year, e.month, e.day, e.type));
+    }
 }
 
 App::~App() {
+    if (m_iqpThread.joinable()) m_iqpThread.join();
     if (m_pipe.GetState() == PipeClient::State::Connected) {
         (void)m_pipe.Send("{\"cmd\":\"quit\"}");
         m_pipe.Disconnect();
@@ -474,6 +536,153 @@ void App::RenderCameraSection() {
     }
 }
 
+// ─── Eclipse time helpers ─────────────────────────────────────────────────────
+
+// Returns UTC ms (Unix epoch) of greatest eclipse.
+// td_ge is Terrestrial Time "HH:MM:SS[.s]"; dt = TT−UTC in seconds.
+// Returns INT64_MIN on parse failure.
+static int64_t EclipseGeUtcMs(const EclipseEntry& e) {
+    using namespace std::chrono;
+    int hh = 0, mm = 0;
+    float fs = 0.f;
+    if (sscanf_s(e.timeGe.c_str(), "%d:%d:%f", &hh, &mm, &fs) < 2)
+        return INT64_MIN;
+    auto ymd = year_month_day{ year(e.year), month(static_cast<unsigned>(e.month)),
+                               day(static_cast<unsigned>(e.day)) };
+    auto dp    = sys_days{ ymd };
+    int64_t datMs = duration_cast<milliseconds>(dp.time_since_epoch()).count();
+    int64_t timMs = (int64_t(hh) * 3600 + int64_t(mm) * 60) * 1000
+                  + static_cast<int64_t>(fs * 1000.f);
+    int64_t dtMs  = static_cast<int64_t>(e.dt * 1000.f);  // TT − UTC → subtract
+    return datMs + timMs - dtMs;
+}
+
+// Formats a signed millisecond duration as "Xd HH:MM:SS.mmm" (negative = past).
+static void FormatCountdown(int64_t diffMs, char* buf, int len) {
+    bool neg   = diffMs < 0;
+    int64_t a  = neg ? -diffMs : diffMs;
+    int days   = static_cast<int>(a / 86400000LL);
+    int hh     = static_cast<int>((a % 86400000LL) / 3600000LL);
+    int mm     = static_cast<int>((a % 3600000LL)  / 60000LL);
+    int ss     = static_cast<int>((a % 60000LL)    / 1000LL);
+    int ms     = static_cast<int>(a % 1000LL);
+    if (neg)
+        snprintf(buf, len, "-%dd %02d:%02d:%02d.%03d", days, hh, mm, ss, ms);
+    else
+        snprintf(buf, len, "%dd %02d:%02d:%02d.%03d",  days, hh, mm, ss, ms);
+}
+
+// ─── Eclipse selector rendering ───────────────────────────────────────────────
+
+void App::RenderEclipseSection() {
+    static const ImVec4 kGray  { 0.40f, 0.40f, 0.45f, 1.0f };
+    static const ImVec4 kWhite { 0.88f, 0.88f, 0.90f, 1.0f };
+
+    if (m_eclipses.empty()) {
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(kGray, "no data");
+        ImGui::PopFont();
+        return;
+    }
+
+    // Combo preview: YYYY-MM-DD  T
+    char preview[20] = "---";
+    if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
+        const auto& e = m_eclipses[m_eclipseIdx];
+        char tc = e.type.empty() ? '?' : e.type[0];
+        snprintf(preview, sizeof(preview), "%04d-%02d-%02d  %c",
+                 e.year, e.month, e.day, tc);
+    }
+
+    ImGui::PushFont(m_fontMono);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##ecl_sel", preview, ImGuiComboFlags_HeightLarge)) {
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(m_eclipses.size()));
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                const auto& e = m_eclipses[i];
+                char tc = e.type.empty() ? '?' : e.type[0];
+                char lbl[20];
+                snprintf(lbl, sizeof(lbl), "%04d-%02d-%02d  %c",
+                         e.year, e.month, e.day, tc);
+                bool sel = (i == m_eclipseIdx);
+                if (ImGui::Selectable(lbl, sel)) {
+                    m_eclipseIdx = i;
+                    TriggerIqpFetch();
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopFont();
+
+    // Details for selected eclipse
+    if (m_eclipseIdx < 0 || m_eclipseIdx >= static_cast<int>(m_eclipses.size()))
+        return;
+
+    const auto& e = m_eclipses[m_eclipseIdx];
+    char tc = e.type.empty() ? '?' : e.type[0];
+
+    const char* typeName = "Unknown";
+    ImVec4 typeCol = kWhite;
+    switch (tc) {
+    case 'T': typeName = "Total";   typeCol = ImVec4{0.95f, 0.80f, 0.20f, 1.0f}; break;
+    case 'A': typeName = "Annular"; typeCol = ImVec4{0.85f, 0.50f, 0.15f, 1.0f}; break;
+    case 'H': typeName = "Hybrid";  typeCol = ImVec4{0.80f, 0.75f, 0.20f, 1.0f}; break;
+    case 'P': typeName = "Partial"; typeCol = kGray;                               break;
+    }
+
+    const float kValX = 42.0f;
+
+    ImGui::PushFont(m_fontMono);
+
+    // Type + duration
+    ImGui::TextColored(typeCol, "%s", typeName);
+    if (!e.duration.empty()) {
+        ImGui::SameLine(kValX);
+        ImGui::TextColored(kGray, "%s", e.duration.c_str());
+    }
+
+    // Location of maximum
+    char latBuf[10], lonBuf[10];
+    snprintf(latBuf, sizeof(latBuf), "%.1f%c", fabsf(e.latGe), e.latGe >= 0.f ? 'N' : 'S');
+    snprintf(lonBuf, sizeof(lonBuf), "%.1f%c", fabsf(e.lonGe), e.lonGe >= 0.f ? 'E' : 'W');
+    ImGui::TextColored(kGray, "Max");
+    ImGui::SameLine(kValX);
+    char coordBuf[24];
+    snprintf(coordBuf, sizeof(coordBuf), "%s %s", latBuf, lonBuf);
+    ImGui::TextColored(kWhite, "%s", coordBuf);
+
+    ImGui::PopFont();
+
+    // ── Observer location inputs ──────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const float kLblW = 30.0f;
+    ImGui::PushFont(m_fontMono);
+
+    ImGui::TextColored(kGray, "Lat"); ImGui::SameLine(kLblW);
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputFloat("##obs_lat", &m_obsLat, 0.f, 0.f, "%.5f");
+    if (ImGui::IsItemDeactivatedAfterEdit()) { SaveObserverSettings(); TriggerIqpFetch(); }
+
+    ImGui::TextColored(kGray, "Lon"); ImGui::SameLine(kLblW);
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputFloat("##obs_lon", &m_obsLon, 0.f, 0.f, "%.5f");
+    if (ImGui::IsItemDeactivatedAfterEdit()) { SaveObserverSettings(); TriggerIqpFetch(); }
+
+    ImGui::TextColored(kGray, "Alt"); ImGui::SameLine(kLblW);
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputInt("##obs_alt", &m_obsAltM);
+    if (ImGui::IsItemDeactivatedAfterEdit()) SaveObserverSettings();
+
+    ImGui::PopFont();
+}
+
 // ─── Main frame ───────────────────────────────────────────────────────────────
 
 void App::OnFrame() {
@@ -533,6 +742,47 @@ void App::OnFrame() {
 
     // ── Local / eclipse clock ─────────────────────────────────────────────
     RenderExtraClock("Local Time Zone##ecl", "##popup_ecl",  m_showEclClock,  m_eclTzIana);
+
+    // ── C1 countdown ──────────────────────────────────────────────────────────
+    if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
+        const auto& ec = m_eclipses[m_eclipseIdx];
+        char tc = ec.type.empty() ? '?' : ec.type[0];
+        ImVec4 cdCol = (tc == 'T') ? ImVec4{0.95f, 0.80f, 0.20f, 1.0f}
+                     : (tc == 'A') ? ImVec4{0.85f, 0.50f, 0.15f, 1.0f}
+                     : (tc == 'H') ? ImVec4{0.80f, 0.75f, 0.20f, 1.0f}
+                                   : ImVec4{0.55f, 0.55f, 0.60f, 1.0f};
+        static const ImVec4 kDim{0.35f, 0.35f, 0.40f, 1.0f};
+        static const ImVec4 kGray{0.40f, 0.40f, 0.45f, 1.0f};
+
+        ImGui::Spacing();
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(kGray, "C1");
+        ImGui::SameLine(25.0f);
+
+        int iqpSt = m_iqpState.load();
+        if (iqpSt == 1) {
+            // Loading
+            ImGui::TextColored(kDim, "loading...");
+        } else if (iqpSt == 2) {
+            // IQP result ready
+            int64_t c1Ms;
+            { std::lock_guard lk(m_iqpMutex); c1Ms = m_contacts.c1Ms; }
+            char cdBuf[32];
+            FormatCountdown(c1Ms - UtcNowMs(), cdBuf, sizeof(cdBuf));
+            ImGui::TextColored(cdCol, "%s", cdBuf);
+        } else {
+            // Idle or error — fall back to GE
+            int64_t geMs = EclipseGeUtcMs(ec);
+            if (geMs != INT64_MIN) {
+                char cdBuf[32];
+                FormatCountdown(geMs - UtcNowMs(), cdBuf, sizeof(cdBuf));
+                ImGui::TextColored(cdCol, "%s", cdBuf);
+                ImGui::SameLine();
+                ImGui::TextColored(kDim, iqpSt == 3 ? "(GE?)" : "(GE)");
+            }
+        }
+        ImGui::PopFont();
+    }
 
     // ════════════════════════════════
     // Section: CONNECTION
@@ -614,6 +864,14 @@ void App::OnFrame() {
     ImGui::SeparatorText("CAMERA STATUS");
     ImGui::Spacing();
     RenderCameraSection();
+
+    // ════════════════════════════════
+    // Section: ECLIPSE
+    // ════════════════════════════════
+    ImGui::Spacing();
+    ImGui::SeparatorText("ECLIPSE");
+    ImGui::Spacing();
+    RenderEclipseSection();
 
     ImGui::EndChild();
     ImGui::PopStyleColor();

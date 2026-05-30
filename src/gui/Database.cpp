@@ -116,4 +116,40 @@ std::vector<TzEntry> Database::LoadTimezones() const {
     return result;
 }
 
+std::vector<EclipseEntry> Database::LoadEclipses() const {
+    std::vector<EclipseEntry> out;
+    if (!m_db) return out;
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT year, month, day, eclipse_type, td_ge,"
+        "       lat_dd_ge, lng_dd_ge, central_duration, duration_secs, dt"
+        " FROM eclipse_besselian"
+        " ORDER BY julian_date;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return out;
+
+    auto col = [&](int i) -> std::string {
+        const auto* p = sqlite3_column_text(st, i);
+        return p ? reinterpret_cast<const char*>(p) : "";
+    };
+
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        EclipseEntry e;
+        e.year         = sqlite3_column_int(st, 0);
+        e.month        = sqlite3_column_int(st, 1);
+        e.day          = sqlite3_column_int(st, 2);
+        e.type         = col(3);
+        e.timeGe       = col(4);
+        e.latGe        = static_cast<float>(sqlite3_column_double(st, 5));
+        e.lonGe        = static_cast<float>(sqlite3_column_double(st, 6));
+        e.duration     = col(7);
+        e.durationSecs = static_cast<float>(sqlite3_column_double(st, 8));
+        e.dt           = static_cast<float>(sqlite3_column_double(st, 9));
+        out.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
 } // namespace TotalControl

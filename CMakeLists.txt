@@ -30,6 +30,7 @@ set(SRV_SOURCES
     src/visualization/Renderer3D.cpp
     src/visualization/Overlay2D.cpp
     src/visualization/CameraPreview.cpp
+    src/srv.rc
 )
 
 add_executable(TotalControlSRV ${SRV_SOURCES})
@@ -76,7 +77,7 @@ add_custom_command(TARGET TotalControlSRV POST_BUILD
 )
 
 # ─── TotalControlCLI.exe — thin CLI client (bez CrSDK) ───────────────────────
-add_executable(TotalControlCLI src/cli/main.cpp)
+add_executable(TotalControlCLI src/cli/main.cpp src/cli/cli.rc)
 
 target_include_directories(TotalControlCLI PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -146,6 +147,8 @@ add_executable(TotalControlGUI WIN32
     src/gui/App.cpp
     src/gui/PipeClient.cpp
     src/gui/Database.cpp
+    src/gui/IqpClient.cpp
+    src/gui/gui.rc
 )
 
 target_include_directories(TotalControlGUI PRIVATE
@@ -169,6 +172,7 @@ target_link_libraries(TotalControlGUI PRIVATE
     imgui
     sqlite3
     d3d11.lib dxgi.lib
+    winhttp.lib
     kernel32.lib user32.lib gdi32.lib
     ole32.lib oleaut32.lib uuid.lib shell32.lib
 )
