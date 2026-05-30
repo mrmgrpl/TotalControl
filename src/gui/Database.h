@@ -1,6 +1,7 @@
 #pragma once
 #include "TzEntry.h"
 #include "EclipseEntry.h"
+#include "BesselCalc.h"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,8 +33,9 @@ public:
     void        SetSettingInt(const char* key, int value);
 
     // reference data queries
-    std::vector<TzEntry>    LoadTimezones() const;
+    std::vector<TzEntry>     LoadTimezones() const;
     std::vector<EclipseEntry> LoadEclipses() const;
+    BesselianElements        LoadBesselianElements(int year, int month, int day) const;
 
 private:
     sqlite3* m_db = nullptr;

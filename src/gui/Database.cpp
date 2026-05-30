@@ -152,4 +152,43 @@ std::vector<EclipseEntry> Database::LoadEclipses() const {
     return out;
 }
 
+BesselianElements Database::LoadBesselianElements(int year, int month, int day) const {
+    BesselianElements b;
+    if (!m_db) return b;
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT t0, dt,"
+        " x0,x1,x2,x3, y0,y1,y2,y3,"
+        " d0,d1,d2, mu0,mu1,mu2,"
+        " l10,l11,l12, l20,l21,l22,"
+        " tan_f1, tan_f2, tmin, tmax"
+        " FROM eclipse_besselian"
+        " WHERE year=? AND month=? AND day=?"
+        " LIMIT 1;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return b;
+
+    sqlite3_bind_int(st, 1, year);
+    sqlite3_bind_int(st, 2, month);
+    sqlite3_bind_int(st, 3, day);
+
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        auto d = [&](int i){ return sqlite3_column_double(st, i); };
+        b.year  = year; b.month = month; b.day = day;
+        b.t0    = d(0);  b.dt   = d(1);
+        b.x0    = d(2);  b.x1   = d(3);  b.x2  = d(4);  b.x3  = d(5);
+        b.y0    = d(6);  b.y1   = d(7);  b.y2  = d(8);  b.y3  = d(9);
+        b.d0    = d(10); b.d1   = d(11); b.d2  = d(12);
+        b.mu0   = d(13); b.mu1  = d(14); b.mu2 = d(15);
+        b.l10   = d(16); b.l11  = d(17); b.l12 = d(18);
+        b.l20   = d(19); b.l21  = d(20); b.l22 = d(21);
+        b.tan_f1= d(22); b.tan_f2= d(23);
+        b.tmin  = d(24); b.tmax = d(25);
+        b.valid = true;
+    }
+    sqlite3_finalize(st);
+    return b;
+}
+
 } // namespace TotalControl

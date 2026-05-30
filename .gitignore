@@ -14,6 +14,8 @@ out/
 
 # External SDKs — not committed
 external/CrSDK/
+external/CrSDK.zip
+external/eclipse_besselian/
 
 # Large HTML API reference docs (234 MB)
 docs/CrSDK_API_Reference_v2.01.00/

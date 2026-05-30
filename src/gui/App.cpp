@@ -161,33 +161,69 @@ void App::SaveObserverSettings() {
     m_configDb.SetSettingInt("obs_alt_m", m_obsAltM);
 }
 
+static float DmsToDecimal(const DmsCoord& d) {
+    float v = d.deg + d.min / 60.f + d.sec / 3600.f;
+    return d.pos ? v : -v;
+}
+
+static void DecimalToDms(float decimal, DmsCoord& d) {
+    d.pos = decimal >= 0.f;
+    float a = fabsf(decimal);
+    d.deg = static_cast<int>(a);
+    float r = (a - d.deg) * 60.f;
+    d.min = static_cast<int>(r);
+    d.sec = roundf((r - d.min) * 60.f * 100.f) / 100.f;
+    if (d.sec >= 60.f) { d.sec = 0.f; if (++d.min >= 60) { d.min = 0; ++d.deg; } }
+}
+
+void App::SyncDecimalToDms() {
+    DecimalToDms(m_obsLat, m_latDms);
+    DecimalToDms(m_obsLon, m_lonDms);
+}
+
+void App::SyncDmsToDecimal() {
+    m_obsLat = DmsToDecimal(m_latDms);
+    m_obsLon = DmsToDecimal(m_lonDms);
+}
+
 void App::TriggerIqpFetch() {
     if (m_eclipseIdx < 0 || m_eclipseIdx >= static_cast<int>(m_eclipses.size())) return;
 
-    const auto& e  = m_eclipses[m_eclipseIdx];
-    float lat      = m_obsLat;
-    float lon      = m_obsLon;
+    const auto& e = m_eclipses[m_eclipseIdx];
+    float lat = m_obsLat, lon = m_obsLon;
+    int   altM = m_obsAltM;
     int   y = e.year, mo = e.month, d = e.day;
     std::string id = BuildEclipseId(e.type.empty() ? 'T' : e.type[0], y, mo, d);
 
     m_iqpFetchedLat = lat;
     m_iqpFetchedLon = lon;
     m_iqpFetchedIdx = m_eclipseIdx;
-    m_iqpState.store(1); // Loading
 
+    // Besselian: synchronous (fast, always available immediately)
+    BesselianElements bel = m_dataDb.LoadBesselianElements(y, mo, d);
+    m_beResult = CalcBesselian(bel, lat, lon, static_cast<double>(altM));
+
+    // IQP: asynchronous, no BE fallback (results shown side-by-side)
+    m_iqpState.store(1);
     if (m_iqpThread.joinable()) m_iqpThread.detach();
 
     auto* statePtr   = &m_iqpState;
     auto* mutexPtr   = &m_iqpMutex;
     auto* contactPtr = &m_contacts;
+    auto* cfgDb      = &m_configDb;
 
     m_iqpThread = std::thread([id, lat, lon, y, mo, d,
-                                statePtr, mutexPtr, contactPtr]() {
+                                statePtr, mutexPtr, contactPtr, cfgDb]() {
         auto ct = FetchContactTimes(id, lat, lon, y, mo, d);
+        // Persist refreshed key so it survives next app restart
+        std::string newKey = GetCurrentApiKey();
+        if (!newKey.empty())
+            cfgDb->SetSetting("iqp_api_key", newKey.c_str());
         { std::lock_guard lk(*mutexPtr); *contactPtr = ct; }
-        statePtr->store(ct.valid ? 2 : 3);
+        statePtr->store(ct.apiOk ? 2 : 3);
     });
-    LogLine(std::format("IQP fetch: {} lat={:.4f} lon={:.4f}", id, lat, lon));
+    LogLine(std::format("IQP+BE triggered: {} lat={:.4f} lon={:.4f}  BE valid={}",
+                        id, lat, lon, m_beResult.valid));
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
@@ -220,6 +256,11 @@ App::App() {
         try { m_obsLat = std::stof(m_configDb.GetSetting("obs_lat", "0")); } catch (...) {}
         try { m_obsLon = std::stof(m_configDb.GetSetting("obs_lon", "0")); } catch (...) {}
         m_obsAltM = m_configDb.GetSettingInt("obs_alt_m", 0);
+        SyncDecimalToDms();
+
+        // Load cached IQP API key (may be newer than compile-time default)
+        std::string savedKey = m_configDb.GetSetting("iqp_api_key", "");
+        if (!savedKey.empty()) SetApiKey(savedKey);
 
         LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",
                             m_homeTzIana, m_eclTzIana, m_obsLat, m_obsLon, m_obsAltM));
@@ -657,30 +698,182 @@ void App::RenderEclipseSection() {
 
     ImGui::PopFont();
 
-    // ── Observer location inputs ──────────────────────────────────────────────
+    // ── Observer location (DMS) ───────────────────────────────────────────────
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    const float kLblW = 30.0f;
     ImGui::PushFont(m_fontMono);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.f, 3.f));
 
-    ImGui::TextColored(kGray, "Lat"); ImGui::SameLine(kLblW);
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputFloat("##obs_lat", &m_obsLat, 0.f, 0.f, "%.5f");
-    if (ImGui::IsItemDeactivatedAfterEdit()) { SaveObserverSettings(); TriggerIqpFetch(); }
+    // Helper: render one DMS row (label on its own line, fields on next line).
+    // posLabel/negLabel: "N"/"S" or "E"/"W"
+    auto DmsRow = [&](const char* label,
+                      DmsCoord&   dms,
+                      int         maxDeg,
+                      const char* posLabel,
+                      const char* negLabel,
+                      const char* idD, const char* idM, const char* idS) {
+        ImGui::TextColored(kGray, "%s", label);
+        bool t = false;
 
-    ImGui::TextColored(kGray, "Lon"); ImGui::SameLine(kLblW);
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputFloat("##obs_lon", &m_obsLon, 0.f, 0.f, "%.5f");
-    if (ImGui::IsItemDeactivatedAfterEdit()) { SaveObserverSettings(); TriggerIqpFetch(); }
+        ImGui::SetNextItemWidth(38);
+        ImGui::InputInt(idD, &dms.deg, 0);
+        t |= ImGui::IsItemDeactivatedAfterEdit();
 
-    ImGui::TextColored(kGray, "Alt"); ImGui::SameLine(kLblW);
+        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "°");
+        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(26);
+        ImGui::InputInt(idM, &dms.min, 0);
+        t |= ImGui::IsItemDeactivatedAfterEdit();
+
+        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "'");
+        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(52);
+        ImGui::InputFloat(idS, &dms.sec, 0.f, 0.f, "%.2f");
+        t |= ImGui::IsItemDeactivatedAfterEdit();
+
+        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "\"");
+        ImGui::SameLine(0, 2);
+        if (ImGui::Button(dms.pos ? posLabel : negLabel, ImVec2(22.f, 0.f))) {
+            dms.pos = !dms.pos; t = true;
+        }
+
+        if (t) {
+            dms.deg = std::clamp(dms.deg, 0, maxDeg);
+            dms.min = std::clamp(dms.min, 0, 59);
+            dms.sec = std::clamp(dms.sec, 0.f, 59.99f);
+            SyncDmsToDecimal();
+            SaveObserverSettings();
+        }
+    };
+
+    DmsRow("Latitude",  m_latDms, 90,  "N##latn", "S##latn",
+           "##latd", "##latm", "##lats");
+    DmsRow("Longitude", m_lonDms, 180, "E##lone", "W##lone",
+           "##lond", "##lonm", "##lons");
+
+    // Altitude
+    ImGui::TextColored(kGray, "Altitude");
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputInt("##obs_alt", &m_obsAltM);
+    ImGui::InputInt("##obs_alt", &m_obsAltM, 0);
     if (ImGui::IsItemDeactivatedAfterEdit()) SaveObserverSettings();
 
+    ImGui::Spacing();
+    ImGui::PopStyleVar();
     ImGui::PopFont();
+}
+
+// ─── Contact times table ─────────────────────────────────────────────────────
+
+static int LocalUtcOffsetHours(const std::string& iana, int year, int month, int day) {
+    using namespace std::chrono;
+    try {
+        const time_zone* tz = locate_zone(iana);
+        auto ymd = year_month_day{ std::chrono::year(year),
+                                   std::chrono::month(static_cast<unsigned>(month)),
+                                   std::chrono::day(static_cast<unsigned>(day)) };
+        sys_info info = tz->get_info(sys_days{ymd} + hours{12});
+        return static_cast<int>(info.offset.count() / 3600);
+    } catch (...) { return 0; }
+}
+
+void App::RenderContactTimesSection() {
+    static const ImVec4 kGray  {0.40f, 0.40f, 0.45f, 1.0f};
+    static const ImVec4 kWhite {0.88f, 0.88f, 0.90f, 1.0f};
+    static const ImVec4 kDim   {0.35f, 0.35f, 0.40f, 1.0f};
+    static const ImVec4 kGold  {0.95f, 0.80f, 0.20f, 1.0f};
+
+    // Compute local timezone offset for eclipse date
+    int offH = 0;
+    if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
+        const auto& ec = m_eclipses[m_eclipseIdx];
+        offH = LocalUtcOffsetHours(m_eclTzIana, ec.year, ec.month, ec.day);
+    }
+    char offLabel[10];
+    if (offH > 0)       snprintf(offLabel, sizeof(offLabel), "UTC+%d", offH);
+    else if (offH < 0)  snprintf(offLabel, sizeof(offLabel), "UTC%d",  offH);
+    else                snprintf(offLabel, sizeof(offLabel), "UTC");
+
+    // Column offsets within content area
+    const float kT1  = 26.f;  // UTC time column
+    const float kT2  = 98.f;  // local time column
+
+    auto fmtUtc = [](int64_t ms, char* buf, int len) {
+        if (ms < 0) { snprintf(buf, len, "--:--:--"); return; }
+        int64_t s = ms / 1000;
+        snprintf(buf, len, "%02d:%02d:%02d",
+                 (int)((s/3600)%24), (int)((s/60)%60), (int)(s%60));
+    };
+    auto fmtLoc = [&](int64_t ms, char* buf, int len) {
+        if (ms < 0) { snprintf(buf, len, "--:--:--"); return; }
+        // shift by offset
+        int64_t shifted = ms + int64_t(offH) * 3600000LL;
+        int64_t s = shifted / 1000;
+        snprintf(buf, len, "%02d:%02d:%02d",
+                 (int)((s/3600)%24), (int)((s/60)%60), (int)(s%60));
+    };
+
+    struct EventRow { const char* lbl; int64_t ms; };
+
+    auto renderSection = [&](const char* srcLabel, const ContactTimes& ct,
+                              bool loading, ImVec4 srcCol) {
+        // header line
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(srcCol,  "%-3s", srcLabel);
+        ImGui::SameLine(kT1);
+        ImGui::TextColored(kGray, "UTC");
+        ImGui::SameLine(kT2);
+        ImGui::TextColored(kGray, "%s", offLabel);
+        ImGui::PopFont();
+
+        ImGui::PushFont(m_fontMono);
+        if (loading) {
+            ImGui::SameLine(); // dummy to keep spacing
+            ImGui::NewLine();
+            ImGui::TextColored(kDim, "  loading...");
+            ImGui::PopFont();
+            return;
+        }
+        if (!ct.apiOk && !ct.valid) {
+            ImGui::TextColored(kDim, "  ---");
+            ImGui::PopFont();
+            return;
+        }
+        if (!ct.valid) {
+            ImGui::TextColored(kDim, "  no eclipse");
+            ImGui::PopFont();
+            return;
+        }
+
+        EventRow rows[] = {
+            {"C1",  ct.c1Ms},
+            {"C2",  ct.c2Ms},
+            {"Max", ct.maxMs},
+            {"C3",  ct.c3Ms},
+            {"C4",  ct.c4Ms},
+        };
+        for (auto& r : rows) {
+            if (r.ms < 0) continue;
+            char t1[12], t2[12];
+            fmtUtc(r.ms, t1, sizeof(t1));
+            fmtLoc(r.ms, t2, sizeof(t2));
+            ImGui::TextColored(kGray,  "%s", r.lbl);
+            ImGui::SameLine(kT1);
+            ImGui::TextColored(kWhite, "%s", t1);
+            ImGui::SameLine(kT2);
+            ImGui::TextColored(kDim,   "%s", t2);
+        }
+        ImGui::PopFont();
+    };
+
+    int iqpSt = m_iqpState.load();
+    ContactTimes iqpCt;
+    { std::lock_guard lk(m_iqpMutex); iqpCt = m_contacts; }
+
+    renderSection("IQP", iqpCt, iqpSt == 1,
+                  ImVec4{0.45f, 0.75f, 1.00f, 1.0f});   // blue
+    ImGui::Spacing();
+    renderSection("BE",  m_beResult, false,
+                  ImVec4{0.40f, 1.00f, 0.60f, 1.0f});   // green
 }
 
 // ─── Main frame ───────────────────────────────────────────────────────────────
@@ -698,19 +891,20 @@ void App::OnFrame() {
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
-    const float sideW  = 200.0f;
+    const float colW   = 200.0f;
+    const float colW2  = 400.0f;
+    const float sideW  = colW + colW2;
     const float totalH = io.DisplaySize.y;
     const float rightW = io.DisplaySize.x - sideW;
 
     bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
 
     // ════════════════════════════════════════════════════════════════════════
-    // LEFT PANEL
+    // COLUMN 1 — Hardware (TIME / CONNECTION / CAMERA STATUS)
     // ════════════════════════════════════════════════════════════════════════
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.06f, 0.07f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 14));
-    ImGui::BeginChild("##side", ImVec2(sideW, totalH), false,
-        ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("##col_hw", ImVec2(colW, totalH), false, 0);
     ImGui::PopStyleVar();
 
     // ── app name ─────────────────────────────────────────────────────────
@@ -743,7 +937,7 @@ void App::OnFrame() {
     // ── Local / eclipse clock ─────────────────────────────────────────────
     RenderExtraClock("Local Time Zone##ecl", "##popup_ecl",  m_showEclClock,  m_eclTzIana);
 
-    // ── C1 countdown ──────────────────────────────────────────────────────────
+    // ── Countdowns ────────────────────────────────────────────────────────────
     if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
         const auto& ec = m_eclipses[m_eclipseIdx];
         char tc = ec.type.empty() ? '?' : ec.type[0];
@@ -751,36 +945,81 @@ void App::OnFrame() {
                      : (tc == 'A') ? ImVec4{0.85f, 0.50f, 0.15f, 1.0f}
                      : (tc == 'H') ? ImVec4{0.80f, 0.75f, 0.20f, 1.0f}
                                    : ImVec4{0.55f, 0.55f, 0.60f, 1.0f};
-        static const ImVec4 kDim{0.35f, 0.35f, 0.40f, 1.0f};
+        static const ImVec4 kDim {0.35f, 0.35f, 0.40f, 1.0f};
         static const ImVec4 kGray{0.40f, 0.40f, 0.45f, 1.0f};
 
         ImGui::Spacing();
         ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(kGray, "C1");
-        ImGui::SameLine(25.0f);
 
-        int iqpSt = m_iqpState.load();
-        if (iqpSt == 1) {
-            // Loading
-            ImGui::TextColored(kDim, "loading...");
-        } else if (iqpSt == 2) {
-            // IQP result ready
-            int64_t c1Ms;
-            { std::lock_guard lk(m_iqpMutex); c1Ms = m_contacts.c1Ms; }
+        // Row 1 — GE (always visible, eclipse-axis reference)
+        int64_t geMs = EclipseGeUtcMs(ec);
+        if (geMs != INT64_MIN) {
             char cdBuf[32];
-            FormatCountdown(c1Ms - UtcNowMs(), cdBuf, sizeof(cdBuf));
+            FormatCountdown(geMs - UtcNowMs(), cdBuf, sizeof(cdBuf));
+            ImGui::TextColored(kGray, "GE");
+            ImGui::SameLine(25.0f);
             ImGui::TextColored(cdCol, "%s", cdBuf);
-        } else {
-            // Idle or error — fall back to GE
-            int64_t geMs = EclipseGeUtcMs(ec);
-            if (geMs != INT64_MIN) {
-                char cdBuf[32];
-                FormatCountdown(geMs - UtcNowMs(), cdBuf, sizeof(cdBuf));
-                ImGui::TextColored(cdCol, "%s", cdBuf);
-                ImGui::SameLine();
-                ImGui::TextColored(kDim, iqpSt == 3 ? "(GE?)" : "(GE)");
+        }
+
+        // Rows C1/C2/Max/C3/C4 from IQP or Besselian
+        {
+            int iqpSt = m_iqpState.load();
+            if (iqpSt == 1) {
+                ImGui::TextColored(kGray, "C1");
+                ImGui::SameLine(25.0f);
+                ImGui::TextColored(kDim, "loading...");
+            } else if (iqpSt == 2 || iqpSt == 3) {
+                ContactTimes ct;
+                { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+
+                if (!ct.valid && ct.apiOk) {
+                    ImGui::TextColored(kGray, "C1");
+                    ImGui::SameLine(25.0f);
+                    ImGui::TextColored(kDim, "no eclipse");
+                } else if (ct.valid) {
+                    // Source label shown once on C1 line
+                    const char* srcLabel = (ct.source == ContactSource::IQP) ? "IQP" : "BE";
+
+                    // Helper: format UTC ms → "HH:MM:SS"
+                    auto fmtUtc = [](int64_t ms, char* buf, int len) {
+                        if (ms < 0) { snprintf(buf, len, "--:--:--"); return; }
+                        int64_t s  = ms / 1000;
+                        int hh = static_cast<int>((s / 3600) % 24);
+                        int mm = static_cast<int>((s / 60)   % 60);
+                        int sc = static_cast<int>(s % 60);
+                        snprintf(buf, len, "%02d:%02d:%02d", hh, mm, sc);
+                    };
+
+                    struct Row { const char* lbl; int64_t ms; };
+                    Row rows[] = {
+                        {"C1",  ct.c1Ms},
+                        {"C2",  ct.c2Ms},
+                        {"Max", ct.maxMs},
+                        {"C3",  ct.c3Ms},
+                        {"C4",  ct.c4Ms},
+                    };
+                    bool first = true;
+                    for (auto& r : rows) {
+                        if (r.ms < 0) continue;
+                        char tbuf[12];
+                        fmtUtc(r.ms, tbuf, sizeof(tbuf));
+                        ImGui::TextColored(kGray, "%s", r.lbl);
+                        ImGui::SameLine(30.0f);
+                        ImGui::TextColored(cdCol, "%s", tbuf);
+                        if (first) {
+                            ImGui::SameLine();
+                            ImGui::TextColored(kDim, " %s", srcLabel);
+                            first = false;
+                        }
+                    }
+                } else {
+                    ImGui::TextColored(kGray, "C1");
+                    ImGui::SameLine(25.0f);
+                    ImGui::TextColored(kDim, "err");
+                }
             }
         }
+
         ImGui::PopFont();
     }
 
@@ -865,13 +1104,39 @@ void App::OnFrame() {
     ImGui::Spacing();
     RenderCameraSection();
 
-    // ════════════════════════════════
-    // Section: ECLIPSE
-    // ════════════════════════════════
-    ImGui::Spacing();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    // ════════════════════════════════════════════════════════════════════════
+    // COLUMN 2 — Eclipse (selector / observer / calculate / contact times)
+    // ════════════════════════════════════════════════════════════════════════
+    ImGui::SameLine(0, 0);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.05f, 0.065f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 14));
+    ImGui::BeginChild("##col_ecl", ImVec2(colW2, totalH), false, 0);
+    ImGui::PopStyleVar();
+
+    // ECLIPSE section
     ImGui::SeparatorText("ECLIPSE");
     ImGui::Spacing();
     RenderEclipseSection();
+
+    // Calculate button
+    ImGui::Spacing();
+    {
+        int iqpSt = m_iqpState.load();
+        bool loading = (iqpSt == 1);
+        if (loading) ImGui::BeginDisabled();
+        if (ImGui::Button(loading ? "Calculating..." : "Calculate Contacts", ImVec2(-1, 34)))
+            TriggerIqpFetch();
+        if (loading) ImGui::EndDisabled();
+    }
+
+    // Contact times table
+    ImGui::Spacing();
+    ImGui::SeparatorText("CONTACTS");
+    ImGui::Spacing();
+    RenderContactTimesSection();
 
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -884,6 +1149,37 @@ void App::OnFrame() {
     ImGui::BeginChild("##main", ImVec2(rightW, totalH), false,
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
+
+    // ── Eclipse zone status banner ────────────────────────────────────────────
+    {
+        int iqpSt = m_iqpState.load();
+        if (iqpSt == 1 || iqpSt == 2) {
+            static const ImVec4 kGreen { 0.15f, 0.90f, 0.35f, 1.0f };
+            static const ImVec4 kRed   { 0.95f, 0.22f, 0.18f, 1.0f };
+            static const ImVec4 kDim2  { 0.40f, 0.40f, 0.45f, 1.0f };
+
+            ImGui::PushFont(m_fontLarge);
+            if (iqpSt == 1) {
+                ImGui::TextColored(kDim2, "checking location...");
+            } else {
+                ContactTimes ct;
+                { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+                if (!ct.apiOk) {
+                    ImGui::TextColored(kDim2, "network error");
+                } else if (!ct.valid) {
+                    ImGui::TextColored(kRed,  "NO ECLIPSE VISIBLE HERE");
+                } else if (ct.c2Ms > 0) {
+                    ImGui::TextColored(kGreen, "YOU ARE IN THE TOTALITY ZONE");
+                } else {
+                    ImGui::TextColored(kRed,   "YOU ARE OUTSIDE TOTALITY ZONE");
+                }
+            }
+            ImGui::PopFont();
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+        }
+    }
 
     if (!m_lastResult.empty()) {
         ImGui::PushFont(m_fontMono);

@@ -4,6 +4,7 @@
 #include "TzEntry.h"
 #include "EclipseEntry.h"
 #include "IqpClient.h"
+#include "BesselCalc.h"
 #include <string>
 #include <atomic>
 #include <fstream>
@@ -14,6 +15,12 @@
 struct ImFont;
 
 namespace TotalControl {
+
+struct DmsCoord {
+    int   deg = 0, min = 0;
+    float sec = 0.f;
+    bool  pos = true;   // true = N or E
+};
 
 // Camera status polled via {"cmd":"status"} every ~2 s when connected.
 struct CamStatus {
@@ -55,9 +62,10 @@ private:
     void TriggerIqpFetch();
     void EnsureDefaultConfig(const std::wstring& path);
 
-    void PollCameraStatus();          // send "status", parse response
-    void RenderCameraSection();       // draw CAMERA section in left panel
-    void RenderEclipseSection();      // draw ECLIPSE selector in left panel
+    void PollCameraStatus();
+    void RenderCameraSection();
+    void RenderEclipseSection();
+    void RenderContactTimesSection();
 
     PipeClient m_pipe;
 
@@ -102,10 +110,15 @@ private:
     float m_obsLon  = 0.f;   // decimal degrees E (+) / W (-)
     int   m_obsAltM = 0;     // metres above sea level
 
-    // ── IQP contact times (fetched in background) ─────────────────────────────
+    DmsCoord m_latDms, m_lonDms;
+    void SyncDecimalToDms();
+    void SyncDmsToDecimal();
+
+    // ── Contact times ─────────────────────────────────────────────────────────
     std::thread        m_iqpThread;
     std::mutex         m_iqpMutex;
-    ContactTimes       m_contacts;
+    ContactTimes       m_contacts;     // IQP result
+    ContactTimes       m_beResult;     // Besselian result (sync, always computed)
     std::atomic<int>   m_iqpState{0};  // 0=Idle 1=Loading 2=Ready 3=Error
     float              m_iqpFetchedLat = 1e9f;
     float              m_iqpFetchedLon = 1e9f;

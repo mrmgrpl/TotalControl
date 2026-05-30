@@ -148,6 +148,7 @@ add_executable(TotalControlGUI WIN32
     src/gui/PipeClient.cpp
     src/gui/Database.cpp
     src/gui/IqpClient.cpp
+    src/gui/BesselCalc.cpp
     src/gui/gui.rc
 )
 
