@@ -67,6 +67,44 @@ static void FormatLocalHms(int64_t utcMs, const std::string& ianaName,
     }
 }
 
+// ─── JSON field helpers (no external library) ────────────────────────────────
+
+// Extract first string or numeric value for key from flat/shallow JSON.
+static std::string JStr(std::string_view j, std::string_view key) {
+    std::string needle = std::string("\"") + std::string(key) + "\":";
+    auto p = j.find(needle);
+    if (p == std::string_view::npos) return {};
+    p += needle.size();
+    while (p < j.size() && j[p] == ' ') ++p;
+    if (p >= j.size()) return {};
+    if (j[p] == '"') {
+        ++p;
+        auto e = j.find('"', p);
+        return e == std::string_view::npos ? std::string{} : std::string(j.substr(p, e - p));
+    }
+    auto e = j.find_first_of(",}", p);
+    return std::string(j.substr(p, e == std::string_view::npos ? j.size() - p : e - p));
+}
+
+static int JInt(std::string_view j, std::string_view key, int def = 0) {
+    auto s = JStr(j, key);
+    if (s.empty()) return def;
+    try { return std::stoi(s); } catch (...) { return def; }
+}
+
+// Extract all values of a repeated string key (e.g. "guid" inside cameras array).
+static std::vector<std::string> JStrAll(std::string_view j, std::string_view key) {
+    std::vector<std::string> out;
+    std::string needle = std::string("\"") + std::string(key) + "\":\"";
+    size_t p = 0;
+    while ((p = j.find(needle, p)) != std::string_view::npos) {
+        p += needle.size();
+        auto e = j.find('"', p);
+        if (e != std::string_view::npos) { out.emplace_back(j.substr(p, e - p)); p = e; }
+    }
+    return out;
+}
+
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
 void App::LogLine(std::string_view msg) {
@@ -290,6 +328,137 @@ void App::RenderExtraClock(const char* clockId, const char* popupId,
     }
 }
 
+// ─── Camera status polling ────────────────────────────────────────────────────
+
+void App::PollCameraStatus() {
+    // 1. Get list of connected cameras
+    auto listRes = m_pipe.SendRequest(R"({"cmd":"list_cameras"})");
+    if (!listRes) { m_cameras.clear(); return; }
+
+    auto guids = JStrAll(*listRes, "guid");
+    if (guids.empty()) { m_cameras.clear(); return; }
+
+    // 2. Query status for each camera; keep vector in GUID order
+    std::vector<CamStatus> next;
+    next.reserve(guids.size());
+
+    for (auto& guid : guids) {
+        std::string req = std::format(R"({{"cmd":"status","cam":"{}"}})", guid);
+        auto res = m_pipe.SendRequest(req);
+        if (!res) continue;
+
+        CamStatus s;
+        s.valid          = JStr(*res, "connected") == "true";
+        s.guid           = guid;
+        s.model          = JStr(*res, "model");
+        s.batteryPct     = JInt(*res, "battery");
+        s.batteryLevel   = JStr(*res, "battery_level");
+        s.mode           = JStr(*res, "mode");
+        s.ss             = JStr(*res, "ss");
+        s.iso            = JInt(*res, "iso");
+        s.fnum           = JStr(*res, "f");
+        s.focus          = JStr(*res, "focus");
+        s.drive          = JStr(*res, "drive");
+        s.slot1Status    = JStr(*res, "slot1_status");
+        s.slot2Status    = JStr(*res, "slot2_status");
+        s.slot1Remaining = JInt(*res, "remaining",       -1);
+        s.slot2Remaining = JInt(*res, "slot2_remaining", -1);
+        s.store          = JStr(*res, "store");
+        next.push_back(std::move(s));
+    }
+    m_cameras = std::move(next);
+}
+
+// ─── Camera status rendering ──────────────────────────────────────────────────
+
+void App::RenderCameraSection() {
+    static const ImVec4 kGray   { 0.40f, 0.40f, 0.45f, 1.0f };
+    static const ImVec4 kWhite  { 0.88f, 0.88f, 0.90f, 1.0f };
+    static const ImVec4 kGreen  { 0.20f, 0.85f, 0.30f, 1.0f };
+    static const ImVec4 kYellow { 0.95f, 0.80f, 0.10f, 1.0f };
+    static const ImVec4 kOrange { 1.00f, 0.55f, 0.10f, 1.0f };
+    static const ImVec4 kRed    { 0.90f, 0.20f, 0.18f, 1.0f };
+
+    if (m_cameras.empty()) {
+        ImGui::TextColored(kGray, "no cameras");
+        return;
+    }
+
+    // Value column starts at fixed x offset within panel content
+    const float kValX = 52.0f;
+
+    auto Row = [&](const char* label, const char* value,
+                   ImVec4 valCol = kWhite) {
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(kGray, "%s", label);
+        ImGui::SameLine(kValX);
+        ImGui::TextColored(valCol, "%s", value);
+        ImGui::PopFont();
+    };
+
+    for (int ci = 0; ci < static_cast<int>(m_cameras.size()); ++ci) {
+        const CamStatus& s = m_cameras[ci];
+
+        if (ci > 0) ImGui::Spacing();
+
+        // Camera header: model name or index fallback
+        ImGui::PushFont(m_fontMono);
+        const char* modelStr = s.model.empty() ? "Camera" : s.model.c_str();
+        ImGui::TextColored(kWhite, "[%d] %s", ci + 1, modelStr);
+        ImGui::PopFont();
+
+        if (!s.valid) {
+            ImGui::TextColored(kRed, "    disconnected");
+            continue;
+        }
+
+        // Battery — coloured bar + percentage
+        {
+            ImVec4 batCol = kGreen;
+            int bars = 4;
+            std::string_view lvl = s.batteryLevel;
+            if      (lvl.find("1/4")  != std::string_view::npos) { bars = 1; batCol = kRed;    }
+            else if (lvl.find("1/2")  != std::string_view::npos) { bars = 2; batCol = kOrange; }
+            else if (lvl.find("3/4")  != std::string_view::npos) { bars = 3; batCol = kYellow; }
+
+            bool usb = lvl.find("usb") != std::string_view::npos;
+            char barStr[8];
+            for (int b = 0; b < 4; ++b) barStr[b] = (b < bars) ? '|' : '.';
+            barStr[4] = '\0';
+
+            char batBuf[24];
+            snprintf(batBuf, sizeof(batBuf), "%s %d%%%s",
+                     barStr, s.batteryPct, usb ? " USB" : "");
+            Row("Batt", batBuf, batCol);
+        }
+
+        // Exposure
+        Row("Mode",  s.mode.empty()  ? "?" : s.mode.c_str());
+        Row("SS",    s.ss.empty()    ? "?" : s.ss.c_str());
+
+        char isoBuf[12];
+        snprintf(isoBuf, sizeof(isoBuf), "%d", s.iso);
+        Row("ISO",   s.iso ? isoBuf : "?");
+        Row("f/",    s.fnum.empty()  ? "?" : s.fnum.c_str());
+        Row("Focus", s.focus.empty() ? "?" : s.focus.c_str());
+        Row("Drive", s.drive.empty() ? "?" : s.drive.c_str());
+
+        // Cards
+        auto CardRow = [&](const char* lbl, const std::string& status, int remaining) {
+            char buf[32];
+            if (remaining >= 0)
+                snprintf(buf, sizeof(buf), "%s  %d", status.c_str(), remaining);
+            else
+                snprintf(buf, sizeof(buf), "%s", status.c_str());
+            ImVec4 col = (status == "OK") ? kGreen : kRed;
+            Row(lbl, buf, col);
+        };
+
+        CardRow("C1", s.slot1Status.empty() ? "?" : s.slot1Status, s.slot1Remaining);
+        CardRow("C2", s.slot2Status.empty() ? "?" : s.slot2Status, s.slot2Remaining);
+    }
+}
+
 // ─── Main frame ───────────────────────────────────────────────────────────────
 
 void App::OnFrame() {
@@ -325,7 +494,10 @@ void App::OnFrame() {
     ImGui::TextColored(ImVec4(0.90f, 0.90f, 0.92f, 1.0f), "TotalControl");
     ImGui::PopFont();
 
-    ImGui::Spacing();
+    // ════════════════════════════════
+    // Section: TIME
+    // ════════════════════════════════
+    ImGui::SeparatorText("TIME");
 
     // ── UTC clock (always on, no options) ─────────────────────────────────
     {
@@ -347,11 +519,11 @@ void App::OnFrame() {
     // ── Local / eclipse clock ─────────────────────────────────────────────
     RenderExtraClock("Local Time Zone##ecl", "##popup_ecl",  m_showEclClock,  m_eclTzIana);
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    // ════════════════════════════════
+    // Section: CONNECTION
+    // ════════════════════════════════
+    ImGui::SeparatorText("CONNECTION");
 
-    // ── connection status ─────────────────────────────────────────────────
     ImGui::PushFont(m_fontMono);
     if (connected)
         ImGui::TextColored(ImVec4(0.20f, 0.85f, 0.30f, 1.0f), "● connected");
@@ -360,11 +532,8 @@ void App::OnFrame() {
     ImGui::PopFont();
 
     ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
 
-    // ── buttons ───────────────────────────────────────────────────────────
-    const ImVec2 btnSz(-1, 38);
+    const ImVec2 btnSz(-1, 34);
 
     {
         bool srvRunning = false;
@@ -375,7 +544,7 @@ void App::OnFrame() {
         if (ImGui::Button("Connect cameras", btnSz)) {
             LogLine("user: Start TotalControlSRV");
             if (TryLaunchDaemon()) {
-                m_lastResult = "SRV launched — connecting...";
+                m_lastResult = "SRV launched...";
                 m_reconnectCountdown = 0;
             } else {
                 m_lastResult = "ERROR: cannot launch TotalControlSRV.exe";
@@ -393,7 +562,6 @@ void App::OnFrame() {
         const char* req =
             "{\"cmd\":\"shoot\",\"drive\":\"single\","
             "\"ss\":\"1/8000\",\"iso\":100,\"f\":8.0}";
-        std::string resp;
         if (auto res = m_pipe.SendRequest(req)) {
             m_lastResult = *res;
             LogLine(std::format("shoot: {}", *res));
@@ -411,10 +579,19 @@ void App::OnFrame() {
         LogLine("user: disconnect & quit SRV");
         (void)m_pipe.Send("{\"cmd\":\"quit\"}");
         m_pipe.Disconnect();
+        m_cameras.clear();
         m_lastResult = "Server stopped.";
         LogLine("SRV quit sent");
     }
     if (!connected) ImGui::EndDisabled();
+
+    // ════════════════════════════════
+    // Section: CAMERA STATUS
+    // ════════════════════════════════
+    ImGui::Spacing();
+    ImGui::SeparatorText("CAMERA STATUS");
+    ImGui::Spacing();
+    RenderCameraSection();
 
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -461,6 +638,19 @@ void App::OnFrame() {
         ImGui::ShowDemoWindow(&m_showDemoWindow);
 
     ImGui::End();
+
+    // ── camera status polling (~every 2 s when connected) ────────────────
+    if (connected) {
+        if (m_statusCountdown <= 0) {
+            PollCameraStatus();
+            m_statusCountdown = 120;  // ~2 s at 60 fps
+        } else {
+            --m_statusCountdown;
+        }
+    } else {
+        m_cameras.clear();
+        m_statusCountdown = 0;
+    }
 
     // ── silent auto-reconnect ─────────────────────────────────────────────
     if (!connected) {
