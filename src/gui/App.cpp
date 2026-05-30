@@ -250,15 +250,21 @@ void App::RenderExtraClock(const char* clockId, const char* popupId,
 
     ImGui::PopFont();
 
-    // ── row 2: checkbox + IANA code ───────────────────────────────────────
+    // ── row 2: checkbox + full label (e.g. "Home Time Zone") ────────────────
     bool prevShow = show;
     ImGui::Checkbox(clockId, &show);
     if (show != prevShow) SaveClockSettings();
 
-    ImGui::SameLine(0, 6);
-    ImGui::PushFont(m_fontMono);
-    ImGui::TextColored(ImVec4(0.38f, 0.38f, 0.44f, 1.0f), "%s", cur.code.c_str());
-    ImGui::PopFont();
+    // ── row 3: city name — indented to align with checkbox label ─────────
+    {
+        float indent = ImGui::GetFrameHeight()
+                     + ImGui::GetStyle().ItemInnerSpacing.x;
+        ImGui::Indent(indent);
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(ImVec4(0.38f, 0.38f, 0.44f, 1.0f), "%s", cur.code.c_str());
+        ImGui::PopFont();
+        ImGui::Unindent(indent);
+    }
 
     // ── timezone picker popup ─────────────────────────────────────────────
     ImGui::SetNextWindowSizeConstraints(ImVec2(420, 0), ImVec2(420, 520));
@@ -327,19 +333,19 @@ void App::OnFrame() {
         FormatUtcHms(UtcNowMs(), buf, sizeof(buf));
         ImGui::PushFont(m_fontMono);
         ImGui::TextColored(ImVec4(0.90f, 0.75f, 0.20f, 1.0f), "%s", buf);
-        ImGui::TextColored(ImVec4(0.40f, 0.40f, 0.45f, 1.0f), "UTC");
+        ImGui::TextColored(ImVec4(0.40f, 0.40f, 0.45f, 1.0f), "Universal Time Zone");
         ImGui::PopFont();
     }
 
     ImGui::Spacing();
 
     // ── Home clock ────────────────────────────────────────────────────────
-    RenderExtraClock("HOME##chk", "##popup_home", m_showHomeClock, m_homeTzIana);
+    RenderExtraClock("Home Time Zone##home", "##popup_home", m_showHomeClock, m_homeTzIana);
 
     ImGui::Spacing();
 
-    // ── Eclipse clock ─────────────────────────────────────────────────────
-    RenderExtraClock("ECL##chk",  "##popup_ecl",  m_showEclClock,  m_eclTzIana);
+    // ── Local / eclipse clock ─────────────────────────────────────────────
+    RenderExtraClock("Local Time Zone##ecl", "##popup_ecl",  m_showEclClock,  m_eclTzIana);
 
     ImGui::Spacing();
     ImGui::Separator();
