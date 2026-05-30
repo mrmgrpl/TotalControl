@@ -344,14 +344,10 @@ void App::PollCameraStatus() {
 
     for (auto& guid : guids) {
         std::string req = std::format(R"({{"cmd":"status","cam":"{}"}})", guid);
-        auto t0  = std::chrono::steady_clock::now();
         auto res = m_pipe.SendRequest(req);
-        auto t1  = std::chrono::steady_clock::now();
         if (!res) continue;
 
         CamStatus s;
-        s.latencyMs      = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
         s.valid          = JStr(*res, "connected") == "true";
         s.guid           = guid;
         s.model          = JStr(*res, "model");
@@ -368,6 +364,11 @@ void App::PollCameraStatus() {
         s.slot1Remaining = JInt(*res, "remaining",       -1);
         s.slot2Remaining = JInt(*res, "slot2_remaining", -1);
         s.store          = JStr(*res, "store");
+
+        // Preserve lastShotMs across polls
+        for (auto& prev : m_cameras)
+            if (prev.guid == guid) { s.lastShotMs = prev.lastShotMs; break; }
+
         next.push_back(std::move(s));
     }
     m_cameras = std::move(next);
@@ -410,16 +411,6 @@ void App::RenderCameraSection() {
         const char* modelStr = s.model.empty() ? "Camera" : s.model.c_str();
         ImGui::TextColored(kWhite, "[%d] %s", ci + 1, modelStr);
         ImGui::PopFont();
-
-        // Latency — always shown, even if status invalid
-        if (s.latencyMs >= 0) {
-            char latBuf[16];
-            snprintf(latBuf, sizeof(latBuf), "%d ms", s.latencyMs);
-            ImVec4 latCol = s.latencyMs < 200  ? kGreen
-                          : s.latencyMs < 600  ? kYellow
-                                               : kRed;
-            Row("Lat", latBuf, latCol);
-        }
 
         if (!s.valid) {
             ImGui::TextColored(kRed, "    disconnected");
@@ -470,6 +461,16 @@ void App::RenderCameraSection() {
 
         CardRow("C1", s.slot1Status.empty() ? "?" : s.slot1Status, s.slot1Remaining);
         CardRow("C2", s.slot2Status.empty() ? "?" : s.slot2Status, s.slot2Remaining);
+
+        // Last shoot latency — full stack (SDK + USB + shutter + confirm)
+        if (s.lastShotMs >= 0) {
+            char shotBuf[16];
+            snprintf(shotBuf, sizeof(shotBuf), "%d ms", s.lastShotMs);
+            ImVec4 shotCol = s.lastShotMs < 500  ? kGreen
+                           : s.lastShotMs < 1500 ? kYellow
+                                                 : kRed;
+            Row("Shot", shotBuf, shotCol);
+        }
     }
 }
 
@@ -577,8 +578,15 @@ void App::OnFrame() {
             "{\"cmd\":\"shoot\",\"drive\":\"single\","
             "\"ss\":\"1/8000\",\"iso\":100,\"f\":8.0}";
         if (auto res = m_pipe.SendRequest(req)) {
-            m_lastResult = *res;
-            LogLine(std::format("shoot: {}", *res));
+            bool ok  = JStr(*res, "ok") == "true";
+            int  lat = JInt(*res, "latency_ms", -1);
+            // Store shot latency in camera[0] (Test picture targets camera[0])
+            if (ok && lat >= 0 && !m_cameras.empty())
+                m_cameras[0].lastShotMs = lat;
+            m_lastResult = ok
+                ? std::format("Shot OK — {} ms", lat >= 0 ? lat : 0)
+                : "ERROR: shoot failed";
+            LogLine(m_lastResult);
         } else {
             m_lastResult = std::format("ERROR: {}", PipeErrorMessage(res.error()));
             LogLine(m_lastResult);
