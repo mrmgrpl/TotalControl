@@ -261,7 +261,7 @@ void App::RenderExtraClock(const char* clockId, const char* popupId,
     ImGui::PopFont();
 
     // ── timezone picker popup ─────────────────────────────────────────────
-    ImGui::SetNextWindowSizeConstraints(ImVec2(300, 0), ImVec2(300, 480));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(420, 0), ImVec2(420, 520));
     if (ImGui::BeginPopup(popupId)) {
         ImGui::TextColored(ImVec4(0.55f, 0.65f, 0.85f, 1.0f), "Select timezone");
         ImGui::Separator();
@@ -270,9 +270,8 @@ void App::RenderExtraClock(const char* clockId, const char* popupId,
         for (int i = 0; i < static_cast<int>(m_tzList.size()); ++i) {
             bool sel = (i == curIdx);
             char entry[80];
-            snprintf(entry, sizeof(entry), "%-5s  %-20s  %s",
+            snprintf(entry, sizeof(entry), "%-22s  %s",
                      m_tzList[i].code.c_str(),
-                     m_tzList[i].label.c_str(),
                      m_tzList[i].iana.c_str());
             if (ImGui::Selectable(entry, sel)) {
                 tzIana = m_tzList[i].iana;
