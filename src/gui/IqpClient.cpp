@@ -409,29 +409,37 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
 
     std::string body = HttpsGet(L"maps.besselianelements.com",
                                  BuildPath(eclipseId, lat, lon));
+    if (body.empty()) { IqpLog("IQP: empty response, aborting"); return result; }
 
-    // Auto-refresh key on any non-OK response (wrong key, expired key, etc.)
-    if (!body.empty() && JsonStr(body, "message") != "OK") {
-        IqpLog(std::format("IQP: non-OK message=\"{}\" — triggering key refresh",
-                           JsonStr(body, "message")));
-        if (RefreshApiKey(eclipseId)) {
-            {
-                std::lock_guard lk(s_keyMutex);
-                IqpLog(std::format("IQP retry with new key={}", Truncate(s_apiKey)));
+    auto msg = JsonStr(body, "message");
+    IqpLog(std::format("IQP: message=\"{}\"", msg));
+
+    // API returns "message" only on errors. On success the field is absent (msg=="").
+    // Refresh key only for key-related errors — not for rate-limit or other transient errors.
+    if (!msg.empty()) {
+        bool isKeyError = msg.find("Key") != std::string::npos
+                       || msg.find("key") != std::string::npos;
+        if (isKeyError) {
+            IqpLog(std::format("IQP: key error \"{}\" — refreshing key", msg));
+            if (RefreshApiKey(eclipseId)) {
+                {
+                    std::lock_guard lk(s_keyMutex);
+                    IqpLog(std::format("IQP retry with new key={}", Truncate(s_apiKey)));
+                }
+                body = HttpsGet(L"maps.besselianelements.com",
+                                BuildPath(eclipseId, lat, lon));
+                msg = JsonStr(body, "message");
+                IqpLog(std::format("IQP: message after retry=\"{}\"", msg));
+            } else {
+                IqpLog("IQP: key refresh failed, aborting");
+                return result;
             }
-            body = HttpsGet(L"maps.besselianelements.com",
-                            BuildPath(eclipseId, lat, lon));
-        } else {
-            IqpLog("IQP: key refresh failed, aborting");
+        }
+        if (!msg.empty()) {
+            IqpLog(std::format("IQP: API error \"{}\", aborting", msg));
             return result;
         }
     }
-    if (body.empty()) { IqpLog("IQP: empty response, aborting"); return result; }
-
-    // Verify "message":"OK"
-    auto msg = JsonStr(body, "message");
-    IqpLog(std::format("IQP: final message=\"{}\"", msg));
-    if (msg != "OK") return result;
 
     std::string html = JsonStr(body, "message1");
     if (html.empty()) { IqpLog("IQP: message1 empty"); return result; }
