@@ -245,12 +245,12 @@ static std::string ExtractKeyFromContent(const std::string& content) {
     return {};
 }
 
-// Fetch the map page, find JS files, extract the API key.
+// Fetch one map page and its JS files; extract the API key.
 // Returns true and updates s_apiKey on success.
-static bool RefreshApiKey() {
-    // Step 1: fetch HTML of the map page
-    std::string html = HttpsGet(L"maps.besselianelements.com",
-                                 std::wstring(L"/map/TSE20260812/"));
+static bool TryRefreshFromPage(const std::string& eclipseId) {
+    std::wstring mapPath = L"/map/"
+        + std::wstring(eclipseId.begin(), eclipseId.end()) + L"/";
+    std::string html = HttpsGet(L"maps.besselianelements.com", mapPath);
     if (html.empty()) return false;
 
     // Check inline scripts first
@@ -263,7 +263,7 @@ static bool RefreshApiKey() {
         }
     }
 
-    // Step 2: collect <script src="..."> paths
+    // Collect <script src="..."> paths
     std::vector<std::string> jsPaths;
     size_t p = 0;
     while ((p = html.find("<script", p)) != std::string::npos) {
@@ -277,7 +277,6 @@ static bool RefreshApiKey() {
                 size_t e = html.find(d, q);
                 if (e != std::string::npos) {
                     std::string url = html.substr(q, e - q);
-                    // Keep only root-relative paths on the same host
                     if (!url.empty() && url[0] == '/')
                         jsPaths.push_back(url);
                 }
@@ -286,7 +285,7 @@ static bool RefreshApiKey() {
         p = (endTag != std::string::npos) ? endTag + 1 : p + 1;
     }
 
-    // Step 3: fetch each JS and search for the key
+    // Fetch each JS and search for the key
     for (auto& path : jsPaths) {
         std::wstring wpath(path.begin(), path.end());
         std::string js = HttpsGet(L"maps.besselianelements.com", wpath);
@@ -298,6 +297,14 @@ static bool RefreshApiKey() {
             return true;
         }
     }
+    return false;
+}
+
+// Try the queried eclipse first, then fall back to TSE20260812 (known-good map page).
+static bool RefreshApiKey(const std::string& eclipseId) {
+    if (TryRefreshFromPage(eclipseId)) return true;
+    static const std::string kFallback = "TSE20260812";
+    if (eclipseId != kFallback && TryRefreshFromPage(kFallback)) return true;
     return false;
 }
 
@@ -341,9 +348,9 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
     std::string body = HttpsGet(L"maps.besselianelements.com",
                                  BuildPath(eclipseId, lat, lon));
 
-    // Auto-refresh key once on "Wrong Key" response
-    if (body.find("\"Wrong Key\"") != std::string::npos) {
-        if (RefreshApiKey()) {
+    // Auto-refresh key on any non-OK response (wrong key, expired key, etc.)
+    if (!body.empty() && JsonStr(body, "message") != "OK") {
+        if (RefreshApiKey(eclipseId)) {
             body = HttpsGet(L"maps.besselianelements.com",
                             BuildPath(eclipseId, lat, lon));
         }
