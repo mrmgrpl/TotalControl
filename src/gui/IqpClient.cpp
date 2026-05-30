@@ -238,10 +238,10 @@ static std::string HttpsGet(const wchar_t* host, const std::string& path) {
         IqpLog(std::format("IQP GET {} -> request failed ({})", path, GetLastError()));
     } else {
         IqpLog(std::format("IQP GET {} -> HTTP {} ({} bytes)", path, httpStatus, body.size()));
-        // Log first 300 chars of response for diagnostics
+        // Log first 600 chars of response for diagnostics
         if (!body.empty()) {
-            std::string snippet = body.substr(0, std::min(body.size(), size_t{300}));
-            IqpLog(std::format("IQP body: {}", snippet));
+            std::string snippet = body.substr(0, std::min(body.size(), size_t{600}));
+            IqpLog(std::format("IQP body[0:600]: {}", snippet));
         }
     }
 
@@ -417,9 +417,11 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
     auto msg = JsonStr(body, "message");
     IqpLog(std::format("IQP: message=\"{}\"", msg));
 
-    // API returns "message" only on errors. On success the field is absent (msg=="").
-    // Refresh key only for key-related errors — not for rate-limit or other transient errors.
-    if (!msg.empty()) {
+    // Success: msg absent ("") or explicit "OK".
+    // Key error: msg non-empty and contains "Key"/"key" — refresh and retry once.
+    // Other errors (Limit Error, etc.): abort without retry.
+    bool isOk = msg.empty() || msg == "OK";
+    if (!isOk) {
         bool isKeyError = msg.find("Key") != std::string::npos
                        || msg.find("key") != std::string::npos;
         if (isKeyError) {
@@ -433,12 +435,13 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
                                 BuildPath(eclipseId, lat, lon));
                 msg = JsonStr(body, "message");
                 IqpLog(std::format("IQP: message after retry=\"{}\"", msg));
+                isOk = msg.empty() || msg == "OK";
             } else {
                 IqpLog("IQP: key refresh failed, aborting");
                 return result;
             }
         }
-        if (!msg.empty()) {
+        if (!isOk) {
             IqpLog(std::format("IQP: API error \"{}\", aborting", msg));
             return result;
         }
