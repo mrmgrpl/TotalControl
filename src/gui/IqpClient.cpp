@@ -34,10 +34,13 @@ static std::string Truncate(const std::string& s, size_t n = 8) {
 
 // Extract a JSON string value, properly unescaping \", \\, \n, \uXXXX.
 static std::string JsonStr(const std::string& json, const char* key) {
-    std::string needle = std::string("\"") + key + "\":\"";
+    std::string needle = std::string("\"") + key + "\":";
     auto p = json.find(needle);
     if (p == std::string::npos) return {};
     p += needle.size();
+    while (p < json.size() && json[p] == ' ') ++p;  // skip optional whitespace after ":"
+    if (p >= json.size() || json[p] != '"') return {};
+    ++p;
 
     std::string out;
     out.reserve(4096);
