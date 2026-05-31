@@ -1666,6 +1666,10 @@ void App::RenderMenuBar() {
             m_tlViewStart = -1;
             m_tlViewEnd   = -1;
         }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Style: Dark"))    ImGui::StyleColorsDark();
+        if (ImGui::MenuItem("Style: Classic")) ImGui::StyleColorsClassic();
+        if (ImGui::MenuItem("Style: Light"))   ImGui::StyleColorsLight();
         ImGui::EndMenu();
     }
 
