@@ -29,8 +29,8 @@ struct TLBlock {
     std::string ss         = "1/100";
     int         iso        = 100;
     std::string fstop      = "8.0";
-    int         count      = 5;        // bracket: shot count
-    std::string ev         = "1ev";    // bracket: EV step
+    int         count      = 5;        // bracket: shot count (3/5/9)
+    std::string ev         = "1.0ev";  // bracket: EV step (0.3ev…3.0ev)
     std::string burstDrive = "cont-hi-plus"; // burst drive mode: cont-hi-plus/hi/mid/lo
     int32_t     burstDurMs = 3000;           // burst: duration ms
 

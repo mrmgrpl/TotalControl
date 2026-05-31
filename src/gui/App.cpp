@@ -392,19 +392,47 @@ void App::RenderInspectorColumn() {
         }
 
         if (b.type == BlockType::Bracket) {
-            static const char* kCounts[] = {"3","5","9"};
-            ImGui::TextColored(kGray, "Count"); ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
-            int ci = b.count==3?0 : b.count==9?2 : 1;
-            if (ImGui::Combo("##cnt", &ci, kCounts, 3))
-                b.count = ci==0?3 : ci==2?9 : 5;
+            // 16 valid modes matching CrSDK + camera menu.
+            // 2.0ev / 3.0ev support x3 and x5 only (SDK limitation — no 9-pic).
+            struct BrkMode { const char* label; const char* ev; int count; };
+            static const BrkMode kBrk[] = {
+                {"0.3ev \xc3\x97 3", "0.3ev",  3},
+                {"0.3ev \xc3\x97 5", "0.3ev",  5},
+                {"0.3ev \xc3\x97 9", "0.3ev",  9},
+                {"0.5ev \xc3\x97 3", "0.5ev",  3},
+                {"0.5ev \xc3\x97 5", "0.5ev",  5},
+                {"0.5ev \xc3\x97 9", "0.5ev",  9},
+                {"0.7ev \xc3\x97 3", "0.7ev",  3},
+                {"0.7ev \xc3\x97 5", "0.7ev",  5},
+                {"0.7ev \xc3\x97 9", "0.7ev",  9},
+                {"1.0ev \xc3\x97 3", "1.0ev",  3},
+                {"1.0ev \xc3\x97 5", "1.0ev",  5},
+                {"1.0ev \xc3\x97 9", "1.0ev",  9},
+                {"2.0ev \xc3\x97 3", "2.0ev",  3},
+                {"2.0ev \xc3\x97 5", "2.0ev",  5},
+                {"3.0ev \xc3\x97 3", "3.0ev",  3},
+                {"3.0ev \xc3\x97 5", "3.0ev",  5},
+            };
+            static constexpr int kBrkN = 16;
 
-            static const char* kEvs[] = {"1/3ev","1/2ev","1ev","2ev","3ev"};
-            ImGui::TextColored(kGray, "EV");    ImGui::SameLine(52);
+            int idx = 10; // default: 1.0ev x5
+            for (int i = 0; i < kBrkN; ++i)
+                if (b.ev == kBrk[i].ev && b.count == kBrk[i].count) { idx = i; break; }
+
+            ImGui::TextColored(kGray, "Bracket"); ImGui::SameLine(52);
             ImGui::SetNextItemWidth(-1);
-            int ei = 2;
-            for (int i=0;i<5;++i) if (b.ev==kEvs[i]) ei=i;
-            if (ImGui::Combo("##ev", &ei, kEvs, 5)) b.ev = kEvs[ei];
+            if (ImGui::BeginCombo("##brk", kBrk[idx].label)) {
+                for (int i = 0; i < kBrkN; ++i) {
+                    if (i > 0 && strcmp(kBrk[i].ev, kBrk[i-1].ev) != 0)
+                        ImGui::Separator();
+                    if (ImGui::Selectable(kBrk[i].label, i == idx)) {
+                        b.ev    = kBrk[i].ev;
+                        b.count = kBrk[i].count;
+                    }
+                    if (i == idx) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
         }
 
         if (b.type == BlockType::Burst) {
