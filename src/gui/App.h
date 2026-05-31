@@ -119,6 +119,7 @@ private:
     void NewTimeline();
     void DeleteSelectedBlock();
     void DuplicateSelectedBlock();
+    static void ApplyStyleDark();
     bool m_showAbout = false;
 
     PipeClient m_pipe;
