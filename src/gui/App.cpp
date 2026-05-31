@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1478,13 +1479,320 @@ void App::RenderContactTimesSection() {
                   ImVec4{0.40f, 1.00f, 0.60f, 1.0f});   // green
 }
 
+// ─── Menu actions ────────────────────────────────────────────────────────────
+
+void App::NewTimeline() {
+    m_tracks.clear();
+    InitTracks();
+    m_selTrack = -1; m_selBlock = -1;
+    m_tlDragging = false; m_tlDragTrack = -1; m_tlDragBlock = -1;
+    m_tlViewStart = -1;   // will re-init from contacts on next frame
+    m_tlViewEnd   = -1;
+    LogLine("Timeline: New");
+}
+
+void App::DeleteSelectedBlock() {
+    if (m_selTrack < 0 || m_selTrack >= (int)m_tracks.size()) return;
+    auto& tr = m_tracks[m_selTrack];
+    if (m_selBlock < 0 || m_selBlock >= (int)tr.blocks.size()) return;
+    tr.blocks.erase(tr.blocks.begin() + m_selBlock);
+    m_selBlock = -1; m_selTrack = -1;
+}
+
+void App::DuplicateSelectedBlock() {
+    if (m_selTrack < 0 || m_selTrack >= (int)m_tracks.size()) return;
+    auto& tr = m_tracks[m_selTrack];
+    if (m_selBlock < 0 || m_selBlock >= (int)tr.blocks.size()) return;
+    TLBlock copy = tr.blocks[m_selBlock];
+    copy.id   = -1;
+    copy.atMs += BlockDurMs(copy) + 500; // offset by own duration + 0.5s gap
+    tr.blocks.push_back(copy);
+    std::sort(tr.blocks.begin(), tr.blocks.end(),
+        [](const TLBlock& a, const TLBlock& b){ return a.atMs < b.atMs; });
+    // Select the duplicate
+    for (int i = 0; i < (int)tr.blocks.size(); ++i) {
+        if (tr.blocks[i].atMs == copy.atMs && tr.blocks[i].type == copy.type) {
+            m_selBlock = i; break;
+        }
+    }
+}
+
+// Convert UTC ms → ISO 8601 "YYYY-MM-DDTHH:MM:SS.mmmZ"
+static std::string UtcMsToIso(int64_t ms) {
+    if (ms < 0) return {};
+    time_t tt = (time_t)(ms / 1000);
+    tm utc{};
+    gmtime_s(&utc, &tt);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+             utc.tm_year+1900, utc.tm_mon+1, utc.tm_mday,
+             utc.tm_hour, utc.tm_min, utc.tm_sec, (int)(ms%1000));
+    return buf;
+}
+
+void App::ExportTimelineJson() {
+    // File save dialog
+    wchar_t path[MAX_PATH] = L"eclipse_sequence.json";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize    = sizeof(ofn);
+    ofn.lpstrFilter    = L"JSON\0*.json\0All\0*.*\0";
+    ofn.lpstrFile      = path;
+    ofn.nMaxFile       = MAX_PATH;
+    ofn.lpstrDefExt    = L"json";
+    ofn.Flags          = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileNameW(&ofn)) return;
+
+    // Collect all camera blocks, sorted by time
+    std::vector<const TLBlock*> steps;
+    for (auto& tr : m_tracks) {
+        if (!tr.IsCamera()) continue;
+        for (auto& b : tr.blocks)
+            if (b.atMs >= 0) steps.push_back(&b);
+    }
+    std::sort(steps.begin(), steps.end(),
+        [](const TLBlock* a, const TLBlock* b){ return a->atMs < b->atMs; });
+
+    // Build JSON
+    std::string json = "{\n  \"steps\": [\n";
+    for (size_t i = 0; i < steps.size(); ++i) {
+        const TLBlock& b = *steps[i];
+        std::string at  = UtcMsToIso(b.atMs);
+        const char* cmd = (b.type==BlockType::Bracket) ? "bracket"
+                        : (b.type==BlockType::Burst)   ? "shoot"
+                                                        : "shoot";
+        std::string entry = std::format(
+            "    {{\n"
+            "      \"at\": \"{}\",\n"
+            "      \"cmd\": \"{}\",\n"
+            "      \"ss\": \"{}\",\n"
+            "      \"iso\": {},\n"
+            "      \"f\": {}",
+            at, cmd, b.ss, b.iso, b.fstop);
+        if (b.type == BlockType::Bracket)
+            entry += std::format(",\n      \"count\": {},\n      \"ev\": \"{}\"",
+                                 b.count, b.ev);
+        if (b.type == BlockType::Burst)
+            entry += std::format(",\n      \"drive\": \"cont-hi-plus\",\n"
+                                 "      \"timeout_ms\": {}", b.burstDurMs + 2000);
+        if (!b.label.empty())
+            entry += std::format(",\n      \"label\": \"{}\"", b.label);
+        entry += "\n    }";
+        if (i + 1 < steps.size()) entry += ",";
+        json += entry + "\n";
+    }
+    json += "  ]\n}\n";
+
+    // Write file
+    std::ofstream f(path);
+    if (f) { f << json; f.close(); }
+    std::string pathNarrow;
+    for (const wchar_t* p = path; *p; ++p) pathNarrow += static_cast<char>(*p);
+    m_lastResult = std::format("Exported {} steps → {}", steps.size(), pathNarrow);
+    LogLine(m_lastResult);
+}
+
+// ─── Menu bar ─────────────────────────────────────────────────────────────────
+
+void App::RenderMenuBar() {
+    static const ImVec4 kDim {0.45f, 0.45f, 0.50f, 1.0f};
+
+    // ── File ──────────────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("New Timeline", "Ctrl+N"))
+            NewTimeline();
+
+        ImGui::MenuItem("Open Timeline\xc2\xb7\xc2\xb7\xc2\xb7", nullptr, false, false); // future
+        ImGui::Separator();
+
+        ImGui::MenuItem("Save Timeline",       "Ctrl+S", false, false); // future
+        ImGui::MenuItem("Save Timeline As\xc2\xb7\xc2\xb7\xc2\xb7", nullptr, false, false); // future
+        ImGui::Separator();
+
+        if (ImGui::BeginMenu("Export")) {
+            if (ImGui::MenuItem("TotalControl JSON\xc2\xb7\xc2\xb7\xc2\xb7"))
+                ExportTimelineJson();
+            ImGui::TextColored(kDim, "  (future)");
+            ImGui::MenuItem("CSV\xc2\xb7\xc2\xb7\xc2\xb7",                    nullptr, false, false);
+            ImGui::MenuItem("SolarEclipseMaestro\xc2\xb7\xc2\xb7\xc2\xb7",    nullptr, false, false);
+            ImGui::MenuItem("EclipseWorkbench\xc2\xb7\xc2\xb7\xc2\xb7",       nullptr, false, false);
+            ImGui::EndMenu();
+        }
+
+        ImGui::MenuItem("Import from JSON\xc2\xb7\xc2\xb7\xc2\xb7", nullptr, false, false); // future
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("Quit", "Alt+F4"))
+            PostQuitMessage(0);
+
+        ImGui::EndMenu();
+    }
+
+    // ── Edit ──────────────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("Edit")) {
+        bool hasSel = m_selTrack >= 0 && m_selBlock >= 0;
+
+        if (ImGui::MenuItem("Delete Block", "Del", false, hasSel))
+            DeleteSelectedBlock();
+
+        if (ImGui::MenuItem("Duplicate Block", "Ctrl+D", false, hasSel))
+            DuplicateSelectedBlock();
+
+        ImGui::Separator();
+        ImGui::MenuItem("Undo", "Ctrl+Z", false, false); // future
+        ImGui::MenuItem("Redo", "Ctrl+Y", false, false); // future
+        ImGui::EndMenu();
+    }
+
+    // ── View ──────────────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("View")) {
+        ContactTimes ct;
+        { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+        if (!ct.valid) ct = m_beResult;
+
+        if (ImGui::MenuItem("Full Eclipse", nullptr, false, ct.valid)) {
+            m_tlViewStart = ct.c1Ms - 5LL*60000;
+            m_tlViewEnd   = ct.c4Ms + 5LL*60000;
+        }
+        if (ImGui::MenuItem("Zoom to Totality", nullptr, false, ct.valid && ct.c2Ms>0)) {
+            m_tlViewStart = ct.c2Ms - 30000;
+            m_tlViewEnd   = ct.c3Ms + 30000;
+        }
+        if (ImGui::MenuItem("Zoom C2 \xc2\xb1 1 min", nullptr, false, ct.valid && ct.c2Ms>0)) {
+            m_tlViewStart = ct.c2Ms - 60000;
+            m_tlViewEnd   = ct.c2Ms + 60000;
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset Zoom", nullptr, false, ct.valid)) {
+            m_tlViewStart = -1;
+            m_tlViewEnd   = -1;
+        }
+        ImGui::EndMenu();
+    }
+
+    // ── Sequence ──────────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("Sequence")) {
+        if (ImGui::MenuItem("Calculate Contacts")) TriggerIqpFetch();
+        ImGui::Separator();
+        ImGui::MenuItem("Validate Timeline",   nullptr, false, false); // future
+        ImGui::MenuItem("Auto-optimize",       nullptr, false, false); // future
+        ImGui::EndMenu();
+    }
+
+    // ── About ─────────────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("About")) {
+        if (ImGui::MenuItem("About TotalControl"))
+            m_showAbout = true;
+        if (ImGui::MenuItem("Open GitHub\xe2\x86\x97")) {
+            ShellExecuteW(nullptr, L"open",
+                L"https://github.com/mrmgrpl/TotalControl",
+                nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        ImGui::Separator();
+        ImGui::MenuItem("TSE 2026-08-12  Burgos/Lerma", nullptr, false, false);
+        ImGui::EndMenu();
+    }
+}
+
+// ─── About modal ──────────────────────────────────────────────────────────────
+
+void App::RenderAboutModal() {
+    if (!m_showAbout) return;
+    ImGui::OpenPopup("About TotalControl");
+    ImGui::SetNextWindowSize(ImVec2(480, 420), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("About TotalControl", &m_showAbout,
+                               ImGuiWindowFlags_NoResize)) {
+        static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
+        static const ImVec4 kGray {0.55f, 0.55f, 0.60f, 1.0f};
+        static const ImVec4 kLink {0.45f, 0.75f, 1.00f, 1.0f};
+
+        ImGui::PushFont(m_fontLarge);
+        ImGui::TextColored(kGold, "TotalControl");
+        ImGui::PopFont();
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(kGray, "Solar Eclipse Photography Controller");
+        ImGui::TextColored(kGray, "Phase 3b  |  TSE 2026-08-12  Burgos/Lerma");
+        ImGui::PopFont();
+
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::PushFont(m_fontMono);
+
+        ImGui::TextColored(kGold, "Technologies");
+        ImGui::TextColored(kGray, "  Sony CrSDK          Camera Remote SDK v2.x");
+        ImGui::TextColored(kGray, "  Dear ImGui v1.91.6  Omar Cornut (MIT)");
+        ImGui::TextColored(kGray, "  SQLite 3.53.1       Public domain");
+        ImGui::TextColored(kGray, "  WinHTTP             Windows SDK");
+        ImGui::Spacing();
+
+        ImGui::TextColored(kGold, "Eclipse Data & Algorithms");
+        ImGui::TextColored(kGray, "  NASA Eclipse Data   Fred Espenak");
+        ImGui::TextColored(kGray, "  IQP API             maps.besselianelements.com");
+        ImGui::TextColored(kGray, "  Besselian Algo      Jean Meeus");
+        ImGui::TextColored(kGray, "                      'Astronomical Algorithms'");
+        ImGui::TextColored(kGray, "  Eclipse geometry    Greg Miller");
+        ImGui::TextColored(kGray, "                      celestialprogramming.com");
+        ImGui::Spacing();
+
+        ImGui::TextColored(kGold, "Author");
+        ImGui::TextColored(kGray, "  Andrzej Nowak  (mrmgrpl)");
+        ImGui::Spacing();
+
+        ImGui::TextColored(kGold, "Links");
+        if (ImGui::MenuItem("  github.com/mrmgrpl/TotalControl")) {
+            ShellExecuteW(nullptr, L"open",
+                L"https://github.com/mrmgrpl/TotalControl",
+                nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        if (ImGui::MenuItem("  maps.besselianelements.com")) {
+            ShellExecuteW(nullptr, L"open",
+                L"https://maps.besselianelements.com",
+                nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        if (ImGui::MenuItem("  NASA Eclipse Page  (Espenak)")) {
+            ShellExecuteW(nullptr, L"open",
+                L"https://eclipse.gsfc.nasa.gov/",
+                nullptr, nullptr, SW_SHOWNORMAL);
+        }
+
+        ImGui::PopFont();
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float btnW = 80.f;
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - btnW) * 0.5f);
+        if (ImGui::Button("Close", ImVec2(btnW, 0)))
+            m_showAbout = false;
+
+        ImGui::EndPopup();
+    }
+}
+
 // ─── Main frame ───────────────────────────────────────────────────────────────
 
 void App::OnFrame() {
     ImGuiIO& io = ImGui::GetIO();
 
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(io.DisplaySize);
+    // ── Main menu bar ─────────────────────────────────────────────────────
+    float menuH = 0.f;
+    if (ImGui::BeginMainMenuBar()) {
+        menuH = ImGui::GetWindowHeight();
+        RenderMenuBar();
+        ImGui::EndMainMenuBar();
+    }
+
+    // ── Keyboard shortcuts ────────────────────────────────────────────────
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N)) NewTimeline();
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D)) DuplicateSelectedBlock();
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) DeleteSelectedBlock();
+
+    // ── Host window (below menu bar) ──────────────────────────────────────
+    ImGui::SetNextWindowPos(ImVec2(0.f, menuH));
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, io.DisplaySize.y - menuH));
     ImGui::SetNextWindowBgAlpha(1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("##host", nullptr,
@@ -1492,6 +1800,9 @@ void App::OnFrame() {
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
+
+    // ── About modal (rendered inside host window context) ─────────────────
+    RenderAboutModal();
 
     const float colW      = 200.0f;   // Col1: Hardware
     const float colW2     = 400.0f;   // Col2: Eclipse

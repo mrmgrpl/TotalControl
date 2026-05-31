@@ -113,6 +113,13 @@ private:
     void RenderStatusColumn();
     void RenderInspectorColumn();
     void RenderTimelineBottom();
+    void RenderMenuBar();
+    void RenderAboutModal();
+    void ExportTimelineJson();
+    void NewTimeline();
+    void DeleteSelectedBlock();
+    void DuplicateSelectedBlock();
+    bool m_showAbout = false;
 
     PipeClient m_pipe;
 
