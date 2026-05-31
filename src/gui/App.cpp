@@ -355,7 +355,11 @@ void App::RenderInspectorColumn() {
 
     if (!hasSel) {
         ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(kDim, "select a block");
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 6));
+        ImGui::TextColored(kDim, "Select block on");
+        ImGui::TextColored(kDim, "TimeLine to adjust");
+        ImGui::TextColored(kDim, "photo parameters");
+        ImGui::PopStyleVar();
         ImGui::PopFont();
     } else {
         TLBlock& b = m_tracks[m_selTrack].blocks[m_selBlock];
@@ -446,7 +450,13 @@ void App::RenderInspectorColumn() {
             if (ImGui::InputText("##lbl", lbuf, sizeof(lbuf))) b.label = lbuf;
         }
 
+        bool prevSnap = b.snapToPrev;
         ImGui::Checkbox("Snap to prev##snp", &b.snapToPrev);
+        if (b.snapToPrev && !prevSnap && m_selBlock > 0) {
+            // Immediately snap when toggled on
+            auto& prev = m_tracks[m_selTrack].blocks[m_selBlock - 1];
+            b.atMs = prev.atMs + BlockDurMs(prev);
+        }
         ImGui::Spacing();
 
         // Computed duration
@@ -522,6 +532,7 @@ void App::RenderTimelineBottom() {
     ImVec2 winPos  = ImGui::GetWindowPos();
     float  winW    = ImGui::GetWindowWidth();
     float  cntW    = winW - kLabelW;   // content width (right of labels)
+    m_tlScreenTopY = winPos.y;         // remember for drag-out-to-delete
 
     ContactTimes ct;
     { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
@@ -636,8 +647,56 @@ void App::RenderTimelineBottom() {
     int   nT      = (int)m_tracks.size();
     float tracksH = nT * kTrackH;
 
-    // Block click / deselect detection (raw, not consumed by widgets)
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    // ── Drag-to-move update (runs every frame while LMB held) ────────────────
+    if (m_tlDragTrack >= 0 && m_tlDragBlock >= 0
+        && m_tlDragTrack < nT
+        && m_tlDragBlock < (int)m_tracks[m_tlDragTrack].blocks.size()) {
+
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f)) {
+            m_tlDragging = true;
+            float   dx  = ImGui::GetMousePos().x - m_tlDragMouseX0;
+            int64_t dMs = int64_t(dx / cntW * vDur);
+            m_tracks[m_tlDragTrack].blocks[m_tlDragBlock].atMs =
+                std::max(m_tlDragStartMs + dMs, m_tlViewStart);
+        }
+
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            if (m_tlDragging) {
+                ImVec2 mp  = ImGui::GetMousePos();
+                auto&  trk = m_tracks[m_tlDragTrack];
+
+                if (mp.y < m_tlScreenTopY) {
+                    // Released above timeline → delete block
+                    trk.blocks.erase(trk.blocks.begin() + m_tlDragBlock);
+                    m_selTrack = -1; m_selBlock = -1;
+                } else {
+                    // Finalize: sort by time
+                    int64_t   movedMs = trk.blocks[m_tlDragBlock].atMs;
+                    BlockType movedTy = trk.blocks[m_tlDragBlock].type;
+                    std::sort(trk.blocks.begin(), trk.blocks.end(),
+                        [](const TLBlock& a, const TLBlock& b){ return a.atMs < b.atMs; });
+                    // Update selection index after sort
+                    for (int i = 0; i < (int)trk.blocks.size(); ++i) {
+                        if (trk.blocks[i].atMs == movedMs && trk.blocks[i].type == movedTy) {
+                            m_selBlock = i; break;
+                        }
+                    }
+                    // Apply snap-to-prev if enabled
+                    if (m_selBlock > 0 && trk.blocks[m_selBlock].snapToPrev) {
+                        auto& prev = trk.blocks[m_selBlock - 1];
+                        trk.blocks[m_selBlock].atMs = prev.atMs + BlockDurMs(prev);
+                    }
+                }
+            }
+            m_tlDragging    = false;
+            m_tlDragTrack   = -1;
+            m_tlDragBlock   = -1;
+            m_tlDragStartMs = -1;
+        }
+    }
+
+    // ── Click detection: select block + initiate drag state ──────────────────
+    if (!m_tlDragging && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         ImVec2 mp = ImGui::GetMousePos();
         bool hit = false;
         for (int ti = 0; ti < nT && !hit; ++ti) {
@@ -648,7 +707,13 @@ void App::RenderTimelineBottom() {
                 float bx  = toPx(blk.atMs);
                 float bx2 = toPx(blk.atMs + BlockDurMs(blk));
                 if (mp.x >= bx && mp.x <= bx2) {
-                    m_selTrack = ti; m_selBlock = bi; hit = true; break;
+                    m_selTrack = ti; m_selBlock = bi;
+                    // Arm drag state (actual drag starts after threshold)
+                    m_tlDragTrack   = ti;
+                    m_tlDragBlock   = bi;
+                    m_tlDragStartMs = blk.atMs;
+                    m_tlDragMouseX0 = mp.x;
+                    hit = true; break;
                 }
             }
         }
@@ -714,11 +779,15 @@ void App::RenderTimelineBottom() {
             if (bx2 < cx1 || bx > cx2) continue;
             float dx    = std::max(bx, cx1);
             float dx2   = std::min(bx2, cx2);
-            bool  sel   = (m_selTrack==ti && m_selBlock==bi);
-            ImU32 col   = BlockColor(blk.type);
+            bool  sel      = (m_selTrack==ti && m_selBlock==bi);
+            bool  dragged  = (m_tlDragging && m_tlDragTrack==ti && m_tlDragBlock==bi);
+            bool  willDel  = dragged && (ImGui::GetMousePos().y < m_tlScreenTopY);
+            ImU32 col      = willDel ? IM_COL32(200,40,40,200) : BlockColor(blk.type);
             dl->AddRectFilled({dx,ty+2},{dx2,ty2-2}, col, 2.f);
-            if (sel) dl->AddRect({dx-1,ty+1},{dx2+1,ty2-1},
-                                 IM_COL32(255,220,60,255), 2.f, 0, 2.f);
+            if (sel || dragged) {
+                ImU32 rimCol = willDel ? IM_COL32(255,60,60,255) : IM_COL32(255,220,60,255);
+                dl->AddRect({dx-1,ty+1},{dx2+1,ty2-1}, rimCol, 2.f, 0, 2.f);
+            }
             if (dx2-dx > 20.f && !blk.label.empty())
                 dl->AddText({dx+4.f,ty+6.f}, IM_COL32(240,240,240,215), blk.label.c_str());
         }

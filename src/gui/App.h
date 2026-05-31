@@ -177,6 +177,14 @@ private:
     int                  m_selBlock    = -1;
     int64_t              m_tlViewStart = -1;   // visible range (UTC ms)
     int64_t              m_tlViewEnd   = -1;
+
+    // Drag-to-move: mouse-drag existing blocks; release above timeline = delete
+    bool    m_tlDragging    = false;
+    int     m_tlDragTrack   = -1;
+    int     m_tlDragBlock   = -1;
+    int64_t m_tlDragStartMs = -1;
+    float   m_tlDragMouseX0 = 0.f;
+    float   m_tlScreenTopY  = 0.f;  // top-Y of timeline child in screen coords
 };
 
 } // namespace TotalControl
