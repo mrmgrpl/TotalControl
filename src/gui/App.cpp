@@ -507,7 +507,8 @@ void App::RenderInspectorColumn() {
         dl->AddText({pos.x+22, pos.y+9}, IM_COL32(200,200,215,255), pe.name);
         if (hov) dl->AddRect(pos, {pos.x+pw, pos.y+34.f}, pe.col, 4.f, 0, 1.f);
         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-            ImGui::SetDragDropPayload("TL_BLOCK", &pe.type, sizeof(BlockType));
+            const char* pid = (pe.type == BlockType::Audio) ? "TL_AUD_BLOCK" : "TL_CAM_BLOCK";
+            ImGui::SetDragDropPayload(pid, &pe.type, sizeof(BlockType));
             ImGui::PushFont(m_fontMono);
             ImVec4 cv{float(pe.col&0xff)/255.f, float((pe.col>>8)&0xff)/255.f,
                       float((pe.col>>16)&0xff)/255.f, 1.f};
@@ -724,21 +725,24 @@ void App::RenderTimelineBottom() {
         }
     }
 
-    // DnD drop target over all tracks
-    ImGui::SetCursorScreenPos({winPos.x+kLabelW, tracksY});
-    ImGui::InvisibleButton("##tl_drop", {cntW, std::max(tracksH, 1.f)});
-    if (ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("TL_BLOCK")) {
-            BlockType bt = *(const BlockType*)p->Data;
-            ImVec2    mp = ImGui::GetMousePos();
-            int       ti = std::clamp((int)((mp.y-tracksY)/kTrackH), 0, nT-1);
-            TLTrack&  tr = m_tracks[ti];
-            bool ok = (tr.IsCamera() && bt != BlockType::Audio)
-                   || (tr.IsAudio()  && bt == BlockType::Audio);
-            if (ok) {
-                float   relX = mp.x - (winPos.x + kLabelW);
-                int64_t atMs = m_tlViewStart + int64_t(relX / cntW * vDur);
-                atMs = std::max(atMs, m_tlViewStart);
+    // Per-track DnD drop targets.
+    // Camera tracks accept "TL_CAM_BLOCK", audio track accepts "TL_AUD_BLOCK".
+    // ImGui highlights ONLY the compatible track — not the whole timeline.
+    for (int ti = 0; ti < nT; ++ti) {
+        float      ty  = tracksY + ti * kTrackH;
+        TLTrack&   tr  = m_tracks[ti];
+        const char* pid = tr.IsCamera() ? "TL_CAM_BLOCK" : "TL_AUD_BLOCK";
+
+        ImGui::SetCursorScreenPos({winPos.x + kLabelW, ty});
+        char dropId[24]; snprintf(dropId, sizeof(dropId), "##tl_drop_%d", ti);
+        ImGui::InvisibleButton(dropId, {cntW, kTrackH});
+
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(pid)) {
+                BlockType bt   = *(const BlockType*)p->Data;
+                float     relX = ImGui::GetMousePos().x - (winPos.x + kLabelW);
+                int64_t   atMs = std::max(
+                    m_tlViewStart + int64_t(relX / cntW * vDur), m_tlViewStart);
                 TLBlock nb; nb.type = bt; nb.atMs = atMs;
                 tr.blocks.push_back(nb);
                 std::sort(tr.blocks.begin(), tr.blocks.end(),
@@ -748,8 +752,8 @@ void App::RenderTimelineBottom() {
                     [&](const TLBlock& blk){ return blk.atMs==atMs && blk.type==bt; });
                 m_selBlock = (int)(it - tr.blocks.begin());
             }
+            ImGui::EndDragDropTarget();
         }
-        ImGui::EndDragDropTarget();
     }
 
     // Draw tracks
