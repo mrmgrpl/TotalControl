@@ -1,4 +1,4 @@
-#include "App.h"
+﻿#include "App.h"
 #include "TzEntry.h"
 
 #include "imgui.h"
@@ -229,316 +229,524 @@ void App::TriggerIqpFetch() {
                         id, lat, lon, m_beResult.valid));
 }
 
-// ─── Sequence JSON loader ─────────────────────────────────────────────────────
+// ─── Camera overhead model (ILCE-7RM4A) ──────────────────────────────────────
 
-// Parse ISO 8601 UTC string "YYYY-MM-DDTHH:MM:SS[.mmm]Z" → UTC ms.
-static int64_t ParseIso8601Ms(const std::string& s) {
-    int y = 0, mo = 0, d = 0, h = 0, mi = 0;
-    double sec = 0.0;
-    if (sscanf_s(s.c_str(), "%d-%d-%dT%d:%d:%lfZ", &y, &mo, &d, &h, &mi, &sec) < 5)
-        return -1;
-    using namespace std::chrono;
-    auto ymd = year_month_day{ year(y), month((unsigned)mo), day((unsigned)d) };
-    int64_t dayMs = duration_cast<milliseconds>(sys_days{ymd}.time_since_epoch()).count();
-    return dayMs + int64_t(h)*3600000 + int64_t(mi)*60000 + int64_t(sec * 1000.0);
-}
-
-// Extract string or numeric value for key from a JSON object string.
-// Handles optional whitespace after colon: "key": "val" or "key": 123
-static std::string SSeqField(const std::string& obj, const char* key) {
-    std::string needle = std::string("\"") + key + "\":";
-    auto p = obj.find(needle);
-    if (p == std::string::npos) return {};
-    p += needle.size();
-    while (p < obj.size() && obj[p] == ' ') ++p;
-    if (p >= obj.size()) return {};
-    if (obj[p] == '"') {
-        ++p;
-        auto e = obj.find('"', p);
-        return (e == std::string::npos) ? std::string{} : obj.substr(p, e - p);
+// Parse shutter speed string → milliseconds.
+// "1/1000" → 1, "2s" or "2" → 2000, "0.6" → 600
+static int64_t ParseSsMs(const std::string& ss) {
+    if (ss.empty()) return 0;
+    auto slash = ss.find('/');
+    if (slash != std::string::npos) {
+        int num = 1, den = 1000;
+        sscanf_s(ss.c_str(), "%d/%d", &num, &den);
+        return den > 0 ? int64_t(num) * 1000LL / den : 0;
     }
-    auto e = obj.find_first_of(",}\n", p);
-    auto v = obj.substr(p, e == std::string::npos ? obj.size() - p : e - p);
-    while (!v.empty() && v.back() == ' ') v.pop_back();
-    return v;
+    double v = 0.0;
+    sscanf_s(ss.c_str(), "%lf", &v);
+    return int64_t(v * 1000.0);
 }
 
-static int SSeqInt(const std::string& obj, const char* key, int def = 0) {
-    auto s = SSeqField(obj, key);
-    if (s.empty()) return def;
-    try { return std::stoi(s); } catch (...) { return def; }
+// Conservative overhead per shot (USB latency + buffer + SDK confirm).
+// Measured: 303 ms; conservative: 350 ms.
+static constexpr int64_t kCamOverheadMs = 350;
+
+static int64_t BlockDurMs(const TLBlock& b) {
+    int64_t ssMs = ParseSsMs(b.ss);
+    switch (b.type) {
+    case BlockType::Single:  return ssMs + kCamOverheadMs;
+    case BlockType::Bracket: return int64_t(b.count) * (ssMs + kCamOverheadMs);
+    case BlockType::Burst:   return b.burstDurMs;
+    case BlockType::Audio:   return b.audioDurMs;
+    default: return 0;
+    }
 }
 
-void App::LoadSequenceJson(const std::wstring& path) {
-    std::ifstream f(path);
-    if (!f.is_open()) { LogLine("LoadSequenceJson: cannot open file"); return; }
-    std::string json((std::istreambuf_iterator<char>(f)),
-                      std::istreambuf_iterator<char>());
+static ImU32 BlockColor(BlockType t) {
+    switch (t) {
+    case BlockType::Single:  return IM_COL32( 40, 160,  70, 220);
+    case BlockType::Burst:   return IM_COL32( 50, 120, 200, 220);
+    case BlockType::Bracket: return IM_COL32(200, 130,  30, 220);
+    case BlockType::Audio:   return IM_COL32(140,  80, 200, 220);
+    default:                 return IM_COL32(100, 100, 100, 220);
+    }
+}
 
-    m_seqSteps.clear();
+static const char* BlockTypeName(BlockType t) {
+    switch (t) {
+    case BlockType::Single:  return "Single";
+    case BlockType::Burst:   return "Burst";
+    case BlockType::Bracket: return "Bracket";
+    case BlockType::Audio:   return "Audio";
+    default:                 return "?";
+    }
+}
 
-    auto stepsPos = json.find("\"steps\"");
-    if (stepsPos == std::string::npos) { LogLine("LoadSequenceJson: no 'steps' key"); return; }
-    auto arrStart = json.find('[', stepsPos);
-    if (arrStart == std::string::npos) return;
+// ─── Track initialization ─────────────────────────────────────────────────────
 
-    size_t p = arrStart + 1;
-    while (p < json.size()) {
-        while (p < json.size() && json[p] != '{' && json[p] != ']') ++p;
-        if (p >= json.size() || json[p] == ']') break;
+void App::InitTracks() {
+    if (!m_tracks.empty()) return;
 
-        // Find matching closing brace
-        size_t depth = 0, start = p;
-        while (p < json.size()) {
-            if      (json[p] == '{') ++depth;
-            else if (json[p] == '}') { if (!--depth) { ++p; break; } }
-            ++p;
+    TLTrack cam1;
+    cam1.type     = "camera";
+    cam1.cameraId = "ILCE-7RM4A";
+    cam1.label    = "Cam1 ILCE-7RM4A";
+    m_tracks.push_back(std::move(cam1));
+
+    TLTrack audio;
+    audio.type  = "audio";
+    audio.label = "Audio";
+    m_tracks.push_back(std::move(audio));
+}
+
+// ─── Status column (middle-right of top area) ─────────────────────────────────
+
+void App::RenderStatusColumn() {
+    static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
+
+    int iqpSt = m_iqpState.load();
+    if (iqpSt == 1 || iqpSt == 2) {
+        static const ImVec4 kGreen {0.15f, 0.90f, 0.35f, 1.0f};
+        static const ImVec4 kRed   {0.95f, 0.22f, 0.18f, 1.0f};
+        static const ImVec4 kDim2  {0.40f, 0.40f, 0.45f, 1.0f};
+        ImGui::PushFont(m_fontLarge);
+        if (iqpSt == 1) {
+            ImGui::TextColored(kDim2, "checking location...");
+        } else {
+            ContactTimes ct;
+            { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+            if (!ct.apiOk)      ImGui::TextColored(kDim2,  "network error");
+            else if (!ct.valid) ImGui::TextColored(kRed,   "NO ECLIPSE VISIBLE HERE");
+            else if (ct.c2Ms>0) ImGui::TextColored(kGreen, "YOU ARE IN THE TOTALITY ZONE");
+            else                ImGui::TextColored(kRed,   "YOU ARE OUTSIDE TOTALITY ZONE");
         }
-        std::string obj = json.substr(start, p - start);
-
-        SeqStep step;
-        step.atMs       = ParseIso8601Ms(SSeqField(obj, "at"));
-        auto until      = SSeqField(obj, "until");
-        step.untilMs    = until.empty() ? -1 : ParseIso8601Ms(until);
-        step.intervalMs = SSeqInt(obj, "interval_ms");
-        step.cmd        = SSeqField(obj, "cmd");
-        step.ss         = SSeqField(obj, "ss");
-        step.iso        = SSeqInt(obj, "iso");
-        step.count      = SSeqInt(obj, "count", 1);
-        step.ev         = SSeqField(obj, "ev");
-        step.label      = SSeqField(obj, "label");
-
-        if (step.atMs > 0) m_seqSteps.push_back(step);
+        ImGui::PopFont();
+        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     }
 
-    auto slash = path.rfind(L'\\');
-    auto name  = path.substr(slash == std::wstring::npos ? 0 : slash + 1);
-    m_seqFileName.clear();
-    for (wchar_t wc : name) m_seqFileName += static_cast<char>(wc);
-    LogLine(std::format("Sequence loaded: {} ({} steps)", m_seqFileName, m_seqSteps.size()));
+    if (!m_lastResult.empty()) {
+        ImGui::PushFont(m_fontMono);
+        bool ok = m_lastResult.find("ERROR") == std::string::npos;
+        ImGui::TextColored(ok ? ImVec4(0.55f,0.85f,0.55f,1.f)
+                              : ImVec4(1.0f, 0.35f,0.25f,1.f),
+                           "%s", m_lastResult.c_str());
+        ImGui::PopFont();
+    }
+
+    ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 28.0f);
+    ImGui::PushFont(m_fontMono);
+    ImGui::TextColored(kGray, "dev:");
+    ImGui::PopFont();
+    ImGui::SameLine();
+    ImGui::Checkbox("Style##se", &m_showStyleEditor);
+    ImGui::SameLine();
+    ImGui::Checkbox("Demo##dw",  &m_showDemoWindow);
 }
 
-// ─── Timeline rendering ───────────────────────────────────────────────────────
+// ─── Inspector + Palette column ───────────────────────────────────────────────
 
-void App::RenderTimelineSection() {
+void App::RenderInspectorColumn() {
     static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
     static const ImVec4 kDim  {0.28f, 0.28f, 0.32f, 1.0f};
-    static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
 
-    // ── File picker ───────────────────────────────────────────────────────
-    ImGui::PushFont(m_fontMono);
-    if (ImGui::Button("Open sequence...")) {
-        wchar_t buf[MAX_PATH] = {};
-        OPENFILENAMEW ofn{};
-        ofn.lStructSize = sizeof(ofn);
-        ofn.lpstrFilter = L"Sequence JSON\0*.json\0All Files\0*.*\0";
-        ofn.lpstrFile   = buf;
-        ofn.nMaxFile    = MAX_PATH;
-        ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-        if (GetOpenFileNameW(&ofn))
-            LoadSequenceJson(buf);
-    }
-    if (!m_seqFileName.empty()) {
-        ImGui::SameLine();
-        ImGui::TextColored(kGray, "%s", m_seqFileName.c_str());
-        ImGui::SameLine();
-        char sc[24]; snprintf(sc, sizeof(sc), "(%d)", (int)m_seqSteps.size());
-        ImGui::TextColored(kDim, "%s", sc);
-    }
-    ImGui::PopFont();
+    ImGui::SeparatorText("INSPECTOR");
 
+    bool hasSel = m_selTrack >= 0 && m_selTrack < (int)m_tracks.size()
+               && m_selBlock >= 0 && m_selBlock < (int)m_tracks[m_selTrack].blocks.size();
+
+    if (!hasSel) {
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(kDim, "select a block");
+        ImGui::PopFont();
+    } else {
+        TLBlock& b = m_tracks[m_selTrack].blocks[m_selBlock];
+        ImGui::PushFont(m_fontMono);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+
+        // Type label (colour-coded)
+        ImU32  tc = BlockColor(b.type);
+        ImVec4 tcv{float(tc&0xff)/255.f, float((tc>>8)&0xff)/255.f,
+                   float((tc>>16)&0xff)/255.f, 1.f};
+        ImGui::TextColored(kGray, "Type"); ImGui::SameLine(52);
+        ImGui::TextColored(tcv, "%s", BlockTypeName(b.type));
+
+        if (b.type != BlockType::Audio) {
+            char buf[32];
+            ImGui::TextColored(kGray, "SS");   ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            snprintf(buf, sizeof(buf), "%s", b.ss.c_str());
+            if (ImGui::InputText("##ss", buf, sizeof(buf))) b.ss = buf;
+
+            ImGui::TextColored(kGray, "ISO");  ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputInt("##iso", &b.iso, 0);
+
+            ImGui::TextColored(kGray, "f/");   ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            snprintf(buf, sizeof(buf), "%s", b.fstop.c_str());
+            if (ImGui::InputText("##fstop", buf, sizeof(buf))) b.fstop = buf;
+        }
+
+        if (b.type == BlockType::Bracket) {
+            static const char* kCounts[] = {"3","5","9"};
+            ImGui::TextColored(kGray, "Count"); ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            int ci = b.count==3?0 : b.count==9?2 : 1;
+            if (ImGui::Combo("##cnt", &ci, kCounts, 3))
+                b.count = ci==0?3 : ci==2?9 : 5;
+
+            static const char* kEvs[] = {"1/3ev","1/2ev","1ev","2ev","3ev"};
+            ImGui::TextColored(kGray, "EV");    ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            int ei = 2;
+            for (int i=0;i<5;++i) if (b.ev==kEvs[i]) ei=i;
+            if (ImGui::Combo("##ev", &ei, kEvs, 5)) b.ev = kEvs[ei];
+        }
+
+        if (b.type == BlockType::Burst) {
+            ImGui::TextColored(kGray, "fps");   ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputFloat("##fps", &b.burstFps, 0.f, 0.f, "%.1f");
+
+            ImGui::TextColored(kGray, "Dur s"); ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            float ds = b.burstDurMs / 1000.f;
+            if (ImGui::InputFloat("##bdur", &ds, 0.f, 0.f, "%.1f"))
+                b.burstDurMs = int32_t(ds * 1000.f);
+        }
+
+        if (b.type == BlockType::Audio) {
+            ImGui::TextColored(kGray, "File"); ImGui::SameLine(52);
+            char fileBuf[256];
+            snprintf(fileBuf, sizeof(fileBuf), "%s",
+                     b.audioFile.empty() ? "(none)" : b.audioFile.c_str());
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##af", fileBuf, sizeof(fileBuf), ImGuiInputTextFlags_ReadOnly);
+            if (ImGui::Button("Browse...", ImVec2(-1,0))) {
+                wchar_t fbuf[MAX_PATH] = {};
+                OPENFILENAMEW ofn{};
+                ofn.lStructSize = sizeof(ofn);
+                ofn.lpstrFilter = L"Audio MP3\0*.mp3\0All\0*.*\0";
+                ofn.lpstrFile   = fbuf;
+                ofn.nMaxFile    = MAX_PATH;
+                ofn.Flags       = OFN_FILEMUSTEXIST;
+                if (GetOpenFileNameW(&ofn)) {
+                    b.audioFile.clear();
+                    for (wchar_t wc : std::wstring(fbuf))
+                        b.audioFile += static_cast<char>(wc);
+                }
+            }
+        }
+
+        // Label
+        {
+            char lbuf[64];
+            ImGui::TextColored(kGray, "Label"); ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            snprintf(lbuf, sizeof(lbuf), "%s", b.label.c_str());
+            if (ImGui::InputText("##lbl", lbuf, sizeof(lbuf))) b.label = lbuf;
+        }
+
+        ImGui::Checkbox("Snap to prev##snp", &b.snapToPrev);
+        ImGui::Spacing();
+
+        // Computed duration
+        int64_t dur = BlockDurMs(b);
+        char durBuf[24];
+        if (dur < 1000) snprintf(durBuf,sizeof(durBuf), "%lldms", dur);
+        else            snprintf(durBuf,sizeof(durBuf), "%.2fs", dur/1000.0);
+        ImGui::TextColored(kDim, "Dur:"); ImGui::SameLine(52);
+        ImGui::TextColored(kGray, "%s", durBuf);
+
+        // UTC time
+        if (b.atMs > 0) {
+            int64_t s = b.atMs / 1000;
+            char atBuf[16];
+            snprintf(atBuf, sizeof(atBuf), "%02d:%02d:%02d.%03d",
+                     (int)((s/3600)%24),(int)((s/60)%60),(int)(s%60),(int)(b.atMs%1000));
+            ImGui::TextColored(kDim, "At:");  ImGui::SameLine(52);
+            ImGui::TextColored(kGray, "%s", atBuf);
+        }
+
+        ImGui::PopStyleVar();
+        ImGui::PopFont();
+    }
+
+    // ── Palette ────────────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("PALETTE");
     ImGui::Spacing();
 
-    // ── Pick contact times (IQP preferred, BE fallback) ───────────────────
+    struct PE { BlockType type; const char* name; ImU32 col; };
+    PE pal[] = {
+        {BlockType::Single,  "Single",  IM_COL32( 40,160, 70,255)},
+        {BlockType::Burst,   "Burst",   IM_COL32( 50,120,200,255)},
+        {BlockType::Bracket, "Bracket", IM_COL32(200,130, 30,255)},
+        {BlockType::Audio,   "Audio",   IM_COL32(140, 80,200,255)},
+    };
+
+    for (auto& pe : pal) {
+        ImGui::PushID((int)pe.type);
+        float    pw  = ImGui::GetContentRegionAvail().x;
+        ImVec2   pos = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##pb", {pw, 34.0f});
+        bool     hov = ImGui::IsItemHovered();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(pos, {pos.x+pw, pos.y+34.f},
+                          hov ? IM_COL32(45,45,58,255) : IM_COL32(20,20,28,255), 4.f);
+        dl->AddRectFilled({pos.x+5, pos.y+8}, {pos.x+17, pos.y+26}, pe.col, 2.f);
+        dl->AddText({pos.x+22, pos.y+9}, IM_COL32(200,200,215,255), pe.name);
+        if (hov) dl->AddRect(pos, {pos.x+pw, pos.y+34.f}, pe.col, 4.f, 0, 1.f);
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            ImGui::SetDragDropPayload("TL_BLOCK", &pe.type, sizeof(BlockType));
+            ImGui::PushFont(m_fontMono);
+            ImVec4 cv{float(pe.col&0xff)/255.f, float((pe.col>>8)&0xff)/255.f,
+                      float((pe.col>>16)&0xff)/255.f, 1.f};
+            ImGui::TextColored(cv, "%s", pe.name);
+            ImGui::PopFont();
+            ImGui::EndDragDropSource();
+        }
+        ImGui::Spacing();
+        ImGui::PopID();
+    }
+}
+
+// ─── Timeline (bottom, full width) ────────────────────────────────────────────
+
+void App::RenderTimelineBottom() {
+    static const float kLabelW  = 140.0f;
+    static const float kMarkerH =  14.0f;
+    static const float kPhaseH  =  20.0f;
+    static const float kRulerH  =  22.0f;
+    static const float kTrackH  =  28.0f;
+
+    ImVec2 winPos  = ImGui::GetWindowPos();
+    float  winW    = ImGui::GetWindowWidth();
+    float  cntW    = winW - kLabelW;   // content width (right of labels)
+
     ContactTimes ct;
     { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
     if (!ct.valid) ct = m_beResult;
 
     if (!ct.valid) {
+        ImGui::SetCursorPos({kLabelW + 8.f, 8.f});
         ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(kDim, "Calculate contacts to show timeline");
+        ImGui::TextColored({0.28f,0.28f,0.32f,1.f}, "Calculate contacts to show timeline");
         ImGui::PopFont();
         return;
     }
 
-    int64_t c1 = ct.c1Ms, c2 = ct.c2Ms, cMx = ct.maxMs, c3 = ct.c3Ms, c4 = ct.c4Ms;
+    // Initialise view range once
+    if (m_tlViewStart < 0) {
+        m_tlViewStart = ct.c1Ms - 5LL*60000;
+        m_tlViewEnd   = ct.c4Ms + 5LL*60000;
+    }
+    int64_t vDur = m_tlViewEnd - m_tlViewStart;
+    if (vDur <= 0) return;
 
-    // View range: C1 − 5 min … C4 + 5 min
-    const int64_t kPadMs  = 5LL * 60000;
-    int64_t rangeStart = c1 - kPadMs;
-    int64_t rangeEnd   = c4 + kPadMs;
-    int64_t rangeDur   = rangeEnd - rangeStart;
-    if (rangeDur <= 0) return;
-
-    // Reserve drawing area
-    float avail = ImGui::GetContentRegionAvail().x;
-    float tlW   = avail - 2.0f;
-
-    const float kLabelH = 16.0f;  // contact label row above bar
-    const float kBarH   = 24.0f;  // eclipse gradient bar
-    const float kRulerH = 20.0f;  // time tick labels
-    const float kTrackH = 20.0f;  // one sequence track row
-    const int   kTracks = 2;      // number of track rows
-
-    float totalH = kLabelH + kBarH + kRulerH + kTrackH * kTracks + 6.0f;
-
-    ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##tl", ImVec2(tlW, totalH));
     ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    float x0 = origin.x;
-    float y0 = origin.y;
+    float y = winPos.y;
 
     auto toPx = [&](int64_t ms) -> float {
-        float t = float(ms - rangeStart) / float(rangeDur);
-        return x0 + std::clamp(t, 0.0f, 1.0f) * tlW;
+        return winPos.x + kLabelW + float(ms - m_tlViewStart) / float(vDur) * cntW;
     };
 
-    // ── Background ────────────────────────────────────────────────────────
-    dl->AddRectFilled({x0, y0}, {x0 + tlW, y0 + totalH},
-                      IM_COL32(10, 10, 14, 255), 4.0f);
+    // ── Phase bar ─────────────────────────────────────────────────────────
+    float phaseY = y + kMarkerH;
+    dl->AddRectFilled({winPos.x, phaseY}, {winPos.x + kLabelW, phaseY + kPhaseH},
+                      IM_COL32(10,10,14,255));
 
-    float barY  = y0 + kLabelH;
-    float barY2 = barY + kBarH;
+    int64_t c1=ct.c1Ms, c2=ct.c2Ms, mx=ct.maxMs, c3=ct.c3Ms, c4=ct.c4Ms;
 
-    // Partial eclipse bands (C1→C2, C3→C4)
-    if (c1 > 0)
-        dl->AddRectFilled({toPx(c1), barY},
-                          {toPx(c2 > 0 ? c2 : c4), barY2},
-                          IM_COL32(55, 55, 68, 255));
-    if (c3 > 0 && c4 > 0)
-        dl->AddRectFilled({toPx(c3), barY}, {toPx(c4), barY2},
-                          IM_COL32(55, 55, 68, 255));
-
-    // Totality band (C2→C3) — gold gradient
-    if (c2 > 0 && c3 > 0) {
-        float tx2 = toPx(c2), tx3 = toPx(c3);
-        dl->AddRectFilledMultiColor(
-            {tx2, barY}, {tx3, barY2},
-            IM_COL32(160, 120, 10, 255),   // C2 left
-            IM_COL32(220, 180, 30, 255),   // C2→Max
-            IM_COL32(220, 180, 30, 255),
-            IM_COL32(160, 120, 10, 255));  // C3 right
-    }
-
-    // Bar outline
-    dl->AddRect({x0, barY}, {x0 + tlW, barY2}, IM_COL32(40, 40, 50, 255), 0.0f, 0, 1.0f);
-
-    // ── Contact markers ───────────────────────────────────────────────────
-    struct CM { int64_t ms; const char* lbl; ImU32 col; };
-    CM markers[] = {
-        {c1,  "C1",  IM_COL32(150, 150, 170, 255)},
-        {c2,  "C2",  IM_COL32(255, 215,  50, 255)},
-        {cMx, "Max", IM_COL32(255, 255, 255, 255)},
-        {c3,  "C3",  IM_COL32(255, 215,  50, 255)},
-        {c4,  "C4",  IM_COL32(150, 150, 170, 255)},
-    };
-    for (auto& m : markers) {
-        if (m.ms < 0) continue;
-        float mx = toPx(m.ms);
-        dl->AddLine({mx, barY - 1.0f}, {mx, barY2 + 1.0f}, m.col, 1.5f);
-        dl->AddText({mx + 3.0f, y0 + 1.0f}, m.col, m.lbl);
-    }
-
-    // ── Ruler: tick every 5 min, label every 10 min ───────────────────────
-    float rulerY = barY2;
-    int64_t tick5  = 5LL * 60000;
-    int64_t first5 = ((rangeStart / tick5) + 1) * tick5;
-    for (int64_t t = first5; t < rangeEnd; t += tick5) {
-        float tx = toPx(t);
-        bool  major = (t / 60000) % 10 == 0;
-        dl->AddLine({tx, rulerY}, {tx, rulerY + (major ? 6.0f : 3.0f)},
-                    IM_COL32(70, 70, 85, 255), 1.0f);
-        if (major) {
-            int64_t s = t / 1000;
-            char lbl[8];
-            snprintf(lbl, sizeof(lbl), "%02d:%02d", (int)((s/3600)%24), (int)((s/60)%60));
-            dl->AddText({tx + 2.0f, rulerY + 6.0f}, IM_COL32(85, 85, 100, 255), lbl);
-        }
-    }
-
-    // ── Sequence steps ────────────────────────────────────────────────────
-    // Two track rows; assign alternating to avoid visual collision for adjacent steps.
-    float trackY[2] = {
-        rulerY + kRulerH,
-        rulerY + kRulerH + kTrackH,
-    };
-
-    // Camera cycle time estimate per step (ms): very rough
-    auto estDurMs = [](const SeqStep& s) -> int64_t {
-        int shots = (s.cmd == "bracket") ? std::max(s.count, 1) : 1;
-        return int64_t(shots) * 450;
-    };
-
-    int trackIdx = 0;
-    for (auto& step : m_seqSteps) {
-        if (step.atMs < 0) continue;
-
-        bool repeating = step.intervalMs > 0 && step.untilMs > step.atMs;
-        float ty  = trackY[trackIdx % 2];
-        float ty2 = ty + kTrackH - 3.0f;
-        trackIdx++;
-
-        ImU32 colSolid = (step.cmd == "bracket") ? IM_COL32(210, 160, 25, 220)
-                       : (step.cmd == "burst")   ? IM_COL32(210,  95, 25, 220)
-                                                 : IM_COL32( 55, 130, 210, 220);
-        ImU32 colBand  = (step.cmd == "bracket") ? IM_COL32(210, 160, 25,  55)
-                       : (step.cmd == "burst")   ? IM_COL32(210,  95, 25,  55)
-                                                 : IM_COL32( 55, 130, 210,  55);
-
-        if (repeating) {
-            // Semi-transparent band over the full interval range
-            float bx  = toPx(std::max(step.atMs,   rangeStart));
-            float bx2 = toPx(std::min(step.untilMs, rangeEnd));
-            dl->AddRectFilled({bx, ty}, {bx2, ty2}, colBand, 2.0f);
-
-            // Tick + block for each repetition
-            for (int64_t t = step.atMs; t <= step.untilMs; t += step.intervalMs) {
-                if (t < rangeStart || t > rangeEnd) continue;
-                float sx  = toPx(t);
-                float sx2 = toPx(t + estDurMs(step));
-                sx2 = std::max(sx2, sx + 3.0f);
-                if (sx2 > x0 + tlW) sx2 = x0 + tlW;
-                dl->AddRectFilled({sx, ty}, {sx2, ty2}, colSolid, 1.0f);
+    if (c2>0 && c3>0) {
+        struct PZ { int64_t s, e; ImU32 col; const char* lbl; };
+        PZ zones[] = {
+            {m_tlViewStart, c2-10000, IM_COL32(28,28,36,255), "Partial"},
+            {c2-10000, c2-2000,  IM_COL32(110,90,15,255),    "Bailey's"},
+            {c2-2000,  c2+2000,  IM_COL32(190,185,145,255),  "D.Ring"},
+            {c2+2000,  c2+45000, IM_COL32(115,48,68,255),    "Chrom"},
+            {c2+45000, mx-20000, IM_COL32(80,60,8,255),      "Corona"},
+            {mx-20000, mx+20000, IM_COL32(150,118,18,255),   "Max"},
+            {mx+20000, c3-45000, IM_COL32(80,60,8,255),      "Corona"},
+            {c3-45000, c3-2000,  IM_COL32(115,48,68,255),    "Chrom"},
+            {c3-2000,  c3+2000,  IM_COL32(190,185,145,255),  "D.Ring"},
+            {c3+2000,  c3+10000, IM_COL32(110,90,15,255),    "Bailey's"},
+            {c3+10000, m_tlViewEnd, IM_COL32(28,28,36,255),  "Partial"},
+        };
+        for (auto& z : zones) {
+            if (z.s >= z.e) continue;
+            float px1 = std::max(toPx(z.s), winPos.x+kLabelW);
+            float px2 = std::min(toPx(z.e), winPos.x+winW);
+            if (px2 <= px1) continue;
+            dl->AddRectFilled({px1,phaseY},{px2,phaseY+kPhaseH}, z.col);
+            float zw = px2-px1;
+            if (zw > 30.f) {
+                float tw = ImGui::CalcTextSize(z.lbl).x;
+                dl->AddText({px1+(zw-tw)*0.5f, phaseY+3.f},
+                            IM_COL32(180,168,138,155), z.lbl);
             }
-        } else {
-            // Single step block
-            if (step.atMs > rangeEnd || step.atMs < rangeStart) continue;
-            float sx  = toPx(step.atMs);
-            float sx2 = toPx(step.atMs + estDurMs(step));
-            sx2 = std::max(sx2, sx + 4.0f);
-            sx2 = std::min(sx2, x0 + tlW);
-            dl->AddRectFilled({sx, ty}, {sx2, ty2}, colSolid, 2.0f);
-            if (sx2 - sx > 22.0f && !step.label.empty())
-                dl->AddText({sx + 3.0f, ty + 2.0f},
-                            IM_COL32(240, 240, 240, 220), step.label.c_str());
+        }
+    } else {
+        dl->AddRectFilled({winPos.x+kLabelW,phaseY},{winPos.x+winW,phaseY+kPhaseH},
+                          IM_COL32(28,28,36,255));
+    }
+    dl->AddRect({winPos.x+kLabelW,phaseY},{winPos.x+winW,phaseY+kPhaseH},
+                IM_COL32(40,40,52,255));
+
+    // Contact markers
+    struct CM { int64_t ms; const char* lbl; ImU32 col; };
+    CM cms[] = {
+        {c1,"C1",  IM_COL32(140,140,165,255)},
+        {c2,"C2",  IM_COL32(255,210, 50,255)},
+        {mx,"Max", IM_COL32(255,255,255,255)},
+        {c3,"C3",  IM_COL32(255,210, 50,255)},
+        {c4,"C4",  IM_COL32(140,140,165,255)},
+    };
+    for (auto& m : cms) {
+        if (m.ms < 0) continue;
+        float px = toPx(m.ms);
+        if (px < winPos.x+kLabelW || px > winPos.x+winW) continue;
+        dl->AddLine({px,phaseY},{px,phaseY+kPhaseH}, m.col, 1.5f);
+        dl->AddText({px+2.f, y+1.f}, m.col, m.lbl);
+    }
+
+    // ── Ruler ─────────────────────────────────────────────────────────────
+    float rulerY = phaseY + kPhaseH;
+    dl->AddRectFilled({winPos.x,rulerY},{winPos.x+winW,rulerY+kRulerH},
+                      IM_COL32(10,10,14,255));
+    {
+        int64_t t5 = 5LL*60000;
+        int64_t ft = ((m_tlViewStart/t5)+1)*t5;
+        for (int64_t t = ft; t < m_tlViewEnd; t += t5) {
+            float tx = toPx(t);
+            if (tx < winPos.x+kLabelW || tx > winPos.x+winW) continue;
+            bool maj = (t/60000)%10 == 0;
+            dl->AddLine({tx,rulerY},{tx,rulerY+(maj?8.f:4.f)},
+                        IM_COL32(65,65,85,255));
+            if (maj) {
+                int64_t s = t/1000;
+                char lb[8]; snprintf(lb,sizeof(lb),"%02d:%02d",
+                                     (int)((s/3600)%24),(int)((s/60)%60));
+                dl->AddText({tx+2.f,rulerY+8.f}, IM_COL32(75,75,95,255), lb);
+            }
         }
     }
 
-    // ── "Now" cursor ─────────────────────────────────────────────────────
+    // ── Tracks ────────────────────────────────────────────────────────────
+    float tracksY = rulerY + kRulerH;
+    int   nT      = (int)m_tracks.size();
+    float tracksH = nT * kTrackH;
+
+    // Block click / deselect detection (raw, not consumed by widgets)
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ImVec2 mp = ImGui::GetMousePos();
+        bool hit = false;
+        for (int ti = 0; ti < nT && !hit; ++ti) {
+            float ty = tracksY + ti*kTrackH;
+            if (mp.y < ty || mp.y >= ty+kTrackH) continue;
+            for (int bi = 0; bi < (int)m_tracks[ti].blocks.size(); ++bi) {
+                auto& blk = m_tracks[ti].blocks[bi];
+                float bx  = toPx(blk.atMs);
+                float bx2 = toPx(blk.atMs + BlockDurMs(blk));
+                if (mp.x >= bx && mp.x <= bx2) {
+                    m_selTrack = ti; m_selBlock = bi; hit = true; break;
+                }
+            }
+        }
+        if (!hit) {
+            bool inArea = mp.x >= winPos.x+kLabelW && mp.x <= winPos.x+winW
+                       && mp.y >= tracksY && mp.y < tracksY+tracksH;
+            if (inArea) { m_selTrack = -1; m_selBlock = -1; }
+        }
+    }
+
+    // DnD drop target over all tracks
+    ImGui::SetCursorScreenPos({winPos.x+kLabelW, tracksY});
+    ImGui::InvisibleButton("##tl_drop", {cntW, std::max(tracksH, 1.f)});
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("TL_BLOCK")) {
+            BlockType bt = *(const BlockType*)p->Data;
+            ImVec2    mp = ImGui::GetMousePos();
+            int       ti = std::clamp((int)((mp.y-tracksY)/kTrackH), 0, nT-1);
+            TLTrack&  tr = m_tracks[ti];
+            bool ok = (tr.IsCamera() && bt != BlockType::Audio)
+                   || (tr.IsAudio()  && bt == BlockType::Audio);
+            if (ok) {
+                float   relX = mp.x - (winPos.x + kLabelW);
+                int64_t atMs = m_tlViewStart + int64_t(relX / cntW * vDur);
+                atMs = std::max(atMs, m_tlViewStart);
+                TLBlock nb; nb.type = bt; nb.atMs = atMs;
+                tr.blocks.push_back(nb);
+                std::sort(tr.blocks.begin(), tr.blocks.end(),
+                    [](const TLBlock& a, const TLBlock& b){ return a.atMs < b.atMs; });
+                m_selTrack = ti;
+                auto it = std::find_if(tr.blocks.begin(), tr.blocks.end(),
+                    [&](const TLBlock& blk){ return blk.atMs==atMs && blk.type==bt; });
+                m_selBlock = (int)(it - tr.blocks.begin());
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    // Draw tracks
+    for (int ti = 0; ti < nT; ++ti) {
+        TLTrack& tr = m_tracks[ti];
+        float ty  = tracksY + ti*kTrackH;
+        float ty2 = ty + kTrackH;
+
+        // Label column
+        dl->AddRectFilled({winPos.x,ty},{winPos.x+kLabelW-2,ty2}, IM_COL32(14,14,22,255));
+        ImU32 lc = tr.IsAudio() ? IM_COL32(150,100,210,255) : IM_COL32(120,148,172,255);
+        dl->AddText({winPos.x+4.f, ty+7.f}, lc, tr.label.c_str());
+
+        // Track content bg
+        ImU32 bg = (ti%2==0) ? IM_COL32(14,14,20,255) : IM_COL32(12,12,18,255);
+        dl->AddRectFilled({winPos.x+kLabelW,ty},{winPos.x+winW,ty2}, bg);
+
+        // Blocks
+        for (int bi = 0; bi < (int)tr.blocks.size(); ++bi) {
+            TLBlock& blk = tr.blocks[bi];
+            if (blk.atMs < 0) continue;
+            int64_t dur = BlockDurMs(blk);
+            float bx    = toPx(blk.atMs);
+            float bx2   = toPx(blk.atMs + dur);
+            bx2 = std::max(bx2, bx + 3.f);
+            float cx1   = winPos.x + kLabelW, cx2 = winPos.x + winW;
+            if (bx2 < cx1 || bx > cx2) continue;
+            float dx    = std::max(bx, cx1);
+            float dx2   = std::min(bx2, cx2);
+            bool  sel   = (m_selTrack==ti && m_selBlock==bi);
+            ImU32 col   = BlockColor(blk.type);
+            dl->AddRectFilled({dx,ty+2},{dx2,ty2-2}, col, 2.f);
+            if (sel) dl->AddRect({dx-1,ty+1},{dx2+1,ty2-1},
+                                 IM_COL32(255,220,60,255), 2.f, 0, 2.f);
+            if (dx2-dx > 20.f && !blk.label.empty())
+                dl->AddText({dx+4.f,ty+6.f}, IM_COL32(240,240,240,215), blk.label.c_str());
+        }
+
+        dl->AddLine({winPos.x,ty2-1},{winPos.x+winW,ty2-1}, IM_COL32(24,24,34,255));
+    }
+
+    // "now" cursor
     int64_t nowMs = UtcNowMs();
-    if (nowMs >= rangeStart && nowMs <= rangeEnd) {
+    if (nowMs >= m_tlViewStart && nowMs <= m_tlViewEnd) {
         float nx = toPx(nowMs);
-        dl->AddLine({nx, y0}, {nx, y0 + totalH}, IM_COL32(220, 80, 80, 200), 1.5f);
-        dl->AddText({nx + 3.0f, y0 + 2.0f}, IM_COL32(220, 80, 80, 255), "now");
+        dl->AddLine({nx,phaseY},{nx,tracksY+tracksH}, IM_COL32(210,70,70,175), 1.5f);
+        dl->AddText({nx+2.f, y+1.f}, IM_COL32(210,70,70,255), "now");
     }
 
-    // ── Totality duration info ────────────────────────────────────────────
-    ImGui::Spacing();
-    if (c2 > 0 && c3 > 0) {
-        int64_t totMs = c3 - c2;
-        char buf[48];
-        snprintf(buf, sizeof(buf), "Totality  %dm %02d.%01ds",
-                 (int)(totMs/60000),
-                 (int)((totMs%60000)/1000),
-                 (int)((totMs%1000)/100));
-        ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(kGold, "%s", buf);
-        if (!ct.duration.empty()) {
-            ImGui::SameLine();
-            ImGui::TextColored(kDim, "  IQP: %s", ct.duration.c_str());
+    // ── Scroll wheel zoom ─────────────────────────────────────────────────
+    if (ImGui::IsWindowHovered()) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (std::fabs(wheel) > 0.01f) {
+            ImVec2  mp   = ImGui::GetMousePos();
+            float   relX = std::clamp((mp.x-(winPos.x+kLabelW))/cntW, 0.f, 1.f);
+            int64_t fms  = m_tlViewStart + int64_t(relX * vDur);
+            float   fac  = (wheel > 0) ? 0.75f : 1.333f;
+            int64_t nd   = std::clamp(int64_t(float(vDur)*fac),
+                                      10LL*1000LL, 4LL*3600000LL);
+            m_tlViewStart = fms - int64_t(relX * nd);
+            m_tlViewEnd   = m_tlViewStart + nd;
         }
-        ImGui::PopFont();
     }
 }
 
@@ -613,7 +821,7 @@ App::App() {
         SYSTEMTIME st{};
         GetSystemTime(&st);
         int today = st.wYear * 10000 + st.wMonth * 100 + st.wDay;
-        m_eclipseIdx = static_cast<int>(m_eclipses.size()) - 1; // fallback: last
+        m_eclipseIdx = static_cast<int>(m_eclipses.size()) - 1;
         for (int i = 0; i < static_cast<int>(m_eclipses.size()); ++i) {
             if (m_eclipses[i].DateInt() >= today) { m_eclipseIdx = i; break; }
         }
@@ -621,6 +829,8 @@ App::App() {
         LogLine(std::format("Default eclipse: {}-{:02d}-{:02d} {}",
                             e.year, e.month, e.day, e.type));
     }
+
+    InitTracks();
 }
 
 App::~App() {
@@ -1210,11 +1420,14 @@ void App::OnFrame() {
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
-    const float colW   = 200.0f;
-    const float colW2  = 400.0f;
-    const float sideW  = colW + colW2;
-    const float totalH = io.DisplaySize.y;
-    const float rightW = io.DisplaySize.x - sideW;
+    const float colW      = 200.0f;   // Col1: Hardware
+    const float colW2     = 400.0f;   // Col2: Eclipse
+    const float kInspW    = 200.0f;   // Inspector + Palette
+    const float kTimelineH = 380.0f;  // Bottom timeline height
+    const float totalH    = io.DisplaySize.y;
+    const float totalW    = io.DisplaySize.x;
+    const float topH      = totalH - kTimelineH;
+    const float statusW   = totalW - colW - colW2 - kInspW;
 
     bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
 
@@ -1223,7 +1436,7 @@ void App::OnFrame() {
     // ════════════════════════════════════════════════════════════════════════
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.06f, 0.07f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 14));
-    ImGui::BeginChild("##col_hw", ImVec2(colW, totalH), false, 0);
+    ImGui::BeginChild("##col_hw", ImVec2(colW, topH), false, 0);
     ImGui::PopStyleVar();
 
     // ── app name ─────────────────────────────────────────────────────────
@@ -1432,15 +1645,13 @@ void App::OnFrame() {
     ImGui::SameLine(0, 0);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.05f, 0.065f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 14));
-    ImGui::BeginChild("##col_ecl", ImVec2(colW2, totalH), false, 0);
+    ImGui::BeginChild("##col_ecl", ImVec2(colW2, topH), false, 0);
     ImGui::PopStyleVar();
 
-    // ECLIPSE section
     ImGui::SeparatorText("ECLIPSE");
     ImGui::Spacing();
     RenderEclipseSection();
 
-    // Calculate button
     ImGui::Spacing();
     {
         int iqpSt = m_iqpState.load();
@@ -1451,7 +1662,6 @@ void App::OnFrame() {
         if (loading) ImGui::EndDisabled();
     }
 
-    // Contact times table
     ImGui::Spacing();
     ImGui::SeparatorText("CONTACTS");
     ImGui::Spacing();
@@ -1461,74 +1671,40 @@ void App::OnFrame() {
     ImGui::PopStyleColor();
 
     // ════════════════════════════════════════════════════════════════════════
-    // RIGHT AREA
+    // COLUMN 3 — Status / Result
     // ════════════════════════════════════════════════════════════════════════
     ImGui::SameLine(0, 0);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.07f, 0.09f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-    ImGui::BeginChild("##main", ImVec2(rightW, totalH), false,
-        ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("##col_status", ImVec2(statusW, topH), false,
+                      ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
-
-    // ── Eclipse zone status banner ────────────────────────────────────────────
-    {
-        int iqpSt = m_iqpState.load();
-        if (iqpSt == 1 || iqpSt == 2) {
-            static const ImVec4 kGreen { 0.15f, 0.90f, 0.35f, 1.0f };
-            static const ImVec4 kRed   { 0.95f, 0.22f, 0.18f, 1.0f };
-            static const ImVec4 kDim2  { 0.40f, 0.40f, 0.45f, 1.0f };
-
-            ImGui::PushFont(m_fontLarge);
-            if (iqpSt == 1) {
-                ImGui::TextColored(kDim2, "checking location...");
-            } else {
-                ContactTimes ct;
-                { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-                if (!ct.apiOk) {
-                    ImGui::TextColored(kDim2, "network error");
-                } else if (!ct.valid) {
-                    ImGui::TextColored(kRed,  "NO ECLIPSE VISIBLE HERE");
-                } else if (ct.c2Ms > 0) {
-                    ImGui::TextColored(kGreen, "YOU ARE IN THE TOTALITY ZONE");
-                } else {
-                    ImGui::TextColored(kRed,   "YOU ARE OUTSIDE TOTALITY ZONE");
-                }
-            }
-            ImGui::PopFont();
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-        }
-    }
-
-    if (!m_lastResult.empty()) {
-        ImGui::PushFont(m_fontMono);
-        bool ok = m_lastResult.find("ERROR") == std::string::npos;
-        ImGui::TextColored(
-            ok ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f)
-               : ImVec4(1.0f,  0.35f, 0.25f, 1.0f),
-            "%s", m_lastResult.c_str());
-        ImGui::PopFont();
-        ImGui::Spacing();
-    }
-
-    // ════════════════════════════════
-    // Section: TIMELINE
-    // ════════════════════════════════
-    ImGui::SeparatorText("TIMELINE");
-    ImGui::Spacing();
-    RenderTimelineSection();
-
-    // Dev tools — collapsed at bottom
-    ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 28.0f);
-    ImGui::PushFont(m_fontMono);
-    ImGui::TextColored(ImVec4(0.28f, 0.28f, 0.32f, 1.0f), "dev:");
-    ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::Checkbox("Style##se", &m_showStyleEditor);
-    ImGui::SameLine();
-    ImGui::Checkbox("Demo##dw",  &m_showDemoWindow);
-
+    RenderStatusColumn();
     ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    // ════════════════════════════════════════════════════════════════════════
+    // COLUMN 4 — Inspector + Palette
+    // ════════════════════════════════════════════════════════════════════════
+    ImGui::SameLine(0, 0);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.06f, 0.075f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
+    ImGui::BeginChild("##col_insp", ImVec2(kInspW, topH), false, 0);
+    ImGui::PopStyleVar();
+    RenderInspectorColumn();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    // ════════════════════════════════════════════════════════════════════════
+    // TIMELINE — full width at bottom
+    // ════════════════════════════════════════════════════════════════════════
+    ImGui::SetCursorPos({0.0f, topH});
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.04f, 0.04f, 0.055f, 1.0f));
+    ImGui::BeginChild("##col_tl", ImVec2(totalW, kTimelineH), false,
+                      ImGuiWindowFlags_NoScrollbar);
+    RenderTimelineBottom();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 
     if (m_showStyleEditor) {
         ImGui::Begin("Style Editor", &m_showStyleEditor);

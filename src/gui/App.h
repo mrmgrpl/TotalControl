@@ -16,45 +16,73 @@ struct ImFont;
 
 namespace TotalControl {
 
+// ─── Timeline block types ─────────────────────────────────────────────────────
+
+enum class BlockType : int { Single = 0, Burst = 1, Bracket = 2, Audio = 3 };
+
+struct TLBlock {
+    int64_t     id         = -1;       // DB id (-1 = unsaved)
+    BlockType   type       = BlockType::Single;
+    int64_t     atMs       = -1;       // absolute UTC ms
+
+    // Camera block params
+    std::string ss         = "1/100";
+    int         iso        = 100;
+    std::string fstop      = "8.0";
+    int         count      = 5;        // bracket: shot count
+    std::string ev         = "1ev";    // bracket: EV step
+    float       burstFps   = 4.4f;    // burst: fps (ILCE-7RM4A hi+ cRAW)
+    int32_t     burstDurMs = 3000;    // burst: duration ms
+
+    // Audio block params
+    std::string audioFile;
+    int32_t     audioDurMs = 10000;   // default 10 s, updated from file
+
+    // Common
+    std::string label;
+    bool        snapToPrev = false;
+};
+
+struct TLTrack {
+    int                  id       = -1;
+    std::string          type;          // "camera" | "audio"
+    std::string          cameraId;      // e.g. "ILCE-7RM4A"
+    std::string          label;         // display name
+    std::vector<TLBlock> blocks;
+
+    bool IsCamera() const { return type == "camera"; }
+    bool IsAudio()  const { return type == "audio";  }
+};
+
+// ─── Other shared structs ─────────────────────────────────────────────────────
+
 struct DmsCoord {
     int   deg = 0, min = 0;
     float sec = 0.f;
     bool  pos = true;   // true = N or E
 };
 
-// One step loaded from a sequence JSON file.
-struct SeqStep {
-    int64_t     atMs       = -1;
-    int64_t     untilMs    = -1;   // -1 = single shot
-    int32_t     intervalMs = 0;
-    std::string cmd;               // "shoot","bracket","burst"
-    std::string ss;
-    int         iso        = 0;
-    int         count      = 1;   // bracket count
-    std::string ev;               // "1ev","2ev"
-    std::string label;
-};
-
-// Camera status polled via {"cmd":"status"} every ~2 s when connected.
 struct CamStatus {
     bool        valid        = false;
-    std::string guid;            // camera GUID (for routing)
-    std::string model;           // e.g. "ILCE-7RM4A"
+    std::string guid;
+    std::string model;
     int         batteryPct   = 0;
-    std::string batteryLevel;    // "full","3/4","1/2","1/4","empty", may contain "+usb"
-    std::string mode;            // "M","A","S","P"
-    std::string ss;              // "1/1000","2s",...
+    std::string batteryLevel;
+    std::string mode;
+    std::string ss;
     int         iso          = 0;
-    std::string fnum;            // "8.0","5.6"
-    std::string focus;           // "MF","AF-S",...
-    std::string drive;           // "single","cont-hi",...
-    std::string slot1Status;     // "OK","no-card"
+    std::string fnum;
+    std::string focus;
+    std::string drive;
+    std::string slot1Status;
     std::string slot2Status;
     int         slot1Remaining = -1;
     int         slot2Remaining = -1;
-    std::string store;           // "MemCard","HostPC"
-    int         lastShotMs   = -1;  // latency_ms from last shoot response (full stack)
+    std::string store;
+    int         lastShotMs   = -1;
 };
+
+// ─── App ──────────────────────────────────────────────────────────────────────
 
 class App {
 public:
@@ -79,8 +107,12 @@ private:
     void RenderCameraSection();
     void RenderEclipseSection();
     void RenderContactTimesSection();
-    void RenderTimelineSection();
-    void LoadSequenceJson(const std::wstring& path);
+
+    // Phase 3 — Timeline editor
+    void InitTracks();
+    void RenderStatusColumn();
+    void RenderInspectorColumn();
+    void RenderTimelineBottom();
 
     PipeClient m_pipe;
 
@@ -88,7 +120,7 @@ private:
     std::atomic<bool> m_connectRun{false};
 
     int         m_reconnectCountdown = 0;
-    int         m_statusCountdown    = 0;  // frames until next status poll
+    int         m_statusCountdown    = 0;
     std::string m_lastResult;
 
     bool m_showStyleEditor = false;
@@ -113,7 +145,7 @@ private:
     std::string m_homeTzIana   = "Europe/Warsaw";
     std::string m_eclTzIana    = "Europe/Madrid";
 
-    // ── Camera status — one entry per connected camera ────────────────────────
+    // ── Camera status ─────────────────────────────────────────────────────────
     std::vector<CamStatus> m_cameras;
 
     // ── Eclipse selector ──────────────────────────────────────────────────────
@@ -121,9 +153,9 @@ private:
     int                        m_eclipseIdx = -1;
 
     // ── Observer location ─────────────────────────────────────────────────────
-    float m_obsLat  = 0.f;   // decimal degrees N (+) / S (-)
-    float m_obsLon  = 0.f;   // decimal degrees E (+) / W (-)
-    int   m_obsAltM = 0;     // metres above sea level
+    float m_obsLat  = 0.f;
+    float m_obsLon  = 0.f;
+    int   m_obsAltM = 0;
 
     DmsCoord m_latDms, m_lonDms;
     void SyncDecimalToDms();
@@ -132,16 +164,19 @@ private:
     // ── Contact times ─────────────────────────────────────────────────────────
     std::thread        m_iqpThread;
     std::mutex         m_iqpMutex;
-    ContactTimes       m_contacts;     // IQP result
-    ContactTimes       m_beResult;     // Besselian result (sync, always computed)
+    ContactTimes       m_contacts;
+    ContactTimes       m_beResult;
     std::atomic<int>   m_iqpState{0};  // 0=Idle 1=Loading 2=Ready 3=Error
     float              m_iqpFetchedLat = 1e9f;
     float              m_iqpFetchedLon = 1e9f;
     int                m_iqpFetchedIdx = -2;
 
-    // ── Sequence timeline ─────────────────────────────────────────────────────
-    std::vector<SeqStep> m_seqSteps;
-    std::string          m_seqFileName;
+    // ── Timeline editor ───────────────────────────────────────────────────────
+    std::vector<TLTrack> m_tracks;
+    int                  m_selTrack    = -1;
+    int                  m_selBlock    = -1;
+    int64_t              m_tlViewStart = -1;   // visible range (UTC ms)
+    int64_t              m_tlViewEnd   = -1;
 };
 
 } // namespace TotalControl
