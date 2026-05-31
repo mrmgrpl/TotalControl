@@ -22,6 +22,19 @@ struct DmsCoord {
     bool  pos = true;   // true = N or E
 };
 
+// One step loaded from a sequence JSON file.
+struct SeqStep {
+    int64_t     atMs       = -1;
+    int64_t     untilMs    = -1;   // -1 = single shot
+    int32_t     intervalMs = 0;
+    std::string cmd;               // "shoot","bracket","burst"
+    std::string ss;
+    int         iso        = 0;
+    int         count      = 1;   // bracket count
+    std::string ev;               // "1ev","2ev"
+    std::string label;
+};
+
 // Camera status polled via {"cmd":"status"} every ~2 s when connected.
 struct CamStatus {
     bool        valid        = false;
@@ -66,6 +79,8 @@ private:
     void RenderCameraSection();
     void RenderEclipseSection();
     void RenderContactTimesSection();
+    void RenderTimelineSection();
+    void LoadSequenceJson(const std::wstring& path);
 
     PipeClient m_pipe;
 
@@ -123,6 +138,10 @@ private:
     float              m_iqpFetchedLat = 1e9f;
     float              m_iqpFetchedLon = 1e9f;
     int                m_iqpFetchedIdx = -2;
+
+    // ── Sequence timeline ─────────────────────────────────────────────────────
+    std::vector<SeqStep> m_seqSteps;
+    std::string          m_seqFileName;
 };
 
 } // namespace TotalControl

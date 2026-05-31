@@ -6,11 +6,14 @@
 #include "imgui_impl_dx11.h"
 
 #include <windows.h>
+#include <commdlg.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <string_view>
 
 namespace TotalControl {
@@ -224,6 +227,319 @@ void App::TriggerIqpFetch() {
     });
     LogLine(std::format("IQP+BE triggered: {} lat={:.4f} lon={:.4f}  BE valid={}",
                         id, lat, lon, m_beResult.valid));
+}
+
+// ─── Sequence JSON loader ─────────────────────────────────────────────────────
+
+// Parse ISO 8601 UTC string "YYYY-MM-DDTHH:MM:SS[.mmm]Z" → UTC ms.
+static int64_t ParseIso8601Ms(const std::string& s) {
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0;
+    double sec = 0.0;
+    if (sscanf_s(s.c_str(), "%d-%d-%dT%d:%d:%lfZ", &y, &mo, &d, &h, &mi, &sec) < 5)
+        return -1;
+    using namespace std::chrono;
+    auto ymd = year_month_day{ year(y), month((unsigned)mo), day((unsigned)d) };
+    int64_t dayMs = duration_cast<milliseconds>(sys_days{ymd}.time_since_epoch()).count();
+    return dayMs + int64_t(h)*3600000 + int64_t(mi)*60000 + int64_t(sec * 1000.0);
+}
+
+// Extract string or numeric value for key from a JSON object string.
+// Handles optional whitespace after colon: "key": "val" or "key": 123
+static std::string SSeqField(const std::string& obj, const char* key) {
+    std::string needle = std::string("\"") + key + "\":";
+    auto p = obj.find(needle);
+    if (p == std::string::npos) return {};
+    p += needle.size();
+    while (p < obj.size() && obj[p] == ' ') ++p;
+    if (p >= obj.size()) return {};
+    if (obj[p] == '"') {
+        ++p;
+        auto e = obj.find('"', p);
+        return (e == std::string::npos) ? std::string{} : obj.substr(p, e - p);
+    }
+    auto e = obj.find_first_of(",}\n", p);
+    auto v = obj.substr(p, e == std::string::npos ? obj.size() - p : e - p);
+    while (!v.empty() && v.back() == ' ') v.pop_back();
+    return v;
+}
+
+static int SSeqInt(const std::string& obj, const char* key, int def = 0) {
+    auto s = SSeqField(obj, key);
+    if (s.empty()) return def;
+    try { return std::stoi(s); } catch (...) { return def; }
+}
+
+void App::LoadSequenceJson(const std::wstring& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) { LogLine("LoadSequenceJson: cannot open file"); return; }
+    std::string json((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+
+    m_seqSteps.clear();
+
+    auto stepsPos = json.find("\"steps\"");
+    if (stepsPos == std::string::npos) { LogLine("LoadSequenceJson: no 'steps' key"); return; }
+    auto arrStart = json.find('[', stepsPos);
+    if (arrStart == std::string::npos) return;
+
+    size_t p = arrStart + 1;
+    while (p < json.size()) {
+        while (p < json.size() && json[p] != '{' && json[p] != ']') ++p;
+        if (p >= json.size() || json[p] == ']') break;
+
+        // Find matching closing brace
+        size_t depth = 0, start = p;
+        while (p < json.size()) {
+            if      (json[p] == '{') ++depth;
+            else if (json[p] == '}') { if (!--depth) { ++p; break; } }
+            ++p;
+        }
+        std::string obj = json.substr(start, p - start);
+
+        SeqStep step;
+        step.atMs       = ParseIso8601Ms(SSeqField(obj, "at"));
+        auto until      = SSeqField(obj, "until");
+        step.untilMs    = until.empty() ? -1 : ParseIso8601Ms(until);
+        step.intervalMs = SSeqInt(obj, "interval_ms");
+        step.cmd        = SSeqField(obj, "cmd");
+        step.ss         = SSeqField(obj, "ss");
+        step.iso        = SSeqInt(obj, "iso");
+        step.count      = SSeqInt(obj, "count", 1);
+        step.ev         = SSeqField(obj, "ev");
+        step.label      = SSeqField(obj, "label");
+
+        if (step.atMs > 0) m_seqSteps.push_back(step);
+    }
+
+    auto slash = path.rfind(L'\\');
+    auto name  = path.substr(slash == std::wstring::npos ? 0 : slash + 1);
+    m_seqFileName.clear();
+    for (wchar_t wc : name) m_seqFileName += static_cast<char>(wc);
+    LogLine(std::format("Sequence loaded: {} ({} steps)", m_seqFileName, m_seqSteps.size()));
+}
+
+// ─── Timeline rendering ───────────────────────────────────────────────────────
+
+void App::RenderTimelineSection() {
+    static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
+    static const ImVec4 kDim  {0.28f, 0.28f, 0.32f, 1.0f};
+    static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
+
+    // ── File picker ───────────────────────────────────────────────────────
+    ImGui::PushFont(m_fontMono);
+    if (ImGui::Button("Open sequence...")) {
+        wchar_t buf[MAX_PATH] = {};
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.lpstrFilter = L"Sequence JSON\0*.json\0All Files\0*.*\0";
+        ofn.lpstrFile   = buf;
+        ofn.nMaxFile    = MAX_PATH;
+        ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (GetOpenFileNameW(&ofn))
+            LoadSequenceJson(buf);
+    }
+    if (!m_seqFileName.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(kGray, "%s", m_seqFileName.c_str());
+        ImGui::SameLine();
+        char sc[24]; snprintf(sc, sizeof(sc), "(%d)", (int)m_seqSteps.size());
+        ImGui::TextColored(kDim, "%s", sc);
+    }
+    ImGui::PopFont();
+
+    ImGui::Spacing();
+
+    // ── Pick contact times (IQP preferred, BE fallback) ───────────────────
+    ContactTimes ct;
+    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+    if (!ct.valid) ct = m_beResult;
+
+    if (!ct.valid) {
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(kDim, "Calculate contacts to show timeline");
+        ImGui::PopFont();
+        return;
+    }
+
+    int64_t c1 = ct.c1Ms, c2 = ct.c2Ms, cMx = ct.maxMs, c3 = ct.c3Ms, c4 = ct.c4Ms;
+
+    // View range: C1 − 5 min … C4 + 5 min
+    const int64_t kPadMs  = 5LL * 60000;
+    int64_t rangeStart = c1 - kPadMs;
+    int64_t rangeEnd   = c4 + kPadMs;
+    int64_t rangeDur   = rangeEnd - rangeStart;
+    if (rangeDur <= 0) return;
+
+    // Reserve drawing area
+    float avail = ImGui::GetContentRegionAvail().x;
+    float tlW   = avail - 2.0f;
+
+    const float kLabelH = 16.0f;  // contact label row above bar
+    const float kBarH   = 24.0f;  // eclipse gradient bar
+    const float kRulerH = 20.0f;  // time tick labels
+    const float kTrackH = 20.0f;  // one sequence track row
+    const int   kTracks = 2;      // number of track rows
+
+    float totalH = kLabelH + kBarH + kRulerH + kTrackH * kTracks + 6.0f;
+
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##tl", ImVec2(tlW, totalH));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    float x0 = origin.x;
+    float y0 = origin.y;
+
+    auto toPx = [&](int64_t ms) -> float {
+        float t = float(ms - rangeStart) / float(rangeDur);
+        return x0 + std::clamp(t, 0.0f, 1.0f) * tlW;
+    };
+
+    // ── Background ────────────────────────────────────────────────────────
+    dl->AddRectFilled({x0, y0}, {x0 + tlW, y0 + totalH},
+                      IM_COL32(10, 10, 14, 255), 4.0f);
+
+    float barY  = y0 + kLabelH;
+    float barY2 = barY + kBarH;
+
+    // Partial eclipse bands (C1→C2, C3→C4)
+    if (c1 > 0)
+        dl->AddRectFilled({toPx(c1), barY},
+                          {toPx(c2 > 0 ? c2 : c4), barY2},
+                          IM_COL32(55, 55, 68, 255));
+    if (c3 > 0 && c4 > 0)
+        dl->AddRectFilled({toPx(c3), barY}, {toPx(c4), barY2},
+                          IM_COL32(55, 55, 68, 255));
+
+    // Totality band (C2→C3) — gold gradient
+    if (c2 > 0 && c3 > 0) {
+        float tx2 = toPx(c2), tx3 = toPx(c3);
+        dl->AddRectFilledMultiColor(
+            {tx2, barY}, {tx3, barY2},
+            IM_COL32(160, 120, 10, 255),   // C2 left
+            IM_COL32(220, 180, 30, 255),   // C2→Max
+            IM_COL32(220, 180, 30, 255),
+            IM_COL32(160, 120, 10, 255));  // C3 right
+    }
+
+    // Bar outline
+    dl->AddRect({x0, barY}, {x0 + tlW, barY2}, IM_COL32(40, 40, 50, 255), 0.0f, 0, 1.0f);
+
+    // ── Contact markers ───────────────────────────────────────────────────
+    struct CM { int64_t ms; const char* lbl; ImU32 col; };
+    CM markers[] = {
+        {c1,  "C1",  IM_COL32(150, 150, 170, 255)},
+        {c2,  "C2",  IM_COL32(255, 215,  50, 255)},
+        {cMx, "Max", IM_COL32(255, 255, 255, 255)},
+        {c3,  "C3",  IM_COL32(255, 215,  50, 255)},
+        {c4,  "C4",  IM_COL32(150, 150, 170, 255)},
+    };
+    for (auto& m : markers) {
+        if (m.ms < 0) continue;
+        float mx = toPx(m.ms);
+        dl->AddLine({mx, barY - 1.0f}, {mx, barY2 + 1.0f}, m.col, 1.5f);
+        dl->AddText({mx + 3.0f, y0 + 1.0f}, m.col, m.lbl);
+    }
+
+    // ── Ruler: tick every 5 min, label every 10 min ───────────────────────
+    float rulerY = barY2;
+    int64_t tick5  = 5LL * 60000;
+    int64_t first5 = ((rangeStart / tick5) + 1) * tick5;
+    for (int64_t t = first5; t < rangeEnd; t += tick5) {
+        float tx = toPx(t);
+        bool  major = (t / 60000) % 10 == 0;
+        dl->AddLine({tx, rulerY}, {tx, rulerY + (major ? 6.0f : 3.0f)},
+                    IM_COL32(70, 70, 85, 255), 1.0f);
+        if (major) {
+            int64_t s = t / 1000;
+            char lbl[8];
+            snprintf(lbl, sizeof(lbl), "%02d:%02d", (int)((s/3600)%24), (int)((s/60)%60));
+            dl->AddText({tx + 2.0f, rulerY + 6.0f}, IM_COL32(85, 85, 100, 255), lbl);
+        }
+    }
+
+    // ── Sequence steps ────────────────────────────────────────────────────
+    // Two track rows; assign alternating to avoid visual collision for adjacent steps.
+    float trackY[2] = {
+        rulerY + kRulerH,
+        rulerY + kRulerH + kTrackH,
+    };
+
+    // Camera cycle time estimate per step (ms): very rough
+    auto estDurMs = [](const SeqStep& s) -> int64_t {
+        int shots = (s.cmd == "bracket") ? std::max(s.count, 1) : 1;
+        return int64_t(shots) * 450;
+    };
+
+    int trackIdx = 0;
+    for (auto& step : m_seqSteps) {
+        if (step.atMs < 0) continue;
+
+        bool repeating = step.intervalMs > 0 && step.untilMs > step.atMs;
+        float ty  = trackY[trackIdx % 2];
+        float ty2 = ty + kTrackH - 3.0f;
+        trackIdx++;
+
+        ImU32 colSolid = (step.cmd == "bracket") ? IM_COL32(210, 160, 25, 220)
+                       : (step.cmd == "burst")   ? IM_COL32(210,  95, 25, 220)
+                                                 : IM_COL32( 55, 130, 210, 220);
+        ImU32 colBand  = (step.cmd == "bracket") ? IM_COL32(210, 160, 25,  55)
+                       : (step.cmd == "burst")   ? IM_COL32(210,  95, 25,  55)
+                                                 : IM_COL32( 55, 130, 210,  55);
+
+        if (repeating) {
+            // Semi-transparent band over the full interval range
+            float bx  = toPx(std::max(step.atMs,   rangeStart));
+            float bx2 = toPx(std::min(step.untilMs, rangeEnd));
+            dl->AddRectFilled({bx, ty}, {bx2, ty2}, colBand, 2.0f);
+
+            // Tick + block for each repetition
+            for (int64_t t = step.atMs; t <= step.untilMs; t += step.intervalMs) {
+                if (t < rangeStart || t > rangeEnd) continue;
+                float sx  = toPx(t);
+                float sx2 = toPx(t + estDurMs(step));
+                sx2 = std::max(sx2, sx + 3.0f);
+                if (sx2 > x0 + tlW) sx2 = x0 + tlW;
+                dl->AddRectFilled({sx, ty}, {sx2, ty2}, colSolid, 1.0f);
+            }
+        } else {
+            // Single step block
+            if (step.atMs > rangeEnd || step.atMs < rangeStart) continue;
+            float sx  = toPx(step.atMs);
+            float sx2 = toPx(step.atMs + estDurMs(step));
+            sx2 = std::max(sx2, sx + 4.0f);
+            sx2 = std::min(sx2, x0 + tlW);
+            dl->AddRectFilled({sx, ty}, {sx2, ty2}, colSolid, 2.0f);
+            if (sx2 - sx > 22.0f && !step.label.empty())
+                dl->AddText({sx + 3.0f, ty + 2.0f},
+                            IM_COL32(240, 240, 240, 220), step.label.c_str());
+        }
+    }
+
+    // ── "Now" cursor ─────────────────────────────────────────────────────
+    int64_t nowMs = UtcNowMs();
+    if (nowMs >= rangeStart && nowMs <= rangeEnd) {
+        float nx = toPx(nowMs);
+        dl->AddLine({nx, y0}, {nx, y0 + totalH}, IM_COL32(220, 80, 80, 200), 1.5f);
+        dl->AddText({nx + 3.0f, y0 + 2.0f}, IM_COL32(220, 80, 80, 255), "now");
+    }
+
+    // ── Totality duration info ────────────────────────────────────────────
+    ImGui::Spacing();
+    if (c2 > 0 && c3 > 0) {
+        int64_t totMs = c3 - c2;
+        char buf[48];
+        snprintf(buf, sizeof(buf), "Totality  %dm %02d.%01ds",
+                 (int)(totMs/60000),
+                 (int)((totMs%60000)/1000),
+                 (int)((totMs%1000)/100));
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(kGold, "%s", buf);
+        if (!ct.duration.empty()) {
+            ImGui::SameLine();
+            ImGui::TextColored(kDim, "  IQP: %s", ct.duration.c_str());
+        }
+        ImGui::PopFont();
+    }
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
@@ -1192,19 +1508,25 @@ void App::OnFrame() {
                : ImVec4(1.0f,  0.35f, 0.25f, 1.0f),
             "%s", m_lastResult.c_str());
         ImGui::PopFont();
+        ImGui::Spacing();
     }
 
+    // ════════════════════════════════
+    // Section: TIMELINE
+    // ════════════════════════════════
+    ImGui::SeparatorText("TIMELINE");
     ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    RenderTimelineSection();
 
+    // Dev tools — collapsed at bottom
+    ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 28.0f);
     ImGui::PushFont(m_fontMono);
-    ImGui::TextColored(ImVec4(0.40f, 0.40f, 0.45f, 1.0f), "dev tools");
+    ImGui::TextColored(ImVec4(0.28f, 0.28f, 0.32f, 1.0f), "dev:");
     ImGui::PopFont();
-    ImGui::Spacing();
-    ImGui::Checkbox("Style Editor", &m_showStyleEditor);
     ImGui::SameLine();
-    ImGui::Checkbox("Demo Window",  &m_showDemoWindow);
+    ImGui::Checkbox("Style##se", &m_showStyleEditor);
+    ImGui::SameLine();
+    ImGui::Checkbox("Demo##dw",  &m_showDemoWindow);
 
     ImGui::EndChild();
 
