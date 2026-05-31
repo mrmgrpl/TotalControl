@@ -112,6 +112,7 @@ public:
     bool SetISO(int iso);
     bool SetFNumber(float f);
     bool SetStoreDestination(const wchar_t* dest); // "card","pc","both"
+    bool IsPropCached(uint32_t code, long long value) const; // true → no SDK call needed
 
     // ── Shoot ────────────────────────────────────────────────────────────────
     // holdForBurst=true: keeps Release button pressed until all captures arrive,

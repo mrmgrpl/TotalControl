@@ -684,8 +684,13 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         if (JHas(req, L"ss"))    cam->SetShutterSpeed(JStr(req, L"ss").c_str());
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
+        // Resolve destination code to check cache before calling SDK
+        uint32_t storeVal = 0x0002; // MemoryCard default
+        if (store == L"pc")   storeVal = 0x0001;
+        else if (store == L"both") storeVal = 0x0003;
+        bool storeWasCached = cam->IsPropCached(0x0119, (long long)storeVal);
         cam->SetStoreDestination(store.c_str());
-        ::Sleep(300);
+        if (!storeWasCached) ::Sleep(300); // only wait if destination actually changed
 
         int count = JHas(req, L"count") ? JInt(req, L"count", 1) : 1;
         if (count < 1) count = 1;

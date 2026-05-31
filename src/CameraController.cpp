@@ -557,6 +557,11 @@ bool CameraController::SetFNumber(float f) {
                          SDK::CrDataType_UInt16, actual, L"FNumber");
 }
 
+bool CameraController::IsPropCached(uint32_t code, long long value) const {
+    auto it = m_propSetCache.find(code);
+    return it != m_propSetCache.end() && it->second == value;
+}
+
 bool CameraController::SetStoreDestination(const wchar_t* dest) {
     uint32_t val = SDK::CrStillImageStoreDestination_MemoryCard;
     if      (!wcscmp(dest, L"pc"))   val = SDK::CrStillImageStoreDestination_HostPC;
