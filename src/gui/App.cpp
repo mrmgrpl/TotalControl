@@ -1863,7 +1863,7 @@ void App::OnFrame() {
     const float colW2     = 400.0f;   // Col2: Eclipse
     const float kInspW    = 200.0f;   // Inspector + Palette
     const float kTimelineH = 380.0f;  // Bottom timeline height
-    const float totalH    = io.DisplaySize.y;
+    const float totalH    = io.DisplaySize.y - menuH;
     const float totalW    = io.DisplaySize.x;
     const float topH      = totalH - kTimelineH;
     const float statusW   = totalW - colW - colW2 - kInspW;
