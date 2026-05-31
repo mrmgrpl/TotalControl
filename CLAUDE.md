@@ -153,7 +153,7 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 - `TotalControlCLI.log` — CLI, next to exe, append mode; disable with: `--nolog`
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Current status (2026-05-30)
+## Current status (2026-05-31)
 
 | Module | Status |
 |---|---|
@@ -171,23 +171,40 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 | sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — production TSE 2026 |
 | docs/ | solar_eclipse_exposure_model.md |
 | Renderer3D / Overlay2D / CameraPreview | Empty stubs |
-| **TotalControlGUI Phase 0+0.5+1** | **DONE — see details below** |
+| **TotalControlGUI Phase 0–2b** | **DONE — see details below** |
 
-### TotalControlGUI — Phase 1 complete (2026-05-30)
+### TotalControlGUI — Phase 2b complete (2026-05-31)
 
-**Left panel sections:**
-- **TIME**: UTC (Universal Time Zone) + Home Time Zone + Local Time Zone; 598 IANA zones from DB; RFC 6557 compliant; DST via Windows TZ registry; settings persisted in SQLite
+**Column 1 — Hardware (200px):**
+- **TIME**: UTC HH:MM:SS.mmm + Home TZ + Local/Eclipse TZ (598 IANA zones, DST); settings in SQLite; GE/C1–C4 countdown
 - **CONNECTION**: ●/○ status + Connect cameras / Test picture / Disconnect cameras
-- **CAMERA STATUS**: multi-camera polling ~2s; per camera: model, battery bar+%, Mode/SS/ISO/f/Focus/Drive, C1/C2 with shot count, `Shot Nms` (full-stack latency after each shoot)
+- **CAMERA STATUS**: multi-camera polling ~2s; model, battery bar+%, Mode/SS/ISO/f/Focus/Drive, C1/C2 shot count, `Shot Nms` latency
+
+**Column 2 — Eclipse (400px):**
+- **ECLIPSE**: combo 11 898 eclipses (ImGuiListClipper); type+duration; GE lat/lon; observer Lat/Lon DMS + Alt (m)
+- **[Calculate Contacts]**: triggers IQP background fetch + Besselian sync calc
+- **CONTACTS**: side-by-side IQP (blue) and BE (green) — C1/C2/Max/C3/C4 in UTC and local TZ
 
 **Three SQLite databases** (next to exe):
 - `TotalControlDefaultConfig.db` — factory defaults, created by app
-- `TotalControlConfig.db` — active user config, copied from Default on first run
-- `TotalControlData.db` — reference data (read-only): 11 898 eclipses (Besselian elements, NASA -1999→+3000), 598 IANA timezones; schema: `data/schema_data.sql`
+- `TotalControlConfig.db` — active user config; keys: show_home_clock, home_tz_iana, ecl_tz_iana, obs_lat, obs_lon, obs_alt_m, iqp_api_key
+- `TotalControlData.db` — read-only: 11 898 eclipses (Besselian elements), 598 IANA timezones
 
-**Tech:** C++23, SQLite 3.53.1, CMake 4.3.3, `std::expected` in PipeClient, `std::format` logging
+**New modules (Phase 2b):**
+- `IqpClient.h/.cpp` — WinHTTP GET to maps.besselianelements.com; auto key-refresh from page JS; SetIqpLogger() for diagnostics
+- `BesselCalc.h/.cpp` — C1/C2/Max/C3/C4 from NASA Besselian elements (Meeus/Miller algorithm, Newton iteration)
+- `Database::LoadBesselianElements()` — loads all polynomial coefficients from TotalControlData.db
 
-**Next: Phase 2** — C1/C2/C3/C4 countdown computed from Besselian elements + observer GPS
+**Next: Phase 3** — Shoot panel, Sequencer panel, Timeline
+
+### Known pitfalls in IqpClient (maps.besselianelements.com API)
+
+- API returns pretty-printed JSON with spaces after colons: `"message1": "..."` — `JsonStr` must skip whitespace before the opening `"`
+- Success response has **no** `"message"` field (empty from JsonStr) **or** `"message":"OK"` at the end — treat both as success
+- `"message":"Limit Error"` = rate-limit (too many requests) — do NOT retry or refresh key
+- `"message":"Wrong Key"` (contains "Key"/"key") = expired key — refresh from map page JS + retry once
+- Key auto-refresh: fetch `/map/<eclipseId>/`, search inline scripts then JS files for standalone 128-hex string; fall back to `/map/TSE20260812/`
+- `SetIqpLogger(fn)` — set once in App ctor; logs to TotalControlGUI.log from background thread
 
 ### Known pitfalls in the sequence JSON parser (SequencerEngine.cpp)
 
