@@ -31,8 +31,8 @@ struct TLBlock {
     std::string fstop      = "8.0";
     int         count      = 5;        // bracket: shot count
     std::string ev         = "1ev";    // bracket: EV step
-    float       burstFps   = 4.4f;    // burst: fps (ILCE-7RM4A hi+ cRAW)
-    int32_t     burstDurMs = 3000;    // burst: duration ms
+    std::string burstDrive = "cont-hi-plus"; // burst drive mode: cont-hi-plus/hi/mid/lo
+    int32_t     burstDurMs = 3000;           // burst: duration ms
 
     // Audio block params
     std::string audioFile;

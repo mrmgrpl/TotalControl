@@ -408,15 +408,42 @@ void App::RenderInspectorColumn() {
         }
 
         if (b.type == BlockType::Burst) {
-            ImGui::TextColored(kGray, "fps");   ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
-            ImGui::InputFloat("##fps", &b.burstFps, 0.f, 0.f, "%.1f");
+            // Drive mode combo — maps to CrSDK drive mode strings
+            struct BurstMode { const char* label; const char* drive; float fps; };
+            static const BurstMode kModes[] = {
+                {"HI+", "cont-hi-plus", 10.0f},
+                {"HI",  "cont-hi",       8.0f},
+                {"MID", "cont-mid",      5.0f},
+                {"LO",  "cont-lo",       3.0f},
+            };
+            int modeIdx = 0;
+            for (int i = 0; i < 4; ++i)
+                if (b.burstDrive == kModes[i].drive) { modeIdx = i; break; }
 
-            ImGui::TextColored(kGray, "Dur s"); ImGui::SameLine(52);
+            ImGui::TextColored(kGray, "Drive");  ImGui::SameLine(52);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##bdrive", kModes[modeIdx].label)) {
+                for (int i = 0; i < 4; ++i) {
+                    char lbl[24];
+                    snprintf(lbl, sizeof(lbl), "%-4s  (~%.0f fps)",
+                             kModes[i].label, kModes[i].fps);
+                    if (ImGui::Selectable(lbl, i == modeIdx))
+                        b.burstDrive = kModes[i].drive;
+                    if (i == modeIdx) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::TextColored(kGray, "Dur s");  ImGui::SameLine(52);
             ImGui::SetNextItemWidth(-1);
             float ds = b.burstDurMs / 1000.f;
             if (ImGui::InputFloat("##bdur", &ds, 0.f, 0.f, "%.1f"))
                 b.burstDurMs = int32_t(ds * 1000.f);
+
+            // Informational: estimated frame count
+            float fps  = kModes[modeIdx].fps;
+            int   nFrm = std::max(1, (int)(fps * ds + 0.5f));
+            ImGui::TextColored(kDim, "~%d frames @ %.0f fps", nFrm, fps);
         }
 
         if (b.type == BlockType::Audio) {
