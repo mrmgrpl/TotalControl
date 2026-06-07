@@ -255,13 +255,13 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 - `TotalControlGUI.log` — GUI, next to exe, append mode
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Current status (2026-06-07)
+## Current status (2026-06-08)
 
 | Module | Status |
 |---|---|
 | CMakeLists.txt | SRV + CLI + GUI; C++23; CMake 4.3.3; LANGUAGES C CXX |
 | CameraController | Init/Connect/Disconnect + WarmCache + property cache + multi-cam |
-| PipeServer | Working — named pipe, JSON Lines, persistent connection |
+| PipeServer | Working — named pipe, JSON Lines, persistent connection, multi-client |
 | CommandHandler | shoot/bracket/burst/movie/af/get/set/cmd/quit/list_cameras/seq_* |
 | Multi-camera | Enumerate + Connect(guid) + routing by "cam":guid/index |
 | Graceful shutdown | SetConsoleCtrlHandler → RequestShutdown → Shutdown() |
@@ -275,7 +275,8 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | Renderer3D / Overlay2D / CameraPreview | Empty stubs |
 | **TotalControlGUI Phase 0–2b** | **DONE** |
 | **TotalControlGUI Phase 3a–3c** | **DONE** |
-| **TotalControlGUI Phase 3d** | **IN PROGRESS — ARM dedup + timeline viz** |
+| **TotalControlGUI Phase 3d** | **DONE** |
+| **TotalControlGUI Solar Simulator** | **DONE 2026-06-08** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -358,7 +359,47 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 - Hit-testing and selection border extended to cover the ARM zone
 - Snap-to-prev includes `ArmEstMs` when `BlockParamsDiffer(prev, cur)` is true
 
-**Next (Phase 3d continued)**: audio playback block
+### TotalControlGUI — Solar Simulator (complete 2026-06-08)
+
+**RenderSolarView** — rendered in Col2 (Eclipse column), below CONTACTS:
+
+**Ephemeris integration** (EphClient + Database):
+- `EphClient.h/.cpp` — JPL Horizons HTTPS fetch for Sun/Moon/5 planets over eclipse day
+- Results cached in `TotalControlConfig.db` (eph_meta + eph_rows tables)
+- `EphThreadProc` → `m_ephSamples[]`; `interpSnap(rows, simMs)` → EphRow per frame
+- Playhead time (`m_tlPlayheadMs`) drives simulator — scrubbing moves Moon across sky
+
+**SDO live solar image** (SdoClient.h/.cpp):
+- WinHTTP HTTPS GET `sdo.gsfc.nasa.gov/assets/img/latest/latest_1024_HMIIC.jpg`
+- WIC (Windows Imaging Component) JPEG decode → RGBA; circular alpha mask (r=0.5)
+- `m_sdoThread` writes pixels buffer + sets `m_sdoNewData`; render thread calls `CreateSdoTexture()`
+- D3D11 Texture2D → SRV; rendered with `AddImageQuad` rotated by `P_rad = (P₀-q)*π/180`
+- Offline cache: `TotalControlSDO.jpg` next to exe
+- `OnInit(ID3D11Device*, ID3D11DeviceContext*)` — device passed from main_gui.cpp globals
+- **PITFALL**: `TriggerSdoFetch()` must be called AFTER `m_d3dDev = d3dDev` in OnInit (not in ctor)
+- **PITFALL**: `ImTextureID = ImU64` since ImGui 1.91.4 → cast: `(ImTextureID)(uintptr_t)srv`
+
+**Angles and orientation**:
+- `ComputeP0(ra, dec)` → P₀: solar N pole PA from celestial N (IAU pole RA=286.13°, Dec=63.87°)
+- `ComputeQ(ra, dec, lat, lon, ms)` → q: parallactic angle (from GMST + hour angle)
+- `ComputeMoonV(ra, dec)` → V: Moon N pole PA from celestial N (IAU pole RA=269.9949°, Dec=66.5392°)
+- **rot = P₀ − q**: effective field rotation from zenith — displayed in status bar, used for 900mm frame label
+- P₀ changes < 0.1°/h during eclipse; rot changes significantly with time (via q)
+- **PITFALL**: ☉ (U+2609) not in Consolas — draw as `AddCircle` + `AddCircleFilled` manually
+
+**Moon rotation axis**:
+- `moonVrad = (V − q) * π/180` — Moon N pole direction from screen-up (zenith)
+- Full axis line through Moon disc + arrowhead at N + "N" label + drawn circle (Moon symbol)
+- Moon disc: gray normally; **100% black** (`IM_COL32(0,0,0,255)`) during totality (`dist + sunR < moonR`)
+
+**Other features**:
+- C2/C3: dynamic from Moon-Sun relative angular velocity between adjacent ephemeris samples
+- Alt/Az grid (adaptive 0.5°/1°/5°), horizon, zenith marker, 24h trajectories
+- Camera frame overlays: 240mm (dashed, 0°), 900mm (solid, rotated P_rad)
+- Playhead drag: grab within 8px of triangle apex only (no click-to-teleport)
+- Zoom: mouse wheel, range 0.2×–20×
+
+**Next (after Solar Simulator)**: audio playback block, obscuration % display
 
 ## Known pitfalls in IqpClient (maps.besselianelements.com API)
 
