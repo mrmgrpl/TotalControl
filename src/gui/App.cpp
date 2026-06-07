@@ -265,12 +265,12 @@ static bool BlockParamsDiffer(const TLBlock& a, const TLBlock& b) {
 
 // Conservative estimate of ARM overhead after block b fires (RAW write to card +
 // SetPropAndVerify(DriveMode) confirm). Derived from ILCE-7RM4A measurements:
-// 3-shot ~1800 ms, 5-shot ~2000 ms, 9-shot ~2030 ms. Hard ceiling: 2100 ms.
+// 3-shot ~1900 ms, 5-shot ~2100 ms (capped). Single/Burst: ~2000 ms observed.
 static int64_t ArmEstMs(const TLBlock& b) {
     assert(b.type != BlockType::Audio);
     if (b.type == BlockType::Bracket)
         return std::min(2100LL, 1000LL + static_cast<int64_t>(b.count) * 300LL);
-    return 1800LL;
+    return 2000LL;
 }
 
 int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
