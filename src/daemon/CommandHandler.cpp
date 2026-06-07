@@ -1044,6 +1044,52 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         return true;
     }
 
+    // ── arm ───────────────────────────────────────────────────────────────────
+    // Pre-arm: set SS, ISO, f-stop, and drive mode WITHOUT triggering the shutter.
+    // Called by GUI sequencer between blocks so the camera is ready to fire instantly.
+    //
+    // Single/Burst: {"cmd":"arm","ss":"1/100","iso":100,"f":"8.0","drive":"single"}
+    // Bracket cont: {"cmd":"arm","ss":"1/100","iso":100,"f":"8.0","ev":"1.0ev","count":9,"mode":"cont"}
+    if (cmd == L"arm") {
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
+
+        ULONGLONG t0 = GetTickCount64();
+
+        cam->SetPCRemotePriority();
+        if (JHas(req, L"iso"))  cam->SetISO(JInt(req, L"iso"));
+        if (JHas(req, L"f"))    cam->SetFNumber(JFlt(req, L"f"));
+        if (JHas(req, L"ss"))   cam->SetShutterSpeed(JStr(req, L"ss").c_str());
+
+        // Drive mode: bracket (ev+count) or direct drive string (single/burst)
+        if (JHas(req, L"ev")) {
+            std::wstring evStr = JStr(req, L"ev");
+            while (!evStr.empty() && (evStr.back() == L'v' || evStr.back() == L'e' ||
+                                       evStr.back() == L'V' || evStr.back() == L'E'))
+                evStr.pop_back();
+            int ev10 = 10;
+            try { ev10 = static_cast<int>(std::stof(evStr) * 10.0f + 0.5f); } catch (...) {}
+            int count = JHas(req, L"count") ? JInt(req, L"count", 5) : 5;
+            bool single = (JStr(req, L"mode") == L"single");
+            const BracketEntry* br = FindBracket(ev10, count);
+            if (br) {
+                uint32_t driveCode = single ? br->single_code : br->cont_code;
+                cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
+                                      L"DriveMode(arm-bracket)", 2000);
+            }
+        } else if (JHas(req, L"drive")) {
+            std::wstring driveStr = JStr(req, L"drive");
+            long long driveRaw = 0;
+            if (EncodePropValue(0x010e, driveStr, driveRaw) && driveRaw != 0)
+                cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode(arm)", 2000);
+        }
+
+        int latMs = static_cast<int>(GetTickCount64() - t0);
+        std::wostringstream ss;
+        ss << L"\"latency_ms\":" << latMs;
+        resp = Ok(ss.str());
+        return true;
+    }
+
     // ── seq_start ─────────────────────────────────────────────────────────────
     // {"cmd":"seq_start","file":"C:\\sequences\\eclipse.json"}
     // {"cmd":"seq_start","file":"...","sim_offset_ms":-37926976000}  (--test mode)

@@ -20,6 +20,18 @@ foreach(_check
     endif()
 endforeach()
 
+set(CRSDK_ADAPTER_DLLS
+    "${CRSDK_BIN}/Cr_PTP_IP.dll"
+    "${CRSDK_BIN}/Cr_PTP_USB.dll"
+    "${CRSDK_BIN}/libusb-1.0.dll"
+    "${CRSDK_BIN}/libssh2.dll"
+)
+foreach(_dll ${CRSDK_ADAPTER_DLLS})
+    if(NOT EXISTS "${_dll}")
+        message(FATAL_ERROR "Brak DLL CrAdapter: ${_dll}")
+    endif()
+endforeach()
+
 # ─── TotalControlSRV.exe — daemon (trzyma połączenie z kamerą, pipe server) ──
 set(SRV_SOURCES
     src/main.cpp
@@ -38,6 +50,8 @@ add_executable(TotalControlSRV ${SRV_SOURCES})
 target_include_directories(TotalControlSRV PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
+)
+target_include_directories(TotalControlSRV SYSTEM PRIVATE
     ${CRSDK_INCLUDE}
 )
 
@@ -57,7 +71,6 @@ target_compile_definitions(TotalControlSRV PRIVATE
 
 target_compile_options(TotalControlSRV PRIVATE
     /W4 /WX /MP /utf-8
-    /external:I "${CRSDK_INCLUDE}" /external:W0
 )
 
 # Kopiowanie DLL-i CrSDK po buildzie
@@ -68,10 +81,7 @@ add_custom_command(TARGET TotalControlSRV POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "$<TARGET_FILE_DIR:TotalControlSRV>/CrAdapter"
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CRSDK_BIN}/Cr_PTP_IP.dll"
-        "${CRSDK_BIN}/Cr_PTP_USB.dll"
-        "${CRSDK_BIN}/libusb-1.0.dll"
-        "${CRSDK_BIN}/libssh2.dll"
+        ${CRSDK_ADAPTER_DLLS}
         "$<TARGET_FILE_DIR:TotalControlSRV>/CrAdapter/"
     COMMENT "Kopiowanie CrSDK DLL -> output + CrAdapter/"
 )
@@ -112,6 +122,8 @@ target_compile_options(sqlite3 PRIVATE /W0 /MP)
 target_compile_definitions(sqlite3 PRIVATE
     SQLITE_THREADSAFE=1
     SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+    SQLITE_DEFAULT_JOURNAL_MODE=WAL
+    SQLITE_OMIT_DEPRECATED=1
 )
 
 # ─── Dear ImGui — built as a static library (no /WX, no warnings) ────────────
@@ -156,6 +168,8 @@ target_include_directories(TotalControlGUI PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_include_directories(TotalControlGUI SYSTEM PRIVATE
     ${IMGUI_ROOT}
     ${IMGUI_BACKENDS}
 )
@@ -177,6 +191,9 @@ target_link_libraries(TotalControlGUI PRIVATE
     kernel32.lib user32.lib gdi32.lib
     ole32.lib oleaut32.lib uuid.lib shell32.lib
 )
+
+# GUI wymaga gotowego katalogu SRV
+add_dependencies(TotalControlGUI TotalControlSRV)
 
 # Copy TotalControlData.db next to SRV exe (read-only reference database)
 add_custom_command(TARGET TotalControlGUI POST_BUILD

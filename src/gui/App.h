@@ -1,6 +1,7 @@
 #pragma once
 #include "PipeClient.h"
 #include "Database.h"
+#include "Timeline.h"
 #include "TzEntry.h"
 #include "EclipseEntry.h"
 #include "IqpClient.h"
@@ -8,51 +9,15 @@
 #include <string>
 #include <atomic>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 struct ImFont;
 
 namespace TotalControl {
-
-// ─── Timeline block types ─────────────────────────────────────────────────────
-
-enum class BlockType : int { Single = 0, Burst = 1, Bracket = 2, Audio = 3 };
-
-struct TLBlock {
-    int64_t     id         = -1;       // DB id (-1 = unsaved)
-    BlockType   type       = BlockType::Single;
-    int64_t     atMs       = -1;       // absolute UTC ms
-
-    // Camera block params
-    std::string ss         = "1/100";
-    int         iso        = 100;
-    std::string fstop      = "8.0";
-    int         count      = 5;        // bracket: shot count (3/5/9)
-    std::string ev         = "1.0ev";  // bracket: EV step (0.3ev…3.0ev)
-    std::string burstDrive = "cont-hi-plus"; // burst drive mode: cont-hi-plus/hi/mid/lo
-    int32_t     burstDurMs = 3000;           // burst: duration ms
-
-    // Audio block params
-    std::string audioFile;
-    int32_t     audioDurMs = 10000;   // default 10 s, updated from file
-
-    // Common
-    std::string label;
-    bool        snapToPrev = false;
-};
-
-struct TLTrack {
-    int                  id       = -1;
-    std::string          type;          // "camera" | "audio"
-    std::string          cameraId;      // e.g. "ILCE-7RM4A"
-    std::string          label;         // display name
-    std::vector<TLBlock> blocks;
-
-    bool IsCamera() const { return type == "camera"; }
-    bool IsAudio()  const { return type == "audio";  }
-};
 
 // ─── Other shared structs ─────────────────────────────────────────────────────
 
@@ -103,7 +68,6 @@ private:
     void TriggerIqpFetch();
     void EnsureDefaultConfig(const std::wstring& path);
 
-    void PollCameraStatus();
     void RenderCameraSection();
     void RenderEclipseSection();
     void RenderContactTimesSection();
@@ -115,6 +79,7 @@ private:
     void RenderTimelineBottom();
     void RenderMenuBar();
     void RenderAboutModal();
+    void RenderSequencerButtons();   // TEST RUN / STOP / RUN / STOP RUN in Col1
     void ExportTimelineJson();
     void NewTimeline();
     void DeleteSelectedBlock();
@@ -122,13 +87,28 @@ private:
     static void ApplyStyleDark();
     bool m_showAbout = false;
 
+    // ── Background status thread ──────────────────────────────────────────────
+    void StartStatusThread();
+    void StopStatusThread();
+    void StatusThreadProc();
+
+    // ── GUI sequencer thread ──────────────────────────────────────────────────
+    // Sequencer mode: Idle → TestRunning ↔ TestPaused; Idle → Running
+    enum class GuiSeqMode : int { Idle, TestRunning, TestPaused, Running };
+
+    static std::string BuildBlockCmd(const TLBlock& blk, int camIdx);
+    void StartSeqThread(GuiSeqMode mode);
+    void StopSeqThread();          // pause/stop — joins thread
+    void SeqThreadProc(GuiSeqMode mode,
+                       int64_t playheadStartMs,
+                       int64_t realStartMs);
+
     PipeClient m_pipe;
 
     std::thread       m_connectThread;
     std::atomic<bool> m_connectRun{false};
 
     int         m_reconnectCountdown = 0;
-    int         m_statusCountdown    = 0;
     std::string m_lastResult;
 
     bool m_showStyleEditor = false;
@@ -153,7 +133,10 @@ private:
     std::string m_homeTzIana   = "Europe/Warsaw";
     std::string m_eclTzIana    = "Europe/Madrid";
 
-    // ── Camera status ─────────────────────────────────────────────────────────
+    // ── Camera status (written by m_statusThread, read by render thread) ──────
+    std::thread       m_statusThread;
+    std::atomic<bool> m_statusRun{false};
+    std::mutex        m_camerasMutex;        // guards m_cameras
     std::vector<CamStatus> m_cameras;
 
     // ── Eclipse selector ──────────────────────────────────────────────────────
@@ -181,18 +164,74 @@ private:
 
     // ── Timeline editor ───────────────────────────────────────────────────────
     std::vector<TLTrack> m_tracks;
+    bool                 m_tlDirty    = false;
     int                  m_selTrack    = -1;
     int                  m_selBlock    = -1;
-    int64_t              m_tlViewStart = -1;   // visible range (UTC ms)
+    int64_t              m_tlViewStart = -1;
     int64_t              m_tlViewEnd   = -1;
 
-    // Drag-to-move: mouse-drag existing blocks; release above timeline = delete
+    // Drag-to-move existing blocks
     bool    m_tlDragging    = false;
     int     m_tlDragTrack   = -1;
     int     m_tlDragBlock   = -1;
     int64_t m_tlDragStartMs = -1;
     float   m_tlDragMouseX0 = 0.f;
-    float   m_tlScreenTopY  = 0.f;  // top-Y of timeline child in screen coords
+    float   m_tlScreenTopY  = 0.f;
+
+    // ── Playhead ──────────────────────────────────────────────────────────────
+    // Written by seqThread (during run) or main thread (drag / default init).
+    // Read by render thread every frame. Atomic to avoid torn reads.
+    std::atomic<int64_t> m_tlPlayheadMs{-1};   // -1 = not yet initialised
+
+    // ── Named timeline snapshots ─────────────────────────────────────────────
+    void CreateCalibrationSnapshot();  // idempotent — skips if already exists
+    void RenderSnapshotModal();        // ImGui modal: open / save-as / delete
+
+    bool                      m_showSnapOpen   = false;   // open-timeline modal
+    bool                      m_showSnapSaveAs = false;   // save-as modal
+    std::vector<SnapshotInfo> m_snapList;
+    int                       m_snapSel        = -1;
+    char                      m_snapNameBuf[128] = {};
+
+    // ── Bracket calibration ──────────────────────────────────────────────────
+    // Per-model lookup: camModel → { (count,ev) → lat_max_ms+10 }
+    // Loaded from DB at startup; reloaded after SaveCalibFromBuf.
+    std::map<std::string,
+             std::map<std::pair<int,std::string>, int>> m_calibCache;
+
+    struct SeqCalibSample { int count = 0; std::string ev; int latMs = 0; };
+    // Samples collected during the current/last TEST RUN or RUN (Bracket only).
+    // Written by seqThread; read by main thread only after thread join.
+    std::vector<SeqCalibSample> m_seqCalibBuf;
+
+    void LoadCalibCache();                              // DB → m_calibCache
+    void SeedBuiltinCalib();                            // seed ILCE-7RM4A if absent
+    void SaveCalibFromBuf(const std::string& camModel); // buf → DB + reload cache
+
+    // BlockDurMs: member function (not static) so it can access m_calibCache.
+    // camModel = track's cameraId; empty = use first available calibration.
+    int64_t BlockDurMs(const TLBlock& b, std::string_view camModel = {}) const;
+
+    // ── Execution log ────────────────────────────────────────────────────────
+    // Sequence counter reset at each TEST RUN / RUN start.
+    // Written by main thread (StartSeqThread), incremented by seqThread.
+    // Thread-safe: thread start provides happens-before guarantee.
+    int m_execSeqNum = 0;
+
+    // ── GUI sequencer state ───────────────────────────────────────────────────
+    std::atomic<GuiSeqMode> m_guiSeqMode{GuiSeqMode::Idle};
+
+    // Per-track "next unfired block" index for up to 4 camera tracks.
+    // Written only by m_seqThread while running; read by main thread only after join.
+    static constexpr int kMaxCamTracks = 4;
+    int m_seqNextBlock[kMaxCamTracks] = {};
+
+    // Snapshot of playhead and real-time at the last Start/Resume
+    int64_t m_testPlayheadAtStart = -1;
+    int64_t m_testStartRealMs     = -1;
+
+    std::thread       m_seqThread;
+    std::atomic<bool> m_seqRun{false};
 };
 
 } // namespace TotalControl

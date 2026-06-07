@@ -1,4 +1,5 @@
 #include "BesselCalc.h"
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <numbers>
@@ -109,6 +110,9 @@ static double refineContact(const BesselianElements& e, double t0,
 
 ContactTimes CalcBesselian(const BesselianElements& e,
                            double latDeg, double lonDeg, double altM) {
+    assert(latDeg >= -90.0  && latDeg <= 90.0);    // geographic latitude
+    assert(lonDeg >= -180.0 && lonDeg <= 180.0);   // geographic longitude
+    assert(altM   > -500.0  && altM   < 9000.0);   // Dead Sea to Everest with margin
     ContactTimes result;
     result.source = ContactSource::Besselian;
 

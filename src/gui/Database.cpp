@@ -1,6 +1,7 @@
 #include "Database.h"
 #include "sqlite3.h"
 #include <windows.h>
+#include <cassert>
 #include <format>
 #include <vector>
 
@@ -18,6 +19,7 @@ static std::string WideToUtf8(const std::wstring& w) {
 // ─── Open ─────────────────────────────────────────────────────────────────────
 
 bool Database::Open(const std::wstring& path) {
+    assert(!path.empty());  // caller must supply a non-empty file path
     std::string p = WideToUtf8(path);
     if (sqlite3_open(p.c_str(), &m_db) != SQLITE_OK) {
         m_db = nullptr;
@@ -28,6 +30,7 @@ bool Database::Open(const std::wstring& path) {
 }
 
 bool Database::OpenReadOnly(const std::wstring& path) {
+    assert(!path.empty());  // caller must supply a non-empty file path
     std::string p = WideToUtf8(path);
     int rc = sqlite3_open_v2(p.c_str(), &m_db,
                               SQLITE_OPEN_READONLY, nullptr);
@@ -55,6 +58,7 @@ bool Database::Exec(std::string_view sql) {
 // ─── Settings helpers ─────────────────────────────────────────────────────────
 
 std::string Database::GetSetting(const char* key, const char* def) const {
+    assert(key != nullptr && key[0] != '\0');  // key must be a valid non-empty C string
     if (!m_db) return def ? def : "";
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(m_db,
@@ -68,6 +72,8 @@ std::string Database::GetSetting(const char* key, const char* def) const {
 }
 
 void Database::SetSetting(const char* key, const char* value) {
+    assert(key != nullptr && key[0] != '\0');  // key must be a valid non-empty C string
+    assert(value != nullptr);                  // value must not be null (use "" for empty)
     if (!m_db) return;
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(m_db,
@@ -153,6 +159,9 @@ std::vector<EclipseEntry> Database::LoadEclipses() const {
 }
 
 BesselianElements Database::LoadBesselianElements(int year, int month, int day) const {
+    assert(year  >= 1900 && year  <= 2200);  // sane eclipse calendar range
+    assert(month >= 1    && month <= 12);
+    assert(day   >= 1    && day   <= 31);
     BesselianElements b;
     if (!m_db) return b;
 
@@ -189,6 +198,513 @@ BesselianElements Database::LoadBesselianElements(int year, int month, int day) 
     }
     sqlite3_finalize(st);
     return b;
+}
+
+// ─── Timeline persistence ─────────────────────────────────────────────────────
+
+static constexpr const char* kCreateTlTracks = R"SQL(
+    CREATE TABLE IF NOT EXISTS tl_tracks (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        type       TEXT    NOT NULL DEFAULT 'camera',
+        camera_id  TEXT    NOT NULL DEFAULT '',
+        label      TEXT    NOT NULL DEFAULT ''
+    );
+)SQL";
+
+static constexpr const char* kCreateTlBlocks = R"SQL(
+    CREATE TABLE IF NOT EXISTS tl_blocks (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        track_id      INTEGER NOT NULL,
+        at_ms         INTEGER NOT NULL DEFAULT -1,
+        block_type    INTEGER NOT NULL DEFAULT 0,
+        ss            TEXT    NOT NULL DEFAULT '1/100',
+        iso           INTEGER NOT NULL DEFAULT 100,
+        fstop         TEXT    NOT NULL DEFAULT '8.0',
+        cnt           INTEGER NOT NULL DEFAULT 5,
+        ev            TEXT    NOT NULL DEFAULT '1.0ev',
+        burst_drive   TEXT    NOT NULL DEFAULT 'cont-hi-plus',
+        burst_dur_ms  INTEGER NOT NULL DEFAULT 3000,
+        audio_file    TEXT    NOT NULL DEFAULT '',
+        audio_dur_ms  INTEGER NOT NULL DEFAULT 10000,
+        label         TEXT    NOT NULL DEFAULT '',
+        snap_to_prev  INTEGER NOT NULL DEFAULT 0
+    );
+)SQL";
+
+void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
+    assert(m_db != nullptr);  // must be open before saving
+    assert(tracks.size() <= 64);  // bounded: 64 tracks is more than enough
+    if (!m_db) return;
+
+    Exec(kCreateTlTracks);
+    Exec(kCreateTlBlocks);
+
+    sqlite3_exec(m_db, "BEGIN;",                 nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db, "DELETE FROM tl_blocks;", nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db, "DELETE FROM tl_tracks;", nullptr, nullptr, nullptr);
+
+    for (int si = 0; si < static_cast<int>(tracks.size()); ++si) {
+        const TLTrack& tr = tracks[si];
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(m_db,
+            "INSERT INTO tl_tracks (sort_order, type, camera_id, label)"
+            " VALUES (?,?,?,?);",
+            -1, &st, nullptr);
+        sqlite3_bind_int (st, 1, si);
+        sqlite3_bind_text(st, 2, tr.type.c_str(),     -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 3, tr.cameraId.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 4, tr.label.c_str(),    -1, SQLITE_STATIC);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+        int64_t trackId = sqlite3_last_insert_rowid(m_db);
+
+        assert(tr.blocks.size() <= 4096);  // bounded: sensible sequence length
+        for (const TLBlock& b : tr.blocks) {
+            sqlite3_stmt* bs = nullptr;
+            sqlite3_prepare_v2(m_db,
+                "INSERT INTO tl_blocks"
+                " (track_id, at_ms, block_type, ss, iso, fstop,"
+                "  cnt, ev, burst_drive, burst_dur_ms,"
+                "  audio_file, audio_dur_ms, label, snap_to_prev)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+                -1, &bs, nullptr);
+            sqlite3_bind_int64(bs,  1, trackId);
+            sqlite3_bind_int64(bs,  2, b.atMs);
+            sqlite3_bind_int  (bs,  3, static_cast<int>(b.type));
+            sqlite3_bind_text (bs,  4, b.ss.c_str(),         -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs,  5, b.iso);
+            sqlite3_bind_text (bs,  6, b.fstop.c_str(),      -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs,  7, b.count);
+            sqlite3_bind_text (bs,  8, b.ev.c_str(),         -1, SQLITE_STATIC);
+            sqlite3_bind_text (bs,  9, b.burstDrive.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs, 10, b.burstDurMs);
+            sqlite3_bind_text (bs, 11, b.audioFile.c_str(),  -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs, 12, b.audioDurMs);
+            sqlite3_bind_text (bs, 13, b.label.c_str(),      -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs, 14, b.snapToPrev ? 1 : 0);
+            sqlite3_step(bs);
+            sqlite3_finalize(bs);
+        }
+    }
+
+    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+}
+
+std::vector<TLTrack> Database::LoadTimeline() const {
+    assert(m_db != nullptr);  // must be open before loading
+    std::vector<TLTrack> result;
+    if (!m_db) return result;
+
+    // Return empty if the table doesn't exist yet (pre-migration DB)
+    sqlite3_stmt* chk = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='tl_tracks';",
+        -1, &chk, nullptr);
+    bool exists = (sqlite3_step(chk) == SQLITE_ROW);
+    sqlite3_finalize(chk);
+    if (!exists) return result;
+
+    auto col = [](sqlite3_stmt* s, int i) -> std::string {
+        const auto* p = sqlite3_column_text(s, i);
+        return p ? reinterpret_cast<const char*>(p) : "";
+    };
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT id, type, camera_id, label FROM tl_tracks ORDER BY sort_order;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        TLTrack tr;
+        tr.id       = sqlite3_column_int64(st, 0);
+        tr.type     = col(st, 1);
+        tr.cameraId = col(st, 2);
+        tr.label    = col(st, 3);
+        result.push_back(std::move(tr));
+    }
+    sqlite3_finalize(st);
+
+    for (TLTrack& tr : result) {
+        sqlite3_stmt* bs = nullptr;
+        rc = sqlite3_prepare_v2(m_db,
+            "SELECT id, at_ms, block_type, ss, iso, fstop,"
+            "       cnt, ev, burst_drive, burst_dur_ms,"
+            "       audio_file, audio_dur_ms, label, snap_to_prev"
+            " FROM tl_blocks WHERE track_id=? ORDER BY at_ms;",
+            -1, &bs, nullptr);
+        if (rc != SQLITE_OK) continue;
+        sqlite3_bind_int64(bs, 1, tr.id);
+
+        while (sqlite3_step(bs) == SQLITE_ROW) {
+            TLBlock b;
+            b.id         = sqlite3_column_int64(bs, 0);
+            b.atMs       = sqlite3_column_int64(bs, 1);
+            b.type       = static_cast<BlockType>(sqlite3_column_int(bs, 2));
+            b.ss         = col(bs, 3);
+            b.iso        = sqlite3_column_int(bs, 4);
+            b.fstop      = col(bs, 5);
+            b.count      = sqlite3_column_int(bs, 6);
+            b.ev         = col(bs, 7);
+            b.burstDrive = col(bs, 8);
+            b.burstDurMs = sqlite3_column_int(bs, 9);
+            b.audioFile  = col(bs, 10);
+            b.audioDurMs = sqlite3_column_int(bs, 11);
+            b.label      = col(bs, 12);
+            b.snapToPrev = sqlite3_column_int(bs, 13) != 0;
+            tr.blocks.push_back(std::move(b));
+        }
+        sqlite3_finalize(bs);
+    }
+
+    return result;
+}
+
+// ─── Named snapshots ─────────────────────────────────────────────────────────
+
+static constexpr const char* kCreateSnapshots = R"SQL(
+    CREATE TABLE IF NOT EXISTS tl_snapshots (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT    NOT NULL UNIQUE,
+        created_ms INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS tl_snap_tracks (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        snapshot_id INTEGER NOT NULL,
+        sort_order  INTEGER NOT NULL DEFAULT 0,
+        type        TEXT    NOT NULL DEFAULT 'camera',
+        camera_id   TEXT    NOT NULL DEFAULT '',
+        label       TEXT    NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS tl_snap_blocks (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        track_id     INTEGER NOT NULL,
+        at_ms        INTEGER NOT NULL DEFAULT -1,
+        block_type   INTEGER NOT NULL DEFAULT 0,
+        ss           TEXT    NOT NULL DEFAULT '1/100',
+        iso          INTEGER NOT NULL DEFAULT 100,
+        fstop        TEXT    NOT NULL DEFAULT '8.0',
+        cnt          INTEGER NOT NULL DEFAULT 5,
+        ev           TEXT    NOT NULL DEFAULT '1.0ev',
+        burst_drive  TEXT    NOT NULL DEFAULT 'cont-hi-plus',
+        burst_dur_ms INTEGER NOT NULL DEFAULT 3000,
+        audio_file   TEXT    NOT NULL DEFAULT '',
+        audio_dur_ms INTEGER NOT NULL DEFAULT 10000,
+        label        TEXT    NOT NULL DEFAULT '',
+        snap_to_prev INTEGER NOT NULL DEFAULT 0
+    );
+)SQL";
+
+void Database::CreateSnapshotTables() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateSnapshots);
+}
+
+void Database::SaveSnapshot(const std::string& name,
+                            const std::vector<TLTrack>& tracks) {
+    assert(m_db != nullptr);
+    assert(!name.empty());    // snapshot name must be non-empty
+    assert(tracks.size() <= 64);
+
+    // Get current UTC ms via POSIX time (DB-level helper; App owns the clock)
+    FILETIME ft; GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER ui; ui.LowPart = ft.dwLowDateTime; ui.HighPart = ft.dwHighDateTime;
+    int64_t nowMs = static_cast<int64_t>(ui.QuadPart / 10000) - 11644473600000LL;
+
+    sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
+
+    // Remove old snapshot with the same name (overwrite semantics)
+    sqlite3_stmt* del = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "DELETE FROM tl_snap_blocks WHERE track_id IN"
+        " (SELECT id FROM tl_snap_tracks WHERE snapshot_id ="
+        "  (SELECT id FROM tl_snapshots WHERE name=?));",
+        -1, &del, nullptr);
+    sqlite3_bind_text(del, 1, name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_step(del); sqlite3_finalize(del);
+
+    sqlite3_stmt* del2 = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "DELETE FROM tl_snap_tracks WHERE snapshot_id ="
+        " (SELECT id FROM tl_snapshots WHERE name=?);",
+        -1, &del2, nullptr);
+    sqlite3_bind_text(del2, 1, name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_step(del2); sqlite3_finalize(del2);
+
+    sqlite3_stmt* del3 = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "DELETE FROM tl_snapshots WHERE name=?;",
+        -1, &del3, nullptr);
+    sqlite3_bind_text(del3, 1, name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_step(del3); sqlite3_finalize(del3);
+
+    // Insert snapshot header
+    sqlite3_stmt* si = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "INSERT INTO tl_snapshots (name, created_ms) VALUES (?,?);",
+        -1, &si, nullptr);
+    sqlite3_bind_text (si, 1, name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(si, 2, nowMs);
+    sqlite3_step(si); sqlite3_finalize(si);
+    int64_t snapId = sqlite3_last_insert_rowid(m_db);
+
+    for (int si2 = 0; si2 < static_cast<int>(tracks.size()); ++si2) {
+        const TLTrack& tr = tracks[si2];
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(m_db,
+            "INSERT INTO tl_snap_tracks (snapshot_id,sort_order,type,camera_id,label)"
+            " VALUES (?,?,?,?,?);",
+            -1, &st, nullptr);
+        sqlite3_bind_int64(st, 1, snapId);
+        sqlite3_bind_int  (st, 2, si2);
+        sqlite3_bind_text (st, 3, tr.type.c_str(),     -1, SQLITE_STATIC);
+        sqlite3_bind_text (st, 4, tr.cameraId.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text (st, 5, tr.label.c_str(),    -1, SQLITE_STATIC);
+        sqlite3_step(st); sqlite3_finalize(st);
+        int64_t trackId = sqlite3_last_insert_rowid(m_db);
+
+        assert(tr.blocks.size() <= 4096);
+        for (const TLBlock& b : tr.blocks) {
+            sqlite3_stmt* bs = nullptr;
+            sqlite3_prepare_v2(m_db,
+                "INSERT INTO tl_snap_blocks"
+                " (track_id,at_ms,block_type,ss,iso,fstop,cnt,ev,"
+                "  burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+                -1, &bs, nullptr);
+            sqlite3_bind_int64(bs,  1, trackId);
+            sqlite3_bind_int64(bs,  2, b.atMs);
+            sqlite3_bind_int  (bs,  3, static_cast<int>(b.type));
+            sqlite3_bind_text (bs,  4, b.ss.c_str(),         -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs,  5, b.iso);
+            sqlite3_bind_text (bs,  6, b.fstop.c_str(),      -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs,  7, b.count);
+            sqlite3_bind_text (bs,  8, b.ev.c_str(),         -1, SQLITE_STATIC);
+            sqlite3_bind_text (bs,  9, b.burstDrive.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs, 10, b.burstDurMs);
+            sqlite3_bind_text (bs, 11, b.audioFile.c_str(),  -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs, 12, b.audioDurMs);
+            sqlite3_bind_text (bs, 13, b.label.c_str(),      -1, SQLITE_STATIC);
+            sqlite3_bind_int  (bs, 14, b.snapToPrev ? 1 : 0);
+            sqlite3_step(bs); sqlite3_finalize(bs);
+        }
+    }
+
+    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+}
+
+std::vector<SnapshotInfo> Database::LoadSnapshotList() const {
+    assert(m_db != nullptr);  // DB must be open to list snapshots
+    std::vector<SnapshotInfo> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT id, name, created_ms FROM tl_snapshots ORDER BY created_ms DESC;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        SnapshotInfo s;
+        s.id        = sqlite3_column_int64(st, 0);
+        const auto* p = sqlite3_column_text(st, 1);
+        s.name      = p ? reinterpret_cast<const char*>(p) : "";
+        s.createdMs = sqlite3_column_int64(st, 2);
+        result.push_back(std::move(s));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
+std::vector<TLTrack> Database::LoadSnapshot(int64_t id) const {
+    assert(m_db != nullptr);  // DB must be open to load snapshot
+    assert(id > 0);
+    std::vector<TLTrack> result;
+    if (!m_db) return result;
+
+    auto col = [](sqlite3_stmt* s, int i) -> std::string {
+        const auto* p = sqlite3_column_text(s, i);
+        return p ? reinterpret_cast<const char*>(p) : "";
+    };
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT id, type, camera_id, label FROM tl_snap_tracks"
+        " WHERE snapshot_id=? ORDER BY sort_order;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    sqlite3_bind_int64(st, 1, id);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        TLTrack tr;
+        tr.id       = sqlite3_column_int64(st, 0);
+        tr.type     = col(st, 1);
+        tr.cameraId = col(st, 2);
+        tr.label    = col(st, 3);
+        result.push_back(std::move(tr));
+    }
+    sqlite3_finalize(st);
+
+    for (TLTrack& tr : result) {
+        sqlite3_stmt* bs = nullptr;
+        rc = sqlite3_prepare_v2(m_db,
+            "SELECT at_ms,block_type,ss,iso,fstop,cnt,ev,"
+            "       burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev"
+            " FROM tl_snap_blocks WHERE track_id=? ORDER BY at_ms;",
+            -1, &bs, nullptr);
+        if (rc != SQLITE_OK) continue;
+        sqlite3_bind_int64(bs, 1, tr.id);
+        while (sqlite3_step(bs) == SQLITE_ROW) {
+            TLBlock b;
+            b.atMs       = sqlite3_column_int64(bs, 0);
+            b.type       = static_cast<BlockType>(sqlite3_column_int(bs, 1));
+            b.ss         = col(bs, 2);
+            b.iso        = sqlite3_column_int(bs, 3);
+            b.fstop      = col(bs, 4);
+            b.count      = sqlite3_column_int(bs, 5);
+            b.ev         = col(bs, 6);
+            b.burstDrive = col(bs, 7);
+            b.burstDurMs = sqlite3_column_int(bs, 8);
+            b.audioFile  = col(bs, 9);
+            b.audioDurMs = sqlite3_column_int(bs, 10);
+            b.label      = col(bs, 11);
+            b.snapToPrev = sqlite3_column_int(bs, 12) != 0;
+            tr.blocks.push_back(std::move(b));
+        }
+        sqlite3_finalize(bs);
+    }
+    return result;
+}
+
+bool Database::SnapshotExists(const std::string& name) const {
+    assert(m_db != nullptr);
+    assert(!name.empty());
+    if (!m_db) return false;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "SELECT 1 FROM tl_snapshots WHERE name=? LIMIT 1;",
+        -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, name.c_str(), -1, SQLITE_STATIC);
+    bool found = (sqlite3_step(st) == SQLITE_ROW);
+    sqlite3_finalize(st);
+    return found;
+}
+
+void Database::DeleteSnapshot(int64_t id) {
+    assert(m_db != nullptr);
+    assert(id > 0);
+    sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
+    // cascade delete blocks → tracks → header
+    auto exec1 = [&](const char* sql) {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(m_db, sql, -1, &st, nullptr);
+        sqlite3_bind_int64(st, 1, id);
+        sqlite3_step(st); sqlite3_finalize(st);
+    };
+    exec1("DELETE FROM tl_snap_blocks WHERE track_id IN"
+          " (SELECT id FROM tl_snap_tracks WHERE snapshot_id=?);");
+    exec1("DELETE FROM tl_snap_tracks WHERE snapshot_id=?;");
+    exec1("DELETE FROM tl_snapshots WHERE id=?;");
+    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+}
+
+// ─── Bracket calibration ─────────────────────────────────────────────────────
+
+static constexpr const char* kCreateCalib = R"SQL(
+    CREATE TABLE IF NOT EXISTS bracket_calibration (
+        cam_model   TEXT    NOT NULL,
+        count       INTEGER NOT NULL,
+        ev          TEXT    NOT NULL,
+        lat_max_ms  INTEGER NOT NULL,
+        lat_avg_ms  INTEGER NOT NULL,
+        lat_min_ms  INTEGER NOT NULL,
+        reps        INTEGER NOT NULL DEFAULT 3,
+        ss          TEXT    NOT NULL DEFAULT '1/100',
+        created_ms  INTEGER NOT NULL,
+        PRIMARY KEY (cam_model, count, ev)
+    );
+)SQL";
+
+void Database::CreateCalibTables() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateCalib);
+}
+
+void Database::SaveCalibData(const std::vector<BktCalibEntry>& entries) {
+    assert(m_db != nullptr);
+    assert(entries.size() <= 1024);  // bounded: no camera has >1024 bracket combos
+    if (!m_db || entries.empty()) return;
+    sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
+    for (const auto& e : entries) {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(m_db,
+            "INSERT OR REPLACE INTO bracket_calibration"
+            " (cam_model,count,ev,lat_max_ms,lat_avg_ms,lat_min_ms,reps,ss,created_ms)"
+            " VALUES (?,?,?,?,?,?,?,?,?);",
+            -1, &st, nullptr);
+        sqlite3_bind_text (st, 1, e.camModel.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int  (st, 2, e.count);
+        sqlite3_bind_text (st, 3, e.ev.c_str(),       -1, SQLITE_STATIC);
+        sqlite3_bind_int  (st, 4, e.latMaxMs);
+        sqlite3_bind_int  (st, 5, e.latAvgMs);
+        sqlite3_bind_int  (st, 6, e.latMinMs);
+        sqlite3_bind_int  (st, 7, e.reps);
+        sqlite3_bind_text (st, 8, e.ss.c_str(),       -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 9, e.createdMs);
+        sqlite3_step(st); sqlite3_finalize(st);
+    }
+    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+}
+
+std::vector<BktCalibEntry> Database::LoadCalibData(const std::string& camModel) const {
+    assert(m_db != nullptr);  // DB must be open to load calibration
+    assert(!camModel.empty());
+    std::vector<BktCalibEntry> result;
+    if (!m_db) return result;
+
+    auto col = [](sqlite3_stmt* s, int i) -> std::string {
+        const auto* p = sqlite3_column_text(s, i);
+        return p ? reinterpret_cast<const char*>(p) : "";
+    };
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT count,ev,lat_max_ms,lat_avg_ms,lat_min_ms,reps,ss,created_ms"
+        " FROM bracket_calibration WHERE cam_model=?"
+        " ORDER BY count, ev;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    sqlite3_bind_text(st, 1, camModel.c_str(), -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        BktCalibEntry e;
+        e.camModel  = camModel;
+        e.count     = sqlite3_column_int  (st, 0);
+        e.ev        = col(st, 1);
+        e.latMaxMs  = sqlite3_column_int  (st, 2);
+        e.latAvgMs  = sqlite3_column_int  (st, 3);
+        e.latMinMs  = sqlite3_column_int  (st, 4);
+        e.reps      = sqlite3_column_int  (st, 5);
+        e.ss        = col(st, 6);
+        e.createdMs = sqlite3_column_int64(st, 7);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
+std::vector<std::string> Database::LoadCalibModels() const {
+    assert(m_db != nullptr);  // DB must be open to list models
+    std::vector<std::string> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT DISTINCT cam_model FROM bracket_calibration ORDER BY cam_model;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const auto* p = sqlite3_column_text(st, 0);
+        if (p) result.push_back(reinterpret_cast<const char*>(p));
+    }
+    sqlite3_finalize(st);
+    return result;
 }
 
 } // namespace TotalControl

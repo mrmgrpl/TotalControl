@@ -1,5 +1,7 @@
 #include "PipeServer.h"
+#include <cassert>
 #include <string>
+#include <thread>
 
 namespace TotalControl {
 
@@ -11,7 +13,6 @@ PipeServer::PipeServer(const wchar_t* pipeName, PipeHandlerFn handler)
     : m_pipeName(pipeName), m_handler(std::move(handler))
 {
     m_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    // m_stopEvent == nullptr signals error — Stop() and Run() guard against INVALID_HANDLE_VALUE
 }
 
 PipeServer::~PipeServer() {
@@ -26,27 +27,30 @@ void PipeServer::Stop() {
         SetEvent(m_stopEvent);
 }
 
+// ── Accept loop ───────────────────────────────────────────────────────────────
+// Creates a new pipe instance, waits for a client, then spawns ServeClient in a
+// detached thread and immediately loops back to accept the next client.
 void PipeServer::Run() {
-    if (m_pipeName.empty())                      return;
-    if (m_stopEvent == INVALID_HANDLE_VALUE)     return;
-    if (m_stopEvent == nullptr)                  return;
+    assert(!m_pipeName.empty());
+    assert(m_stopEvent != INVALID_HANDLE_VALUE && m_stopEvent != nullptr);
+
+    if (m_pipeName.empty())                    return;
+    if (m_stopEvent == INVALID_HANDLE_VALUE)   return;
+    if (m_stopEvent == nullptr)                return;
 
     while (m_running) {
         HANDLE pipe = CreateNamedPipeW(
             m_pipeName.c_str(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1, 4096, 4096, 0, nullptr);
+            PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, nullptr);
 
         if (pipe == INVALID_HANDLE_VALUE) break;
 
-        // Wait for a client connection or stop signal
         OVERLAPPED ov = {};
         ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (ov.hEvent == nullptr) {
-            CloseHandle(pipe);
-            break;
-        }
+        if (ov.hEvent == nullptr) { CloseHandle(pipe); break; }
+
         ConnectNamedPipe(pipe, &ov);
 
         HANDLE handles[2] = { ov.hEvent, m_stopEvent };
@@ -54,62 +58,75 @@ void PipeServer::Run() {
         CloseHandle(ov.hEvent);
 
         if (wr != WAIT_OBJECT_0) {
+            // Stop signal or error — discard pipe and exit accept loop
             DisconnectNamedPipe(pipe);
             CloseHandle(pipe);
             break;
         }
 
-        // Serve all requests on this connection until client disconnects or quit
-        bool quitRequested = false;
-        while (!quitRequested) {
-            // Read one JSON line (up to '\n') capped at kMaxLineBytes
-            std::string buf;
-            buf.reserve(256);
-            char ch = '\0';
-            DWORD nRead = 0;
-            bool clientAlive = false;
-            while (buf.size() < kMaxLineBytes &&
-                   ReadFile(pipe, &ch, 1, &nRead, nullptr) && nRead == 1) {
-                clientAlive = true;
-                if (ch == '\n') break;
-                if (ch != '\r') buf += ch;
-            }
-            if (!clientAlive || buf.empty()) break; // client disconnected
+        // Client connected — hand off to a worker thread and loop back immediately
+        std::thread([this, pipe]() { ServeClient(pipe); }).detach();
+    }
+}
 
-            // UTF-8 → wide
-            const int wlen = MultiByteToWideChar(CP_UTF8, 0, buf.c_str(), -1, nullptr, 0);
-            std::wstring req(wlen > 0 ? static_cast<size_t>(wlen - 1) : 0U, L'\0');
-            if (wlen > 1)
-                MultiByteToWideChar(CP_UTF8, 0, buf.c_str(), -1, req.data(), wlen);
+// ── Client handler (runs in detached worker thread) ───────────────────────────
+// Reads JSON Lines from pipe, invokes handler under m_handlerMtx (serialised),
+// writes JSON response. Exits when client disconnects or handler returns false.
+void PipeServer::ServeClient(HANDLE pipe) {
+    assert(pipe != INVALID_HANDLE_VALUE);
+    assert(pipe != nullptr);
 
-            // Invoke handler
-            std::wstring resp;
-            const bool continueRunning = m_handler(req, resp);
+    while (m_running) {
+        // Read one JSON line (up to '\n') capped at kMaxLineBytes
+        std::string buf;
+        buf.reserve(256);
+        char   ch       = '\0';
+        DWORD  nRead    = 0;
+        bool   gotData  = false;
 
-            // Wide → UTF-8 + '\n'
-            const int ulen = WideCharToMultiByte(
-                CP_UTF8, 0, resp.c_str(), -1, nullptr, 0, nullptr, nullptr);
-            std::string respU8(ulen > 0 ? static_cast<size_t>(ulen - 1) : 0U, '\0');
-            if (ulen > 1)
-                WideCharToMultiByte(CP_UTF8, 0, resp.c_str(), -1, respU8.data(), ulen,
-                                    nullptr, nullptr);
-            respU8 += '\n';
+        // Bounded by kMaxLineBytes — NASA rule 2
+        while (buf.size() < kMaxLineBytes &&
+               ReadFile(pipe, &ch, 1, &nRead, nullptr) && nRead == 1) {
+            gotData = true;
+            if (ch == '\n') break;
+            if (ch != '\r') buf += ch;
+        }
+        if (!gotData || buf.empty()) break; // client disconnected
 
-            DWORD written = 0;
-            if (!WriteFile(pipe, respU8.c_str(), static_cast<DWORD>(respU8.size()),
-                           &written, nullptr)) {
-                break; // client disconnected during write
-            }
+        // UTF-8 → wide
+        const int wlen = MultiByteToWideChar(CP_UTF8, 0, buf.c_str(), -1, nullptr, 0);
+        std::wstring req(wlen > 0 ? static_cast<size_t>(wlen - 1) : 0U, L'\0');
+        if (wlen > 1)
+            MultiByteToWideChar(CP_UTF8, 0, buf.c_str(), -1, req.data(), wlen);
 
-            if (!continueRunning) { quitRequested = true; }
+        // Invoke handler — serialised across all client threads
+        std::wstring resp;
+        bool continueRunning = true;
+        {
+            std::lock_guard lk(m_handlerMtx);
+            continueRunning = m_handler(req, resp);
         }
 
-        FlushFileBuffers(pipe);
-        DisconnectNamedPipe(pipe);
-        CloseHandle(pipe);
+        // Wide → UTF-8 + '\n'
+        const int ulen = WideCharToMultiByte(
+            CP_UTF8, 0, resp.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string respU8(ulen > 0 ? static_cast<size_t>(ulen - 1) : 0U, '\0');
+        if (ulen > 1)
+            WideCharToMultiByte(CP_UTF8, 0, resp.c_str(), -1,
+                                respU8.data(), ulen, nullptr, nullptr);
+        respU8 += '\n';
 
-        if (quitRequested) break;
+        DWORD written = 0;
+        if (!WriteFile(pipe, respU8.c_str(),
+                       static_cast<DWORD>(respU8.size()), &written, nullptr))
+            break; // client disconnected during write
+
+        if (!continueRunning) break; // handler requested quit (e.g. "quit" command)
     }
+
+    FlushFileBuffers(pipe);
+    DisconnectNamedPipe(pipe);
+    CloseHandle(pipe);
 }
 
 } // namespace TotalControl

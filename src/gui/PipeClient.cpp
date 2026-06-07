@@ -1,4 +1,5 @@
 #include "PipeClient.h"
+#include <cassert>
 
 namespace TotalControl {
 
@@ -58,6 +59,8 @@ void PipeClient::Disconnect() {
 
 std::expected<std::string, PipeError>
 PipeClient::SendRequest(std::string_view request) {
+    assert(!request.empty());         // caller must not send an empty JSON command
+    assert(request.size() < 65536);   // sanity: no single command should approach 64 KiB
     std::lock_guard lk(m_pipeMutex);
 
     if (m_pipe == INVALID_HANDLE_VALUE)

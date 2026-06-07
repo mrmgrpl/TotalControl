@@ -663,7 +663,9 @@ int wmain(int argc, wchar_t* argv[]) {
             printf("Ctrl+C = exit monitor (sequence continues in background)\n");
             if (logging) Log("INF: MONITOR START  total=" + total);
 
-            while (true) {
+            // Upper bound: 4 h × 10 polls/s — covers C1→C4 of any eclipse on record.
+            static constexpr int kMaxMonitorIter = 144000;
+            for (int monIter = 0; monIter < kMaxMonitorIter; ++monIter) {
                 Sleep(100);
 
                 HANDLE mp = TryOpenPipe();

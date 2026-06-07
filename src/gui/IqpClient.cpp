@@ -1,5 +1,6 @@
 #include "IqpClient.h"
 #include <windows.h>
+#include <cassert>
 #include <winhttp.h>
 #include <chrono>
 #include <cstdio>
@@ -402,6 +403,12 @@ static std::string BuildPath(const std::string& eclipseId, double lat, double lo
 ContactTimes FetchContactTimes(const std::string& eclipseId,
                                double lat, double lon,
                                int year, int month, int day) {
+    assert(!eclipseId.empty());              // caller must supply a valid eclipse ID
+    assert(lat   >= -90.0  && lat  <= 90.0);
+    assert(lon   >= -180.0 && lon  <= 180.0);
+    assert(year  >= 1900   && year <= 2200);
+    assert(month >= 1      && month <= 12);
+    assert(day   >= 1      && day  <= 31);
     ContactTimes result;
 
     {

@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # TotalControl — project context for Claude
 
 ## Project goal
@@ -7,7 +11,7 @@ Operational goal: autonomous execution of an exposure bracket sequence during th
 
 ## Build
 
-**Requirements:** CMake 3.20+, MSVC (Visual Studio 2026 / VS 18), Windows 10+
+**Requirements:** CMake 4.3.3+, MSVC (Visual Studio 2026 / VS 18), Windows 10+
 
 ```
 # Configure (once, or after CMakeLists.txt changes):
@@ -25,9 +29,9 @@ VS Developer Prompt: `C:\Program Files\Microsoft Visual Studio\18\Community\Comm
 If link is blocked by a running SRV: first run `TotalControlCLI quit`, then build.
 
 Executables land in `out/build/x64-Debug/`.  
-Post-build copies CrSDK DLLs + `CrAdapter/` next to SRV, and CLI next to SRV.
+Post-build copies CrSDK DLLs + `CrAdapter/` next to SRV, CLI next to SRV, GUI next to SRV, and `TotalControlData.db` next to SRV.
 
-**CrSDK** is in `external/CrSDK/{include,lib,bin}`. CMake verifies the presence of key files — missing SDK = FATAL_ERROR.
+**CrSDK** is in `external/CrSDK/{include,lib,bin}`. CMake verifies `Cr_Core.dll`, `Cr_Core.lib`, `CameraRemote_SDK.h`, `IDeviceCallback.h`, and all four CrAdapter transport DLLs (`Cr_PTP_IP.dll`, `Cr_PTP_USB.dll`, `libusb-1.0.dll`, `libssh2.dll`) — any missing file = FATAL_ERROR at configure time.
 
 ## Architecture
 
@@ -41,6 +45,14 @@ src/
     CommandHandler.cpp       # dispatcher: shoot/bracket/status/get/set/seq_*/...
   cli/
     main.cpp                 # TotalControlCLI — thin pipe client
+  gui/
+    main_gui.cpp             # WinMain: D3D11 device + ImGui setup + message loop
+    App.h / App.cpp          # all GUI logic: columns, timeline, camera polling, eclipse calc
+    PipeClient.h/.cpp        # synchronous JSON-Lines pipe client (thread-safe)
+    Database.h/.cpp          # SQLite3 wrapper (Open/Exec/GetSetting/SetSetting)
+    IqpClient.h/.cpp         # WinHTTP GET to maps.besselianelements.com + key-refresh
+    BesselCalc.h/.cpp        # C1/C2/Max/C3/C4 from NASA Besselian elements
+    TzEntry.h / EclipseEntry.h / Timezones.h   # data structs for DB rows
   visualization/             # stubs: Renderer3D, Overlay2D, CameraPreview
 
 include/
@@ -53,16 +65,80 @@ sequences/                   # JSON sequence files
   eclipse2026_900mm_f10.json       # production: 900mm f/10 inner corona (Earthshine ISO=400)
   test_sequence.json               # test sequence; C1=2026-08-12T12:00:00Z; run with --test C1=...
 
+data/
+  TotalControlData.db        # read-only: 11 898 eclipses (Besselian elements), 598 IANA timezones
+
 docs/
   solar_eclipse_exposure_model.md  # NASA/Espenak formula, Q-values, Python/C++ calculator
 
-external/CrSDK/              # Sony SDK — do not modify
+external/
+  CrSDK/                     # Sony SDK — do not modify
+  imgui/                     # Dear ImGui (Win32 + DX11 backends) — built as static lib
+  sqlite/                    # SQLite3 amalgamation — built as static lib
 ```
 
 ### Key SDK isolation rule
 
 All `#include "CameraRemote_SDK.h"` **exclusively in `CameraController.cpp`**.  
 `CameraController.h` is clean — forward-declares `namespace SCRSDK`.
+
+## GUI architecture (TotalControlGUI)
+
+### Rendering stack
+
+`main_gui.cpp` owns D3D11 device + swap chain + ImGui init. Every frame: `ImGui_ImplDX11_NewFrame` → `app.OnFrame()` → `ImGui::Render` → `Present(1, 0)` (vsync).
+
+### Layout (App::OnFrame)
+
+`OnFrame()` renders a single full-screen host window (`##host`) below the main menu bar:
+
+```
+┌─ Menu bar ─────────────────────────────────────────────────────────────────┐
+├─ Col1: Hardware ─┬─ Col2: Eclipse ──┬─ Status (auto) ─┬─ Inspector (200) ─┤
+│ 200px            │ 400px            │ remaining width  │                    │
+│ TIME             │ ECLIPSE          │ IQP status msg   │ INSPECTOR          │
+│ CONNECTION       │ CONTACTS         │ last pipe result │ (selected block)   │
+│ CAMERA STATUS    │                  │                  │ SS/ISO/f/bracket/  │
+│                  │                  │                  │ burst params       │
+├──────────────────┴──────────────────┴──────────────────┴────────────────────┤
+│ Timeline (full width, 380px)                                                 │
+│  ruler / phase markers / GE/C1–C4 markers / track rows / drag-to-move       │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Timeline data model
+
+```cpp
+enum class BlockType { Single, Burst, Bracket, Audio };
+
+struct TLBlock {
+    BlockType type;
+    int64_t   atMs;       // absolute UTC ms (timeline position)
+    // Camera: ss, iso, fstop, count, ev, burstDrive, burstDurMs
+    // Audio:  audioFile, audioDurMs
+    bool      snapToPrev; // snap start to end of previous block
+};
+
+struct TLTrack {
+    std::string type;     // "camera" | "audio"
+    std::string cameraId; // e.g. "ILCE-7RM4A"
+    std::vector<TLBlock> blocks;
+};
+```
+
+`App::ExportTimelineJson()` serialises tracks/blocks to a sequence JSON file (same format as `sequences/*.json`), which can then be fed to `TotalControlCLI seq_start`.
+
+`BlockDurMs()` computes block duration from SS + overhead (kCamOverheadMs = 350ms measured USB latency). Used both for Inspector display and timeline rendering.
+
+### Three SQLite databases (next to exe)
+
+- `TotalControlDefaultConfig.db` — factory defaults, created by app on first run
+- `TotalControlConfig.db` — active user config; keys: `show_home_clock`, `home_tz_iana`, `ecl_tz_iana`, `obs_lat`, `obs_lon`, `obs_alt_m`, `iqp_api_key`
+- `TotalControlData.db` — read-only: 11 898 eclipses (Besselian elements), 598 IANA timezones (source: `data/TotalControlData.db`, copied by CMake post-build)
+
+### GUI log
+
+`TotalControlGUI.log` — next to exe, append mode. `App::LogLine()` is mutex-protected; safe to call from background IQP thread.
 
 ## Property cache (m_propSetCache)
 
@@ -137,7 +213,31 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=2026-08-12T12:0
 TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 ```
 
-**IMPORTANT:** `--test C2 now` with the production sequence (August 2026) gives `offset = +15 s` — it does NOT shift steps to the present; steps still wait until August 2026. Use `--test C2=2026-08-12T20:29:02.100Z` (which gives a large negative difference of ~−77 days) to actually test the sequence right now.
+**IMPORTANT:** `--test C2=now` with the production sequence (August 2026) gives `offset = +15 s` — it does NOT shift steps to the present; steps still wait until August 2026. Use `--test C2=2026-08-12T20:29:02.100Z` (which gives a large negative difference of ~−77 days) to actually test the sequence right now.
+
+## NASA Power of Ten — coding rules
+
+Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rules apply; violation requires explicit justification in a comment.
+
+1. **Simple control flow.** No `goto`, no `setjmp`/`longjmp`, no direct or indirect recursion. Use iteration; if recursion seems necessary, convert to an explicit stack.
+
+2. **Bounded loops.** Every loop must have a statically provable upper bound. Add a compile-time constant or `assert` to make the bound explicit; an unbounded spin loop is a defect.
+
+3. **No dynamic allocation after init.** Heap allocation is allowed during startup (constructors, `OnInit()`). After the camera is connected and the sequencer is running, no `new`/`delete`/`malloc`/`free`. Use `std::array`, pre-allocated `std::vector`, or stack objects.
+
+4. **Function length: max 600 lines.** Every function should remain within 600 lines. If a function exceeds this, extract a named helper. Long render blocks like `OnFrame()` / `RenderTimelineBottom()` should be split into focused `Render*()` methods.
+
+5. **Minimum two assertions per function.** Use `assert()` to guard preconditions and postconditions. In release-critical paths use `static_assert` for compile-time invariants. Assertions document intent and catch logic errors early.
+
+6. **Minimal scope for data.** Declare variables at the innermost scope where they are used. Prefer local variables over member variables; prefer member variables over globals. The only file-scope state in GUI code is D3D11 device globals in `main_gui.cpp`.
+
+7. **Check all return values.** Every non-`void` return value must be checked. `std::expected<T,E>` results tagged `[[nodiscard]]` must not be silently discarded — use `(void)` only with an explicit comment explaining why the error is intentionally ignored.
+
+8. **Preprocessor limited to includes and simple constants.** No token pasting, no variadic macros, no recursive macros. Prefer `constexpr`, `enum class`, and templates over `#define`. CrSDK headers are exempt (third-party).
+
+9. **Restrict pointer use.** Maximum one level of indirection per expression. Prefer references and `std::span` over raw pointers. No function pointers — use `std::function` or template parameters. Raw pointers to CrSDK objects (`ICrCameraObjectInfo*`) are exempt where the SDK requires them.
+
+10. **Zero-warning build, static analysis daily.** All project code compiles clean under `/W4 /WX`. Third-party code (CrSDK, ImGui, SQLite) is isolated via `target_include_directories(... SYSTEM PRIVATE ...)` which suppresses warnings from external headers. Run the MSVC static analyser (`/analyze`) before every non-trivial commit; address or explicitly suppress every finding with a rationale comment.
 
 ## Code conventions
 
@@ -146,14 +246,16 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 - Flags: `/W4 /WX /MP /utf-8`
 - Use `std::expected<T,E>` for error propagation, `std::format` for string building
 - `(void)expr` required when discarding `[[nodiscard]]` `std::expected` results
+- JSON parsing in both SRV and GUI uses hand-written mini-parsers (no external library)
 
 ## Logging
 
 - `TotalControlSRV.log` — daemon, next to exe, truncated on start
 - `TotalControlCLI.log` — CLI, next to exe, append mode; disable with: `--nolog`
+- `TotalControlGUI.log` — GUI, next to exe, append mode
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Current status (2026-05-31)
+## Current status (2026-06-07)
 
 | Module | Status |
 |---|---|
@@ -171,9 +273,11 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 | sequences/ | eclipse2026_{240mm_f56,900mm_f10}.json — production TSE 2026 |
 | docs/ | solar_eclipse_exposure_model.md |
 | Renderer3D / Overlay2D / CameraPreview | Empty stubs |
-| **TotalControlGUI Phase 0–2b** | **DONE — see details below** |
+| **TotalControlGUI Phase 0–2b** | **DONE** |
+| **TotalControlGUI Phase 3a–3c** | **DONE** |
+| **TotalControlGUI Phase 3d** | **IN PROGRESS — ARM dedup + timeline viz** |
 
-### TotalControlGUI — Phase 2b complete (2026-05-31)
+### TotalControlGUI — Phase 2b (complete)
 
 **Column 1 — Hardware (200px):**
 - **TIME**: UTC HH:MM:SS.mmm + Home TZ + Local/Eclipse TZ (598 IANA zones, DST); settings in SQLite; GE/C1–C4 countdown
@@ -190,14 +294,73 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 - `TotalControlConfig.db` — active user config; keys: show_home_clock, home_tz_iana, ecl_tz_iana, obs_lat, obs_lon, obs_alt_m, iqp_api_key
 - `TotalControlData.db` — read-only: 11 898 eclipses (Besselian elements), 598 IANA timezones
 
-**New modules (Phase 2b):**
-- `IqpClient.h/.cpp` — WinHTTP GET to maps.besselianelements.com; auto key-refresh from page JS; SetIqpLogger() for diagnostics
-- `BesselCalc.h/.cpp` — C1/C2/Max/C3/C4 from NASA Besselian elements (Meeus/Miller algorithm, Newton iteration)
-- `Database::LoadBesselianElements()` — loads all polynomial coefficients from TotalControlData.db
+### TotalControlGUI — Phase 3a–3c (complete)
 
-**Next: Phase 3** — Shoot panel, Sequencer panel, Timeline
+- Full dark theme (`ApplyStyleDark()` — 58 colour tokens)
+- Main menu bar: File (New/Export JSON), View, Help/About
+- Inspector column: SS/ISO/f-stop per block; bracket combo (16 modes matching CrSDK); burst drive (HI+/HI/MID/LO) + duration
+- Timeline bottom (380px): ruler with UTC ticks, eclipse phase markers (C1–C4/GE), track rows, drag-to-move blocks, Delete key removes selected block, Ctrl+D duplicates
+- `ExportTimelineJson()`: saves TLTrack/TLBlock data as sequences/*.json via OPENFILENAME dialog
+- `SaveTimeline()` / `LoadTimeline()` — `tl_tracks` + `tl_blocks` tables in `TotalControlConfig.db`; `m_tlDirty` flag triggers auto-save each frame
 
-### Known pitfalls in IqpClient (maps.besselianelements.com API)
+### TotalControlGUI — Phase 3d (in progress)
+
+**PipeServer multi-client** (`PIPE_UNLIMITED_INSTANCES`):
+- `Run()` spawns a detached `std::thread` per accepted client
+- `ServeClient(HANDLE pipe)` — per-client JSON Lines loop; locks `m_handlerMtx` per call
+- `m_handlerMtx` serialises concurrent calls to CommandHandler (not thread-safe)
+
+**Background status thread** (`m_statusThread`):
+- `StartStatusThread()` / `StopStatusThread()` / `StatusThreadProc()`
+- Polls camera status every ~2s (200 × 10ms interruptible sleep)
+- Writes `m_cameras` under `m_camerasMutex`; render thread snapshots under mutex
+- Preserves `lastShotMs` across polls; replaces old on-frame `PollCameraStatus()`
+
+**GUI sequencer thread** — runs independently of SRV `SequencerEngine`:
+- `GuiSeqMode`: `Idle → TestRunning ↔ TestPaused; Idle → Running`
+- `m_guiSeqMode`: `std::atomic<GuiSeqMode>` — written by main/seqThread, read by both
+- `m_tlPlayheadMs`: `std::atomic<int64_t>` — updated 10ms by seqThread; drag/init by main
+- `static constexpr int kMaxCamTracks = 4` — up to 4 simultaneous camera tracks
+- `int m_seqNextBlock[kMaxCamTracks]` — per-track "next unfired" index; persists across pause/resume
+- `SeqThreadProc(mode, playheadStartMs, realStartMs)`: 10ms tick; TestRun = `simMs = playheadStart + (realNow - realStart)`; Run = `simMs = realNow`; fires `BuildBlockCmd()` via pipe when `blk.atMs ≤ simMs`
+- `BuildBlockCmd(blk, camIdx)` — static; returns JSON pipe cmd for Single/Bracket/Burst; `"cam":"N"` routing; Audio → `{}`
+
+**Sequencer buttons** (`RenderSequencerButtons()` in Col1):
+- Playhead time display (cyan = running, amber = idle/paused)
+- **TEST RUN / RESUME TEST** (yellow/amber), **STOP TEST** — pause keeps position; second STOP = idle
+- **RUN** (red palette), **STOP RUN** — fires on real UTC time (test: change system clock)
+- Commands go **directly GUI → SRV via pipe**, no intermediate JSON file
+
+**Playhead on timeline**:
+- Cyan vertical line + triangle + time label in `RenderTimelineBottom()`
+- Defaults to C2 − 45s when contacts first become available
+- Click on ruler (Idle or TestPaused) sets playhead + recomputes `m_seqNextBlock`
+
+**Named timeline snapshots** (`tl_snapshots` DB table):
+- `CreateCalibrationSnapshot()` — seeds built-in calibration timeline (idempotent)
+- `RenderSnapshotModal()` — open / save-as / delete modal
+- File > Open / Save As in menu bar
+
+**Bracket calibration** (measured latency → DB):
+- `SeqCalibSample { count, ev, latMs }` — collected during TEST RUN / RUN (Bracket only)
+- `m_seqCalibBuf` written by seqThread, read by main after join
+- `SaveCalibFromBuf(camModel)` → `bracket_calib` table in Config.db; reloads `m_calibCache`
+- `BlockDurMs()` uses calibrated latency if available; falls back to formula
+- `SeedBuiltinCalib()` — seeds ILCE-7RM4A with measured data if table absent
+
+**ARM deduplication + timeline visualization**:
+- `BlockParamsDiffer(a, b)` — static helper; returns `true` if ARM is needed between blocks a and b
+  (compares type / ss / iso / fstop; for Bracket: ev + count; for Burst: burstDrive)
+- `ArmEstMs(b)` — conservative estimate: `min(2100, 1000 + count×300)` ms for Bracket; 1800ms for Single/Burst
+- `SeqThreadProc` replaces `ArmParams`/`lastArmed[]` with `BlockParamsDiffer(fired, next)` check
+- Post-block `m_tlPlayheadMs.store(simPost)` before ARM fires — reduces apparent freeze from 2270ms to ARM-only (~1800ms)
+- Timeline pass 1 draws dim amber "ARM" extension bar after blocks that trigger ARM (width = `ArmEstMs`)
+- Hit-testing and selection border extended to cover the ARM zone
+- Snap-to-prev includes `ArmEstMs` when `BlockParamsDiffer(prev, cur)` is true
+
+**Next (Phase 3d continued)**: audio playback block
+
+## Known pitfalls in IqpClient (maps.besselianelements.com API)
 
 - API returns pretty-printed JSON with spaces after colons: `"message1": "..."` — `JsonStr` must skip whitespace before the opening `"`
 - Success response has **no** `"message"` field (empty from JsonStr) **or** `"message":"OK"` at the end — treat both as success
@@ -206,7 +369,7 @@ TotalControlCLI seq_start sequences/test_sequence.json --test C1=now
 - Key auto-refresh: fetch `/map/<eclipseId>/`, search inline scripts then JS files for standalone 128-hex string; fall back to `/map/TSE20260812/`
 - `SetIqpLogger(fn)` — set once in App ctor; logs to TotalControlGUI.log from background thread
 
-### Known pitfalls in the sequence JSON parser (SequencerEngine.cpp)
+## Known pitfalls in the sequence JSON parser (SequencerEngine.cpp)
 
 Hand-written mini-parser (no external libraries). Three pitfalls encountered during tests:
 
