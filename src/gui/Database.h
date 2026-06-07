@@ -3,6 +3,7 @@
 #include "EclipseEntry.h"
 #include "BesselCalc.h"
 #include "Timeline.h"
+#include "EphClient.h"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -78,6 +79,16 @@ public:
     std::vector<TLTrack>      LoadSnapshot(int64_t id) const;
     bool                      SnapshotExists(const std::string& name) const;
     void                      DeleteSnapshot(int64_t id);
+
+    // JPL Horizons ephemeris cache (TotalControlConfig.db)
+    // eclipse_date: "YYYY-Mon-DD"; location: "lat,lon" key string.
+    void                 CreateEphTables();
+    void                 SaveEphRows(EphBody body, const std::vector<EphRow>& rows);
+    std::vector<EphRow>  LoadEphRows(EphBody body) const;
+    bool                 EphemerisExists(const std::string& eclDate,
+                                         const std::string& location) const;
+    void                 SetEphMeta(const std::string& eclDate,
+                                    const std::string& location);
 
 private:
     sqlite3* m_db = nullptr;

@@ -6,7 +6,9 @@
 #include "EclipseEntry.h"
 #include "IqpClient.h"
 #include "BesselCalc.h"
+#include "EphClient.h"
 #include <string>
+#include <array>
 #include <atomic>
 #include <fstream>
 #include <map>
@@ -16,6 +18,11 @@
 #include <vector>
 
 struct ImFont;
+
+// Forward declarations — avoid pulling in d3d11.h into every TU
+struct ID3D11Device;
+struct ID3D11DeviceContext;
+struct ID3D11ShaderResourceView;
 
 namespace TotalControl {
 
@@ -53,7 +60,7 @@ class App {
 public:
     App();
     ~App();
-    void OnInit();
+    void OnInit(ID3D11Device* d3dDev, ID3D11DeviceContext* d3dCtx);
     void OnFrame();
     bool OnCloseRequest();
 
@@ -152,6 +159,47 @@ private:
     void SyncDecimalToDms();
     void SyncDmsToDecimal();
 
+    // ── Solar view ───────────────────────────────────────────────────────────
+    void  RenderSolarView();
+    float m_solarP    = 15.2f;  // P₀: solar N pole PA from celestial north (deg) — for display
+    float m_solarQ    =  0.f;   // q: parallactic angle; drawing uses (P₀-q)
+    float m_solarZoom =  1.f;   // current zoom factor (mouse wheel; 0.2–20)
+
+    // ── SDO live solar image ─────────────────────────────────────────────────
+    // Downloaded from sdo.gsfc.nasa.gov, decoded JPEG → D3D11 texture.
+    void TriggerSdoFetch();
+    void SdoThreadProc(std::wstring cachePath);
+    void CreateSdoTexture();     // render thread only — creates D3D11 SRV
+
+    ID3D11Device*              m_d3dDev    = nullptr;
+    ID3D11DeviceContext*       m_d3dCtx    = nullptr;
+    ID3D11ShaderResourceView*  m_sdoSrv    = nullptr;  // null until first decode
+    std::thread                m_sdoThread;
+    std::atomic<bool>          m_sdoFetching{false};
+    std::atomic<bool>          m_sdoNewData{false};    // pixel buffer ready
+    mutable std::mutex         m_sdoPixelMutex;
+    std::vector<uint8_t>       m_sdoPixels;            // decoded RGBA (under mutex)
+    int                        m_sdoTexW = 0, m_sdoTexH = 0;
+    int64_t                    m_sdoFetchedAtMs = 0;   // UtcNowMs() of last attempt
+
+    // ── JPL Horizons ephemeris ────────────────────────────────────────────────
+    void TriggerEphFetch();
+    void EphThreadProc(std::string eclDate, std::string locKey,
+                       std::wstring configPath,
+                       double lat, double lon, double altM);
+    EphRow InterpEphAt(EphBody body, int64_t utcMs) const;
+    static double ComputeP0(double raSun_deg,  double decSun_deg);
+    static double ComputeQ (double raSun_deg,  double decSun_deg,
+                             double lat_deg,   double lon_deg, int64_t utcMs);
+    static double ComputeMoonV(double raMoon_deg, double decMoon_deg);
+
+    std::wstring              m_configPath;   // path to TotalControlConfig.db
+    std::thread               m_ephThread;
+    std::atomic<bool>         m_ephFetching{false};
+    mutable std::mutex        m_ephMutex;
+    // Indexed by EphBody int; populated by EphThreadProc, read by render thread.
+    std::array<std::vector<EphRow>, static_cast<size_t>(EphBody::Count)> m_ephSamples;
+
     // ── Contact times ─────────────────────────────────────────────────────────
     std::thread        m_iqpThread;
     std::mutex         m_iqpMutex;
@@ -177,6 +225,9 @@ private:
     int64_t m_tlDragStartMs = -1;
     float   m_tlDragMouseX0 = 0.f;
     float   m_tlScreenTopY  = 0.f;
+
+    // Playhead drag (grab triangle, hold, move)
+    bool    m_tlPhDragging  = false;
 
     // ── Playhead ──────────────────────────────────────────────────────────────
     // Written by seqThread (during run) or main thread (drag / default init).

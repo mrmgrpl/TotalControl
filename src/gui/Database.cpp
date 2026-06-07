@@ -707,4 +707,154 @@ std::vector<std::string> Database::LoadCalibModels() const {
     return result;
 }
 
+// ─── JPL Horizons ephemeris cache ────────────────────────────────────────────
+
+static constexpr const char* kCreateEph = R"SQL(
+    CREATE TABLE IF NOT EXISTS ephemeris (
+        body     TEXT    NOT NULL,
+        utc_ms   INTEGER NOT NULL,
+        az_deg   REAL    NOT NULL,
+        alt_deg  REAL    NOT NULL,
+        ang_diam REAL    NOT NULL,
+        ra_deg   REAL    NOT NULL,
+        dec_deg  REAL    NOT NULL,
+        PRIMARY KEY (body, utc_ms)
+    );
+    CREATE TABLE IF NOT EXISTS eph_meta (
+        id           INTEGER PRIMARY KEY,
+        eclipse_date TEXT    NOT NULL,
+        location     TEXT    NOT NULL,
+        fetched_at   INTEGER NOT NULL
+    );
+)SQL";
+
+void Database::CreateEphTables() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateEph);
+}
+
+void Database::SaveEphRows(EphBody body, const std::vector<EphRow>& rows) {
+    assert(m_db != nullptr);
+    assert(rows.size() <= 1500);  // bounded: ≤288 samples/day per body
+    if (!m_db || rows.empty()) return;
+
+    const char* bodyName = EphBodyName(body);
+    sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
+
+    // Replace all rows for this body
+    sqlite3_stmt* del = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "DELETE FROM ephemeris WHERE body=?;", -1, &del, nullptr);
+    sqlite3_bind_text(del, 1, bodyName, -1, SQLITE_STATIC);
+    sqlite3_step(del);
+    sqlite3_finalize(del);
+
+    for (const EphRow& r : rows) {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(m_db,
+            "INSERT OR REPLACE INTO ephemeris"
+            " (body, utc_ms, az_deg, alt_deg, ang_diam, ra_deg, dec_deg)"
+            " VALUES (?,?,?,?,?,?,?);",
+            -1, &st, nullptr);
+        sqlite3_bind_text  (st, 1, bodyName,       -1, SQLITE_STATIC);
+        sqlite3_bind_int64 (st, 2, r.utc_ms);
+        sqlite3_bind_double(st, 3, r.az_deg);
+        sqlite3_bind_double(st, 4, r.alt_deg);
+        sqlite3_bind_double(st, 5, r.ang_diam_arcmin);
+        sqlite3_bind_double(st, 6, r.ra_deg);
+        sqlite3_bind_double(st, 7, r.dec_deg);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+
+    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+}
+
+std::vector<EphRow> Database::LoadEphRows(EphBody body) const {
+    assert(m_db != nullptr);  // DB must be open to load ephemeris
+    std::vector<EphRow> result;
+    if (!m_db) return result;
+
+    // Return empty if table absent (pre-migration DB)
+    sqlite3_stmt* chk = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ephemeris';",
+        -1, &chk, nullptr);
+    bool exists = (sqlite3_step(chk) == SQLITE_ROW);
+    sqlite3_finalize(chk);
+    if (!exists) return result;
+
+    const char* bodyName = EphBodyName(body);
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT utc_ms, az_deg, alt_deg, ang_diam, ra_deg, dec_deg"
+        " FROM ephemeris WHERE body=? ORDER BY utc_ms;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    sqlite3_bind_text(st, 1, bodyName, -1, SQLITE_STATIC);
+
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        EphRow r;
+        r.utc_ms          = sqlite3_column_int64 (st, 0);
+        r.az_deg          = sqlite3_column_double(st, 1);
+        r.alt_deg         = sqlite3_column_double(st, 2);
+        r.ang_diam_arcmin = sqlite3_column_double(st, 3);
+        r.ra_deg          = sqlite3_column_double(st, 4);
+        r.dec_deg         = sqlite3_column_double(st, 5);
+        result.push_back(r);
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
+bool Database::EphemerisExists(const std::string& eclDate,
+                               const std::string& location) const {
+    assert(m_db != nullptr);
+    assert(!eclDate.empty() && !location.empty());
+    if (!m_db) return false;
+
+    sqlite3_stmt* chk = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='eph_meta';",
+        -1, &chk, nullptr);
+    bool exists = (sqlite3_step(chk) == SQLITE_ROW);
+    sqlite3_finalize(chk);
+    if (!exists) return false;
+
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "SELECT 1 FROM eph_meta WHERE eclipse_date=? AND location=? LIMIT 1;",
+        -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, eclDate.c_str(),   -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, location.c_str(),  -1, SQLITE_STATIC);
+    bool found = (sqlite3_step(st) == SQLITE_ROW);
+    sqlite3_finalize(st);
+    return found;
+}
+
+void Database::SetEphMeta(const std::string& eclDate, const std::string& location) {
+    assert(m_db != nullptr);
+    assert(!eclDate.empty() && !location.empty());
+    if (!m_db) return;
+
+    FILETIME ft; GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER ui; ui.LowPart = ft.dwLowDateTime; ui.HighPart = ft.dwHighDateTime;
+    int64_t nowMs = static_cast<int64_t>(ui.QuadPart / 10000) - 11644473600000LL;
+
+    sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db, "DELETE FROM eph_meta;", nullptr, nullptr, nullptr);
+
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "INSERT INTO eph_meta (eclipse_date, location, fetched_at) VALUES (?,?,?);",
+        -1, &st, nullptr);
+    sqlite3_bind_text (st, 1, eclDate.c_str(),  -1, SQLITE_STATIC);
+    sqlite3_bind_text (st, 2, location.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 3, nowMs);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+
+    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+}
+
 } // namespace TotalControl

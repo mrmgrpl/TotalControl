@@ -1,11 +1,14 @@
 ﻿#include "App.h"
 #include "TzEntry.h"
+#include "SdoClient.h"
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 
 #include <windows.h>
+#include <d3d11.h>
+#include <wincodec.h>
 #include <cassert>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -229,6 +232,362 @@ void App::TriggerIqpFetch() {
     });
     LogLine(std::format("IQP+BE triggered: {} lat={:.4f} lon={:.4f}  BE valid={}",
                         id, lat, lon, m_beResult.valid));
+
+    TriggerEphFetch();
+}
+
+// ─── JPL Horizons ephemeris ───────────────────────────────────────────────────
+
+// P₀: position angle of solar N pole from north celestial pole.
+// Uses IAU/WGCCRE solar pole direction: RA₀=286.13°, Dec₀=63.87° (ICRF J2000).
+double App::ComputeP0(double raSun_deg, double decSun_deg) {
+    static constexpr double kPi   = 3.14159265358979323846;
+    static constexpr double kRa0  = 286.13 * kPi / 180.0;
+    static constexpr double kDec0 =  63.87 * kPi / 180.0;
+    double ra  = raSun_deg  * kPi / 180.0;
+    double dec = decSun_deg * kPi / 180.0;
+    double dRA = kRa0 - ra;
+    return std::atan2(std::cos(kDec0) * std::sin(dRA),
+                      std::sin(kDec0) * std::cos(dec)
+                    - std::cos(kDec0) * std::sin(dec) * std::cos(dRA))
+           * 180.0 / kPi;
+}
+
+// V: position angle of the Moon's north pole from celestial north.
+// IAU Moon pole: RA₀=269.9949°, Dec₀=66.5392° (J2000, constant approx).
+double App::ComputeMoonV(double raMoon_deg, double decMoon_deg) {
+    assert(decMoon_deg >= -90.0 && decMoon_deg <= 90.0);
+    static constexpr double kPi   = 3.14159265358979323846;
+    static constexpr double kRa0  = 269.9949 * kPi / 180.0;
+    static constexpr double kDec0 =  66.5392 * kPi / 180.0;
+    double ra  = raMoon_deg  * kPi / 180.0;
+    double dec = decMoon_deg * kPi / 180.0;
+    double dRA = kRa0 - ra;
+    return std::atan2(std::cos(kDec0) * std::sin(dRA),
+                      std::sin(kDec0) * std::cos(dec)
+                    - std::cos(kDec0) * std::sin(dec) * std::cos(dRA))
+           * 180.0 / kPi;
+}
+
+// q: parallactic angle of the Sun (angle from celestial N to zenith, measured E).
+// H (hour angle) = GMST + lon_deg − RA_sun_deg.
+double App::ComputeQ(double raSun_deg, double decSun_deg,
+                     double lat_deg, double lon_deg, int64_t utcMs)
+{
+    static constexpr double kPi = 3.14159265358979323846;
+    // Julian Day Number from Unix ms
+    double jd = static_cast<double>(utcMs) / 86400000.0 + 2440587.5;
+    double T  = (jd - 2451545.0) / 36525.0;
+    // GMST in degrees (IAU 1982)
+    double gmst = std::fmod(280.46061837
+                 + 360.98564736629 * (jd - 2451545.0)
+                 + 0.000387933 * T * T, 360.0);
+    double H   = (gmst + lon_deg - raSun_deg) * kPi / 180.0;
+    double dec = decSun_deg * kPi / 180.0;
+    double lat = lat_deg    * kPi / 180.0;
+    return std::atan2(std::sin(H),
+                      std::tan(lat) * std::cos(dec) - std::sin(dec) * std::cos(H))
+           * 180.0 / kPi;
+}
+
+// Linear interpolation between two EphRow samples.
+EphRow App::InterpEphAt(EphBody body, int64_t utcMs) const {
+    assert(static_cast<int>(body) >= 0 &&
+           static_cast<int>(body) < static_cast<int>(EphBody::Count));
+    std::lock_guard lk(m_ephMutex);
+    const auto& rows = m_ephSamples[static_cast<size_t>(body)];
+    if (rows.empty()) return {};
+    assert(rows.size() >= 1);
+
+    if (utcMs <= rows.front().utc_ms) return rows.front();
+    if (utcMs >= rows.back().utc_ms)  return rows.back();
+
+    // Binary search for lo/hi bounding pair
+    size_t lo = 0, hi = rows.size() - 1;
+    while (lo + 1 < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (rows[mid].utc_ms <= utcMs) lo = mid;
+        else                            hi = mid;
+    }
+    double t = double(utcMs          - rows[lo].utc_ms)
+             / double(rows[hi].utc_ms - rows[lo].utc_ms);
+    EphRow r;
+    r.utc_ms          = utcMs;
+    r.ra_deg          = rows[lo].ra_deg          + t * (rows[hi].ra_deg          - rows[lo].ra_deg);
+    r.dec_deg         = rows[lo].dec_deg         + t * (rows[hi].dec_deg         - rows[lo].dec_deg);
+    r.az_deg          = rows[lo].az_deg          + t * (rows[hi].az_deg          - rows[lo].az_deg);
+    r.alt_deg         = rows[lo].alt_deg         + t * (rows[hi].alt_deg         - rows[lo].alt_deg);
+    r.ang_diam_arcmin = rows[lo].ang_diam_arcmin + t * (rows[hi].ang_diam_arcmin - rows[lo].ang_diam_arcmin);
+    return r;
+}
+
+// Background worker: fetches 7 bodies sequentially, writes to DB, updates m_ephSamples.
+void App::EphThreadProc(std::string eclDate, std::string locKey,
+                         std::wstring configPath,
+                         double lat, double lon, double altM)
+{
+    assert(!eclDate.empty() && !locKey.empty() && !configPath.empty());
+    auto logger = [this](std::string_view msg) { LogLine(msg); };
+
+    Database db;
+    if (!db.Open(configPath)) {
+        logger("EPH thread: cannot open config DB");
+        m_ephFetching.store(false);
+        return;
+    }
+    db.CreateEphTables();
+
+    static constexpr int kBodyCount = static_cast<int>(EphBody::Count);
+    for (int i = 0; i < kBodyCount && m_ephFetching.load(); ++i) {
+        EphBody body = static_cast<EphBody>(i);
+        auto rows = FetchEphemeris(body, eclDate, lat, lon, altM,
+                                    5, logger);
+        if (rows.empty()) {
+            logger(std::format("EPH: no data for {}, skipping remaining bodies",
+                               EphBodyName(body)));
+            m_ephFetching.store(false);
+            return;
+        }
+        db.SaveEphRows(body, rows);
+        // Publish to render thread under mutex
+        {
+            std::lock_guard lk(m_ephMutex);
+            m_ephSamples[static_cast<size_t>(body)] = std::move(rows);
+        }
+        logger(std::format("EPH: {} cached", EphBodyName(body)));
+    }
+
+    db.SetEphMeta(eclDate, locKey);
+    logger(std::format("EPH: all bodies cached for {} @ {}", eclDate, locKey));
+    m_ephFetching.store(false);
+}
+
+void App::TriggerEphFetch() {
+    if (m_eclipseIdx < 0 || m_eclipseIdx >= static_cast<int>(m_eclipses.size())) return;
+    if (m_ephFetching.load()) return;   // already in progress
+
+    const auto& e = m_eclipses[m_eclipseIdx];
+    std::string eclDate = HorizonsDate(e.year, e.month, e.day);
+    std::string locKey  = std::format("{:.3f},{:.3f}", m_obsLat, m_obsLon);
+    double lat = m_obsLat, lon = m_obsLon, altM = static_cast<double>(m_obsAltM);
+
+    // Check if we already have data for this eclipse+location combination
+    if (m_configDb.EphemerisExists(eclDate, locKey)) {
+        // Load from DB into memory (if not already loaded)
+        bool alreadyLoaded;
+        {
+            std::lock_guard lk(m_ephMutex);
+            alreadyLoaded = !m_ephSamples[0].empty();
+        }
+        if (!alreadyLoaded) {
+            static constexpr int kBodyCount = static_cast<int>(EphBody::Count);
+            for (int i = 0; i < kBodyCount; ++i) {
+                auto rows = m_configDb.LoadEphRows(static_cast<EphBody>(i));
+                std::lock_guard lk(m_ephMutex);
+                m_ephSamples[static_cast<size_t>(i)] = std::move(rows);
+            }
+            LogLine(std::format("EPH: loaded from cache for {} @ {}", eclDate, locKey));
+        }
+        return;
+    }
+
+    // Clear stale data before starting new fetch
+    {
+        std::lock_guard lk(m_ephMutex);
+        for (auto& v : m_ephSamples) v.clear();
+    }
+
+    m_ephFetching.store(true);
+    LogLine(std::format("EPH: starting fetch for {} @ {}", eclDate, locKey));
+
+    if (m_ephThread.joinable()) m_ephThread.detach();
+    m_ephThread = std::thread(&App::EphThreadProc, this,
+                               eclDate, locKey, m_configPath,
+                               lat, lon, altM);
+}
+
+// ─── SDO live solar image ─────────────────────────────────────────────────────
+
+void App::TriggerSdoFetch() {
+    assert(m_d3dDev != nullptr);
+    assert(m_sdoTexW >= 0 && m_sdoTexH >= 0);
+    if (m_sdoFetching.load()) return;
+    m_sdoFetching.store(true);
+    m_sdoFetchedAtMs = UtcNowMs();
+    std::wstring cachePath = ExeDir() + L"\\TotalControlSDO.jpg";
+    if (m_sdoThread.joinable()) m_sdoThread.detach();
+    m_sdoThread = std::thread(&App::SdoThreadProc, this, std::move(cachePath));
+}
+
+void App::SdoThreadProc(std::wstring cachePath) {
+    assert(!cachePath.empty());
+    assert(m_sdoFetching.load());
+    CoInitialize(nullptr);
+
+    auto logger = [this](std::string_view msg){ LogLine(msg); };
+    auto jpegBytes = FetchSdoJpeg(logger);
+
+    if (jpegBytes.empty()) {
+        LogLine("SDO: network failed, trying cache");
+        HANDLE hf = CreateFileW(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hf != INVALID_HANDLE_VALUE) {
+            DWORD sz = GetFileSize(hf, nullptr);
+            if (sz > 0 && sz < 4u * 1024u * 1024u) {
+                jpegBytes.resize(sz);
+                DWORD got = 0;
+                if (!ReadFile(hf, jpegBytes.data(), sz, &got, nullptr) || got != sz)
+                    jpegBytes.clear();
+            }
+            CloseHandle(hf);
+        }
+    } else {
+        // Save fresh download to cache
+        HANDLE hf = CreateFileW(cachePath.c_str(), GENERIC_WRITE, 0,
+                                nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (hf != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            WriteFile(hf, jpegBytes.data(), static_cast<DWORD>(jpegBytes.size()),
+                      &written, nullptr);
+            CloseHandle(hf);
+        }
+    }
+
+    if (jpegBytes.empty()) {
+        LogLine("SDO: no data available");
+        m_sdoFetching.store(false);
+        CoUninitialize();
+        return;
+    }
+
+    // WIC decode JPEG → RGBA
+    IWICImagingFactory* wicFac = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                  CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFac));
+    if (FAILED(hr)) {
+        LogLine(std::format("SDO: WIC factory failed {:08x}", static_cast<unsigned>(hr)));
+        m_sdoFetching.store(false); CoUninitialize(); return;
+    }
+
+    IWICStream* stream = nullptr;
+    hr = wicFac->CreateStream(&stream);
+    if (SUCCEEDED(hr))
+        hr = stream->InitializeFromMemory(jpegBytes.data(),
+                                          static_cast<DWORD>(jpegBytes.size()));
+    if (FAILED(hr)) {
+        if (stream) stream->Release();
+        wicFac->Release(); m_sdoFetching.store(false); CoUninitialize(); return;
+    }
+
+    IWICBitmapDecoder* dec = nullptr;
+    hr = wicFac->CreateDecoderFromStream(stream, nullptr,
+                                         WICDecodeMetadataCacheOnLoad, &dec);
+    stream->Release();
+    if (FAILED(hr)) {
+        wicFac->Release(); m_sdoFetching.store(false); CoUninitialize(); return;
+    }
+
+    IWICBitmapFrameDecode* frame = nullptr;
+    hr = dec->GetFrame(0, &frame);
+    dec->Release();
+    if (FAILED(hr)) {
+        wicFac->Release(); m_sdoFetching.store(false); CoUninitialize(); return;
+    }
+
+    IWICFormatConverter* conv = nullptr;
+    hr = wicFac->CreateFormatConverter(&conv);
+    if (SUCCEEDED(hr))
+        hr = conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA,
+                              WICBitmapDitherTypeNone, nullptr, 0.f,
+                              WICBitmapPaletteTypeCustom);
+    frame->Release();
+    if (FAILED(hr)) {
+        if (conv) conv->Release();
+        wicFac->Release(); m_sdoFetching.store(false); CoUninitialize(); return;
+    }
+
+    UINT imgW = 0, imgH = 0;
+    conv->GetSize(&imgW, &imgH);
+
+    std::vector<uint8_t> pixels(static_cast<size_t>(imgW) * imgH * 4);
+    hr = conv->CopyPixels(nullptr, imgW * 4,
+                          static_cast<UINT>(pixels.size()), pixels.data());
+    conv->Release(); wicFac->Release();
+    if (FAILED(hr)) {
+        m_sdoFetching.store(false); CoUninitialize(); return;
+    }
+
+    // Circular alpha mask — outside the solar disc becomes transparent
+    float maskR  = 0.5f * static_cast<float>(std::min(imgW, imgH));
+    float centerX = static_cast<float>(imgW) * 0.5f;
+    float centerY = static_cast<float>(imgH) * 0.5f;
+    for (UINT y = 0; y < imgH; ++y) {
+        for (UINT x = 0; x < imgW; ++x) {
+            float dx = static_cast<float>(x) - centerX;
+            float dy = static_cast<float>(y) - centerY;
+            if (dx * dx + dy * dy > maskR * maskR)
+                pixels[(y * imgW + x) * 4 + 3] = 0;
+        }
+    }
+
+    {
+        std::lock_guard lk(m_sdoPixelMutex);
+        m_sdoPixels = std::move(pixels);
+        m_sdoTexW   = static_cast<int>(imgW);
+        m_sdoTexH   = static_cast<int>(imgH);
+    }
+    LogLine(std::format("SDO: decoded {}x{} px", imgW, imgH));
+    m_sdoNewData.store(true);
+    m_sdoFetching.store(false);
+    CoUninitialize();
+}
+
+void App::CreateSdoTexture() {
+    assert(m_d3dDev != nullptr);
+    assert(m_sdoNewData.load());
+    m_sdoNewData.store(false);
+
+    std::vector<uint8_t> pixels;
+    int w = 0, h = 0;
+    {
+        std::lock_guard lk(m_sdoPixelMutex);
+        pixels = m_sdoPixels;
+        w = m_sdoTexW;
+        h = m_sdoTexH;
+    }
+    if (pixels.empty() || w <= 0 || h <= 0) return;
+
+    if (m_sdoSrv) { m_sdoSrv->Release(); m_sdoSrv = nullptr; }
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width            = static_cast<UINT>(w);
+    td.Height           = static_cast<UINT>(h);
+    td.MipLevels        = 1;
+    td.ArraySize        = 1;
+    td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage            = D3D11_USAGE_DEFAULT;
+    td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA init{};
+    init.pSysMem     = pixels.data();
+    init.SysMemPitch = static_cast<UINT>(w * 4);
+
+    ID3D11Texture2D* tex = nullptr;
+    HRESULT hr = m_d3dDev->CreateTexture2D(&td, &init, &tex);
+    if (FAILED(hr)) {
+        LogLine(std::format("SDO: CreateTexture2D failed {:08x}", static_cast<unsigned>(hr)));
+        return;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
+    srvd.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvd.ViewDimension           = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvd.Texture2D.MipLevels     = 1;
+    hr = m_d3dDev->CreateShaderResourceView(tex, &srvd, &m_sdoSrv);
+    tex->Release();
+    if (FAILED(hr))
+        LogLine(std::format("SDO: CreateSRV failed {:08x}", static_cast<unsigned>(hr)));
 }
 
 // ─── Camera overhead model (ILCE-7RM4A) ──────────────────────────────────────
@@ -892,45 +1251,475 @@ void App::RenderSequencerButtons() {
 // ─── Status column (middle-right of top area) ─────────────────────────────────
 
 void App::RenderStatusColumn() {
-    static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
+    RenderSolarView();
+}
 
-    int iqpSt = m_iqpState.load();
-    if (iqpSt == 1 || iqpSt == 2) {
-        static const ImVec4 kGreen {0.15f, 0.90f, 0.35f, 1.0f};
-        static const ImVec4 kRed   {0.95f, 0.22f, 0.18f, 1.0f};
-        static const ImVec4 kDim2  {0.40f, 0.40f, 0.45f, 1.0f};
-        ImGui::PushFont(m_fontLarge);
-        if (iqpSt == 1) {
-            ImGui::TextColored(kDim2, "checking location...");
-        } else {
-            ContactTimes ct;
-            { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-            if (!ct.apiOk)      ImGui::TextColored(kDim2,  "network error");
-            else if (!ct.valid) ImGui::TextColored(kRed,   "NO ECLIPSE VISIBLE HERE");
-            else if (ct.c2Ms>0) ImGui::TextColored(kGreen, "YOU ARE IN THE TOTALITY ZONE");
-            else                ImGui::TextColored(kRed,   "YOU ARE OUTSIDE TOTALITY ZONE");
+// ─── Solar system wireframe view ──────────────────────────────────────────────
+
+void App::RenderSolarView() {
+    assert(m_fontMono != nullptr);
+    // Upload decoded SDO pixels to D3D11 texture (render-thread only)
+    if (m_sdoNewData.load()) CreateSdoTexture();
+    static constexpr float kPi = 3.14159265358979323846f;
+    static const ImVec4    kGray{0.40f, 0.40f, 0.45f, 1.0f};
+
+    ImVec2      avail = ImGui::GetContentRegionAvail();
+    ImVec2      p0    = ImGui::GetCursorScreenPos();
+    ImDrawList* dl    = ImGui::GetWindowDrawList();
+
+    // Full-width rectangle — no gray bars on the sides
+    float szW = avail.x;
+    float szH = avail.y - 40.f;
+    if (szH < 80.f || szW < 80.f) return;
+
+    float ox = p0.x;
+    float oy = p0.y;
+    float cx = ox + szW * 0.5f;
+    float cy = oy + szH * 0.5f;
+
+    // Interaction zone — captures mouse wheel for zoom
+    ImGui::InvisibleButton("##sv", {szW, szH});
+    if (ImGui::IsItemHovered()) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.f)
+            m_solarZoom = std::clamp(m_solarZoom * (1.f + wheel * 0.15f), 0.2f, 20.f);
+    }
+
+    // Scale: ±5° FoV at zoom=1; zoom=2 shows ±2.5°
+    static constexpr float kViewHalf = 5.0f;
+    float szMin = std::min(szW, szH);
+    float scale = szMin * m_solarZoom / (2.f * kViewHalf);
+
+    // ── Simulator time: playhead when available, else real UTC ────────────────
+    int64_t simMs = m_tlPlayheadMs.load();
+    if (simMs < 0) simMs = UtcNowMs();
+
+    // ── Snapshot ephemeris once per frame (single mutex lock) ────────────────
+    std::vector<EphRow> sunSnap, moonSnap;
+    {
+        std::lock_guard lk(m_ephMutex);
+        sunSnap  = m_ephSamples[static_cast<size_t>(EphBody::Sun)];
+        moonSnap = m_ephSamples[static_cast<size_t>(EphBody::Moon)];
+    }
+    bool hasEph = !sunSnap.empty() && !moonSnap.empty();
+
+    // Inline interpolation from local snapshot (no mutex per call)
+    auto interpSnap = [&](const std::vector<EphRow>& rows, int64_t ms) -> EphRow {
+        assert(!rows.empty());
+        if (ms <= rows.front().utc_ms) return rows.front();
+        if (ms >= rows.back().utc_ms)  return rows.back();
+        size_t lo = 0, hi = rows.size() - 1;
+        while (lo + 1 < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            if (rows[mid].utc_ms <= ms) lo = mid; else hi = mid;
         }
-        ImGui::PopFont();
-        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+        double t = double(ms - rows[lo].utc_ms)
+                 / double(rows[hi].utc_ms - rows[lo].utc_ms);
+        EphRow r; r.utc_ms = ms;
+        r.ra_deg          = rows[lo].ra_deg          + t*(rows[hi].ra_deg          - rows[lo].ra_deg);
+        r.dec_deg         = rows[lo].dec_deg         + t*(rows[hi].dec_deg         - rows[lo].dec_deg);
+        r.az_deg          = rows[lo].az_deg          + t*(rows[hi].az_deg          - rows[lo].az_deg);
+        r.alt_deg         = rows[lo].alt_deg         + t*(rows[hi].alt_deg         - rows[lo].alt_deg);
+        r.ang_diam_arcmin = rows[lo].ang_diam_arcmin + t*(rows[hi].ang_diam_arcmin - rows[lo].ang_diam_arcmin);
+        return r;
+    };
+
+    EphRow sunEph, moonEph;
+    if (hasEph) {
+        sunEph  = interpSnap(sunSnap,  simMs);
+        moonEph = interpSnap(moonSnap, simMs);
     }
 
-    if (!m_lastResult.empty()) {
-        ImGui::PushFont(m_fontMono);
-        bool ok = m_lastResult.find("ERROR") == std::string::npos;
-        ImGui::TextColored(ok ? ImVec4(0.55f,0.85f,0.55f,1.f)
-                              : ImVec4(1.0f, 0.35f,0.25f,1.f),
-                           "%s", m_lastResult.c_str());
-        ImGui::PopFont();
+    float sunR  = 0.267f * scale;
+    float moonR = 0.278f * scale;
+    float moonX = cx, moonY = cy;
+    float moonVrad  = 0.f;   // Moon north pole PA from zenith (for drawing)
+    bool  hasMoonV  = false;
+
+    if (hasEph && sunEph.utc_ms > 0 && moonEph.utc_ms > 0) {
+        sunR  = static_cast<float>(sunEph.ang_diam_arcmin  / 2.0 / 60.0) * scale;
+        moonR = static_cast<float>(moonEph.ang_diam_arcmin / 2.0 / 60.0) * scale;
+        float cosAlt = cosf(static_cast<float>(sunEph.alt_deg) * kPi / 180.f);
+        float dAz    = static_cast<float>(moonEph.az_deg  - sunEph.az_deg);
+        float dAlt   = static_cast<float>(moonEph.alt_deg - sunEph.alt_deg);
+        moonX = cx + dAz  * cosAlt * scale;
+        moonY = cy - dAlt * scale;
+        double solarP0 = ComputeP0(sunEph.ra_deg, sunEph.dec_deg);
+        double q       = ComputeQ (sunEph.ra_deg, sunEph.dec_deg,
+                                   m_obsLat, m_obsLon, simMs);
+        m_solarP = static_cast<float>(solarP0);   // P₀ from celestial North (display)
+        m_solarQ = static_cast<float>(q);          // parallactic angle
+        double moonV0 = ComputeMoonV(moonEph.ra_deg, moonEph.dec_deg);
+        moonVrad      = static_cast<float>((moonV0 - q) * kPi / 180.0);
+        hasMoonV      = true;
     }
 
-    ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 28.0f);
+    // cosAltSun: projection factor for az→screen (constant per frame)
+    float cosAltSun = cosf((hasEph && sunEph.utc_ms > 0
+                           ? (float)sunEph.alt_deg : 8.f) * kPi / 180.f);
+
+    // N☉ drawing angle from screen vertical (zenith) = P₀ − q
+    float P_rad = (m_solarP - m_solarQ) * kPi / 180.f;
+
+    // ── Moon-Sun relative motion → C2/C3 contact side directions ────────────
+    // Direction of Moon's angular velocity relative to Sun (in screen coords).
+    // C2 = approaching side (opposite to motion), C3 = departing side.
+    float kC2ux_dyn = 0.f, kC2uy_dyn = 0.f;
+    float kC3ux_dyn = 0.f, kC3uy_dyn = 0.f;
+    bool  hasContactDir = false;
+    if (hasEph && sunSnap.size() > 1 && moonSnap.size() > 1) {
+        size_t idx0 = 0;
+        for (size_t i = 0; i + 1 < moonSnap.size(); ++i) {
+            if (moonSnap[i].utc_ms <= simMs) idx0 = i; else break;
+        }
+        size_t idx1 = std::min(idx0 + 1, moonSnap.size() - 1);
+        if (idx0 != idx1) {
+            size_t si0 = std::min(idx0, sunSnap.size() - 1);
+            size_t si1 = std::min(idx1, sunSnap.size() - 1);
+            double relAz0  = moonSnap[idx0].az_deg  - sunSnap[si0].az_deg;
+            double relAz1  = moonSnap[idx1].az_deg  - sunSnap[si1].az_deg;
+            double relAlt0 = moonSnap[idx0].alt_deg - sunSnap[si0].alt_deg;
+            double relAlt1 = moonSnap[idx1].alt_deg - sunSnap[si1].alt_deg;
+            float  vx      = static_cast<float>((relAz1 - relAz0) * cosAltSun);
+            float  vy      = -static_cast<float>(relAlt1 - relAlt0);  // y-down
+            float  vlen    = sqrtf(vx * vx + vy * vy);
+            if (vlen > 1e-6f) {
+                kC3ux_dyn =  vx / vlen;  kC3uy_dyn =  vy / vlen;
+                kC2ux_dyn = -vx / vlen;  kC2uy_dyn = -vy / vlen;
+                hasContactDir = true;
+            }
+        }
+    }
+
+    // ── Clip rect (prevents drawing outside view area) ────────────────────────
+    dl->PushClipRect({ox, oy}, {ox+szW, oy+szH}, true);
+
+    // ── Background ────────────────────────────────────────────────────────────
+    dl->AddRectFilled({ox, oy}, {ox+szW, oy+szH}, IM_COL32(6, 8, 16, 255));
+
+    // View center in sky coordinates (current Sun position or fallback)
+    double centerAz  = (hasEph && sunEph.utc_ms > 0) ? sunEph.az_deg  : 285.0;
+    double centerAlt = (hasEph && sunEph.utc_ms > 0) ? sunEph.alt_deg :   8.0;
+    // cosAltSun already computed before PushClipRect — reused here
+
+    // Projection: (az, alt) → screen. Center of view = current Sun.
+    auto projectAbs = [&](double az, double alt) -> ImVec2 {
+        float dAz  = static_cast<float>(az  - centerAz);
+        float dAlt = static_cast<float>(alt - centerAlt);
+        while (dAz >  180.f) dAz -= 360.f;
+        while (dAz < -180.f) dAz += 360.f;
+        return { cx + dAz * cosAltSun * scale, cy - dAlt * scale };
+    };
+
+    // ── Alt/Az grid ───────────────────────────────────────────────────────────
+    {
+        float viewHalfDeg = kViewHalf / m_solarZoom;
+        float gd = (viewHalfDeg > 10.f) ? 5.f
+                 : (viewHalfDeg >  3.f) ? 1.f : 0.5f;
+        ImU32 gCol = IM_COL32(28, 36, 55, 100);
+        ImU32 lCol = IM_COL32(48, 60, 85, 170);
+
+        // Altitude lines (horizontal in this view)
+        float altBase = std::floorf(static_cast<float>(centerAlt) / gd) * gd;
+        for (int k = -12; k <= 12; ++k) {
+            float a  = altBase + k * gd;
+            if (a < -15.f || a > 90.f) continue;
+            float sy = cy - (a - static_cast<float>(centerAlt)) * scale;
+            if (sy < oy - 1.f || sy > oy + szH + 1.f) continue;
+            dl->AddLine({ox, sy}, {ox + szW, sy}, gCol, 1.f);
+            char lbl[8]; snprintf(lbl, sizeof(lbl), "%.0f\xc2\xb0", a);
+            dl->AddText({ox + 4.f, sy - 13.f}, lCol, lbl);
+        }
+
+        // Azimuth lines (vertical in this view)
+        float azBase = std::floorf(static_cast<float>(centerAz) / gd) * gd;
+        for (int k = -12; k <= 12; ++k) {
+            float az  = azBase + k * gd;
+            float dAz = az - static_cast<float>(centerAz);
+            float sx  = cx + dAz * cosAltSun * scale;
+            if (sx < ox - 1.f || sx > ox + szW + 1.f) continue;
+            dl->AddLine({sx, oy}, {sx, oy + szH}, gCol, 1.f);
+            char lbl[8]; snprintf(lbl, sizeof(lbl), "%.0f\xc2\xb0", az);
+            ImVec2 ts = ImGui::CalcTextSize(lbl);
+            dl->AddText({sx - ts.x * 0.5f, oy + szH - ts.y - 2.f}, lCol, lbl);
+        }
+    }
+
+    // ── Horizon (alt = 0) ─────────────────────────────────────────────────────
+    {
+        float hY = cy + static_cast<float>(centerAlt) * scale;
+        if (hY > oy && hY < oy + szH) {
+            dl->AddLine({ox, hY}, {ox + szW, hY}, IM_COL32(50, 65, 90, 220), 2.f);
+            dl->AddText({ox + 4.f, hY + 2.f}, IM_COL32(50, 65, 90, 200), "horizon");
+        }
+    }
+
+    // ── Zenith direction ──────────────────────────────────────────────────────
+    for (float y = cy - 4.f; y > oy + 20.f; y -= 9.f)
+        dl->AddLine({cx, y}, {cx, std::max(y - 5.f, oy + 20.f)},
+                    IM_COL32(50, 65, 90, 100), 1.f);
+    dl->AddTriangleFilled({cx - 4.f, oy + 22.f}, {cx + 4.f, oy + 22.f},
+                           {cx,       oy + 14.f}, IM_COL32(50, 65, 90, 120));
+    dl->AddText({cx + 5.f, oy + 10.f}, IM_COL32(50, 65, 90, 160), "Z");
+
+    // ── Sun trajectory — absolute 24h arc ────────────────────────────────────
+    if (hasEph && sunSnap.size() > 1) {
+        for (size_t i = 1; i < sunSnap.size(); ++i) {
+            float dAz0 = static_cast<float>(sunSnap[i-1].az_deg - sunEph.az_deg);
+            float dAz1 = static_cast<float>(sunSnap[i  ].az_deg - sunEph.az_deg);
+            if (std::fabs(dAz1 - dAz0) > 180.f) continue;  // az wrap gap
+            ImVec2 a = projectAbs(sunSnap[i-1].az_deg, sunSnap[i-1].alt_deg);
+            ImVec2 b = projectAbs(sunSnap[i  ].az_deg, sunSnap[i  ].alt_deg);
+            dl->AddLine(a, b, IM_COL32(200, 140, 30, 110), 1.2f);
+        }
+        // Hour marks with UTC hour labels
+        for (size_t i = 0; i < sunSnap.size(); ++i) {
+            if (sunSnap[i].utc_ms % 3600000 != 0) continue;
+            ImVec2 pt = projectAbs(sunSnap[i].az_deg, sunSnap[i].alt_deg);
+            dl->AddCircleFilled(pt, 2.5f, IM_COL32(200, 140, 30, 200));
+            int hh = static_cast<int>(sunSnap[i].utc_ms / 3600000 % 24);
+            char tl[4]; snprintf(tl, sizeof(tl), "%02d", hh);
+            dl->AddText({pt.x + 3.f, pt.y - 12.f}, IM_COL32(200, 140, 30, 160), tl);
+        }
+    }
+
+    // ── Moon trajectory — absolute 24h arc ───────────────────────────────────
+    if (hasEph && moonSnap.size() > 1) {
+        for (size_t i = 1; i < moonSnap.size(); ++i) {
+            float dAz0 = static_cast<float>(moonSnap[i-1].az_deg - sunEph.az_deg);
+            float dAz1 = static_cast<float>(moonSnap[i  ].az_deg - sunEph.az_deg);
+            if (std::fabs(dAz1 - dAz0) > 180.f) continue;
+            ImVec2 a = projectAbs(moonSnap[i-1].az_deg, moonSnap[i-1].alt_deg);
+            ImVec2 b = projectAbs(moonSnap[i  ].az_deg, moonSnap[i  ].alt_deg);
+            dl->AddLine(a, b, IM_COL32(55, 130, 200, 100), 1.2f);
+        }
+        // Hour marks (no label — Moon labels would overlap Sun labels)
+        for (size_t i = 0; i < moonSnap.size(); ++i) {
+            if (moonSnap[i].utc_ms % 3600000 != 0) continue;
+            ImVec2 pt = projectAbs(moonSnap[i].az_deg, moonSnap[i].alt_deg);
+            dl->AddCircleFilled(pt, 2.5f, IM_COL32(55, 130, 200, 180));
+        }
+    }
+
+    // ── P angle arc (from zenith to N☉ axis direction) ────────────────────────
+    float arcR = sunR * 2.1f;
+    if (fabsf(m_solarP) > 0.3f) {
+        static constexpr int kArcSeg = 24;
+        float a0 = -kPi * 0.5f;           // up = -y in screen coords
+        float a1 = a0 + P_rad;
+        for (int i = 0; i < kArcSeg; ++i) {
+            float t0 = a0 + (a1-a0) * float(i)   / float(kArcSeg);
+            float t1 = a0 + (a1-a0) * float(i+1) / float(kArcSeg);
+            dl->AddLine({cx + cosf(t0)*arcR, cy + sinf(t0)*arcR},
+                        {cx + cosf(t1)*arcR, cy + sinf(t1)*arcR},
+                        IM_COL32(59,139,212,190), 1.2f);
+        }
+        float amid = a0 + (a1-a0) * 0.5f;
+        char plbl[12];
+        snprintf(plbl, sizeof(plbl), "P=%.0f\xc2\xb0", m_solarP);
+        dl->AddText({cx + cosf(amid)*(arcR+8.f) - 14.f,
+                     cy + sinf(amid)*(arcR+8.f) - 6.f},
+                    IM_COL32(59,139,212,200), plbl);
+    }
+
+    // ── Camera frame helper (rotated rectangle) ───────────────────────────────
+    // rot_rad: rotation of frame around disc centre (0 = horizontal)
+    auto DrawFrame = [&](float fovW_deg, float fovH_deg, float rot_rad,
+                          ImU32 col, bool dashed) {
+        float hw = fovW_deg * scale * 0.5f;
+        float hh = fovH_deg * scale * 0.5f;
+        float cr = cosf(rot_rad), sr = sinf(rot_rad);
+        const float lx[4] = {-hw, hw, hw,-hw};
+        const float ly[4] = {-hh,-hh, hh, hh};
+        ImVec2 pts[4];
+        for (int i = 0; i < 4; ++i)
+            pts[i] = {cx + lx[i]*cr - ly[i]*sr,
+                      cy + lx[i]*sr + ly[i]*cr};
+        if (dashed) {
+            for (int i = 0; i < 4; ++i) {
+                ImVec2 a = pts[i], b = pts[(i+1)%4];
+                float ex = b.x-a.x, ey = b.y-a.y;
+                float seg = sqrtf(ex*ex + ey*ey);
+                float dx = ex/seg, dy = ey/seg;
+                for (float t = 0.f; t < seg; t += 9.f) {
+                    float t2 = std::min(t+6.f, seg);
+                    dl->AddLine({a.x+dx*t,  a.y+dy*t},
+                                {a.x+dx*t2, a.y+dy*t2}, col, 1.3f);
+                }
+            }
+        } else {
+            dl->AddQuad(pts[0], pts[1], pts[2], pts[3], col, 1.5f);
+        }
+    };
+
+    // 240mm — horizontal (no rotation): captures landscape context
+    DrawFrame(8.57f, 5.72f, 0.f,   IM_COL32(136,135,128,180), /*dashed=*/true);
+    // 900mm — rotated by P: long axis aligned with solar equator for corona framing
+    DrawFrame(2.29f, 1.53f, P_rad, IM_COL32(24, 95, 165, 220), /*dashed=*/false);
+
+    // ── Visible planets (clip rect handles bounds) ────────────────────────────
+    if (hasEph && sunEph.utc_ms > 0) {
+        struct PlanetDef { EphBody body; ImU32 col; const char* name; };
+        static constexpr PlanetDef kPlanets[] = {
+            { EphBody::Mercury, IM_COL32(180,150,100,220), "Mer" },
+            { EphBody::Venus,   IM_COL32(220,210,150,220), "Ven" },
+            { EphBody::Mars,    IM_COL32(200, 90, 70,220), "Mar" },
+            { EphBody::Jupiter, IM_COL32(175,150,110,200), "Jup" },
+            { EphBody::Saturn,  IM_COL32(155,145,115,200), "Sat" },
+        };
+        for (const auto& pl : kPlanets) {
+            EphRow pr = InterpEphAt(pl.body, simMs);
+            if (pr.utc_ms == 0) continue;
+            float dAz  = static_cast<float>(pr.az_deg  - sunEph.az_deg);
+            float dAlt = static_cast<float>(pr.alt_deg - sunEph.alt_deg);
+            float px   = cx + dAz  * cosAltSun * scale;
+            float py   = cy - dAlt * scale;
+            dl->AddCircleFilled({px, py}, 3.f, pl.col);
+            dl->AddText({px+4.f, py-6.f}, pl.col, pl.name);
+        }
+    }
+
+    // ── Corona glow ───────────────────────────────────────────────────────────
+    dl->AddCircleFilled({cx,cy}, sunR*4.5f, IM_COL32(250,200,100, 4));
+    dl->AddCircleFilled({cx,cy}, sunR*3.2f, IM_COL32(250,200,100, 9));
+    dl->AddCircleFilled({cx,cy}, sunR*2.2f, IM_COL32(250,200,100,18));
+
+    // ── Sun disc — SDO image rotated so solar N aligns with N☉ axis ─────────
+    // N☉ in screen (y-down): rightDir=(cos P, sin P), downDir=(-sin P, cos P)
+    if (m_sdoSrv) {
+        float cosP = cosf(P_rad), sinP = sinf(P_rad);
+        float rx = sunR * cosP, ry = sunR * sinP;    // right × r
+        float dx = -sunR * sinP, dy = sunR * cosP;   // down × r
+        ImVec2 tl{ cx - rx - dx, cy - ry - dy };
+        ImVec2 tr{ cx + rx - dx, cy + ry - dy };
+        ImVec2 br{ cx + rx + dx, cy + ry + dy };
+        ImVec2 bl{ cx - rx + dx, cy - ry + dy };
+        dl->AddImageQuad(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_sdoSrv)),
+                         tl, tr, br, bl);
+    } else {
+        dl->AddCircleFilled({cx,cy}, sunR, IM_COL32(250,199,117,255));
+        dl->AddCircle      ({cx,cy}, sunR, IM_COL32(186,117, 23,255), 0, 1.f);
+    }
+
+    // ── Moon disc — totality: fully black when Moon covers Sun ───────────────
+    {
+        float dxM = moonX - cx, dyM = moonY - cy;
+        float dist = sqrtf(dxM * dxM + dyM * dyM);
+        bool  isTotality = (dist + sunR < moonR);  // Moon fully occults Sun
+        ImU32 moonFill   = isTotality ? IM_COL32(0, 0, 0, 255)
+                                      : IM_COL32(55, 55, 52, 255);
+        dl->AddCircleFilled({moonX, moonY}, moonR, moonFill);
+        dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
+    }
+
+    // ── Solar rotation axis N☉ ────────────────────────────────────────────────
+    // Direction from centre: N pole = (sin P, -cos P) in screen (y-down)
+    float axNx = sinf(P_rad);
+    float axNy = -cosf(P_rad);
+    float axN  = sunR * 3.6f;
+    float axS  = sunR * 1.8f;
+    dl->AddLine({cx, cy}, {cx+axNx*axN, cy+axNy*axN},
+                IM_COL32(239,159,39,230), 2.f);
+    dl->AddLine({cx, cy}, {cx-axNx*axS, cy-axNy*axS},
+                IM_COL32(239,159,39, 90), 1.2f);
+    // Arrowhead at N end
+    {
+        float tip  = axN;
+        float ptx  = cx + axNx*tip,        pty  = cy + axNy*tip;
+        float perx = -axNy,                pery =  axNx;
+        float base = tip - 6.f;
+        dl->AddTriangleFilled(
+            {cx+axNx*base - perx*3.f, cy+axNy*base - pery*3.f},
+            {cx+axNx*base + perx*3.f, cy+axNy*base + pery*3.f},
+            {ptx, pty}, IM_COL32(239,159,39,230));
+    }
+    // N label + subscript drawn sun symbol (☉ not in Consolas)
+    {
+        float lx = cx + axNx*(axN+4.f) - 7.f;
+        float ly = cy + axNy*(axN+4.f) - 6.f;
+        dl->AddText({lx, ly}, IM_COL32(186,117,23,220), "N");
+        // subscript ⊙: circle + center dot
+        float sx = lx + 9.f, sy = ly + 7.f;
+        dl->AddCircle     ({sx, sy}, 3.f, IM_COL32(186,117,23,190), 0, 1.f);
+        dl->AddCircleFilled({sx, sy}, 1.1f, IM_COL32(186,117,23,210));
+    }
+
+    // ── Moon rotation axis + north pole marker ────────────────────────────────
+    // V-q: position angle of Moon's north pole from zenith (screen up = zenith)
+    if (hasMoonV && moonR > 4.f) {
+        float mnx = sinf(moonVrad), mny = -cosf(moonVrad);
+        float mR  = moonR;
+        // Full axis line through Moon disc (dim south side)
+        dl->AddLine({moonX - mnx*mR, moonY - mny*mR},
+                    {moonX,           moonY},
+                    IM_COL32(60, 140, 200, 110), 1.2f);
+        dl->AddLine({moonX, moonY},
+                    {moonX + mnx*mR, moonY + mny*mR},
+                    IM_COL32(80, 170, 230, 200), 1.5f);
+        // Arrowhead at N end
+        float npx = moonX + mnx*mR, npy = moonY + mny*mR;
+        float prx = -mny * 2.5f, pry = mnx * 2.5f;
+        float base = mR - 4.f;
+        dl->AddTriangleFilled(
+            {moonX + mnx*base - prx, moonY + mny*base - pry},
+            {moonX + mnx*base + prx, moonY + mny*base + pry},
+            {npx, npy}, IM_COL32(80, 170, 230, 200));
+        // "N" label + small subscript moon-disc circle
+        float lx = npx + mnx*4.f - 4.f, ly = npy + mny*4.f - 6.f;
+        dl->AddText({lx, ly}, IM_COL32(80, 170, 230, 200), "N");
+        dl->AddCircle({lx + 9.f, ly + 7.f}, 3.f, IM_COL32(80, 170, 230, 160), 0, 1.f);
+    }
+
+    // ── C2 / C3 contact points on Moon limb — computed from relative motion ────
+    // C2: Moon approaching from this side; C3: Moon departing
+    if (hasContactDir) {
+        float c2x = moonX + kC2ux_dyn * moonR, c2y = moonY + kC2uy_dyn * moonR;
+        float c3x = moonX + kC3ux_dyn * moonR, c3y = moonY + kC3uy_dyn * moonR;
+        dl->AddCircle({c2x, c2y}, 2.5f, IM_COL32(15, 110, 86, 230), 0, 1.5f);
+        dl->AddText({c2x - 14.f, c2y - 12.f}, IM_COL32(15, 110, 86, 220), "C2");
+        dl->AddCircle({c3x, c3y}, 2.5f, IM_COL32(153, 60, 29, 230), 0, 1.5f);
+        dl->AddText({c3x + 4.f,  c3y + 4.f},  IM_COL32(153, 60, 29, 220), "C3");
+    }
+
+    // ── Frame labels (top corners) ────────────────────────────────────────────
+    dl->AddText({ox+4.f, oy+4.f}, IM_COL32(95,94,90,200),
+                "240mm  8.6\xc2\xb0\xc3\x97""5.7\xc2\xb0  (0\xc2\xb0)");
+    {
+        char lbl900[48];
+        float rot = m_solarP - m_solarQ;   // P-q: effective field rotation from zenith
+        snprintf(lbl900, sizeof(lbl900),
+                 "900mm  2.3\xc2\xb0\xc3\x97""1.5\xc2\xb0  (rot=%.0f\xc2\xb0)", rot);
+        dl->AddText({ox+szW-ImGui::CalcTextSize(lbl900).x-4.f, oy+4.f},
+                    IM_COL32(24,95,165,200), lbl900);
+    }
+
+    // ── Zoom hint (bottom-right inside clip rect) ─────────────────────────────
+    {
+        char zhint[24];
+        snprintf(zhint, sizeof(zhint), "zoom %.1fx", m_solarZoom);
+        ImVec2 ts = ImGui::CalcTextSize(zhint);
+        dl->AddText({ox+szW-ts.x-6.f, oy+szH-ts.y-4.f},
+                    IM_COL32(60,65,80,160), zhint);
+    }
+
+    dl->PopClipRect();
+
+    // ── P angle readout + EPH status ─────────────────────────────────────────
+    ImGui::Spacing();
     ImGui::PushFont(m_fontMono);
-    ImGui::TextColored(kGray, "dev:");
+    if (hasEph && sunEph.utc_ms > 0) {
+        float rot = m_solarP - m_solarQ;
+        // P = solar north from celestial N (changes <0.1°/h); q = parallactic angle;
+        // rot = P-q = effective camera rotation from zenith — this changes significantly
+        ImGui::TextColored(kGray,
+            "P=%.1f\xc2\xb0  q=%.1f\xc2\xb0  rot=%.1f\xc2\xb0  Alt=%.1f\xc2\xb0",
+            m_solarP, m_solarQ, rot, static_cast<float>(sunEph.alt_deg));
+    } else if (m_ephFetching.load()) {
+        ImGui::TextColored({0.55f,0.75f,0.95f,1.f}, "EPH: fetching...");
+    } else {
+        ImGui::TextColored(kGray, "P=%.1f\xc2\xb0 (statyczny — brak efemeryd)", m_solarP);
+    }
     ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::Checkbox("Style##se", &m_showStyleEditor);
-    ImGui::SameLine();
-    ImGui::Checkbox("Demo##dw",  &m_showDemoWindow);
 }
 
 // ─── Inspector + Palette column ───────────────────────────────────────────────
@@ -1175,6 +1964,29 @@ void App::RenderInspectorColumn() {
         ImGui::Spacing();
         ImGui::PopID();
     }
+
+    // ── Last command result ────────────────────────────────────────────────
+    if (!m_lastResult.empty()) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::PushFont(m_fontMono);
+        bool ok = m_lastResult.find("ERROR") == std::string::npos;
+        ImGui::TextColored(ok ? ImVec4(0.55f,0.85f,0.55f,1.f)
+                              : ImVec4(1.0f, 0.35f,0.25f,1.f),
+                           "%s", m_lastResult.c_str());
+        ImGui::PopFont();
+    }
+
+    // ── DEV ────────────────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::PushFont(m_fontMono);
+    ImGui::TextColored(kGray, "dev:");
+    ImGui::PopFont();
+    ImGui::SameLine();
+    ImGui::Checkbox("Style##se", &m_showStyleEditor);
+    ImGui::SameLine();
+    ImGui::Checkbox("Demo##dw",  &m_showDemoWindow);
 }
 
 // ─── Timeline (bottom, full width) ────────────────────────────────────────────
@@ -1226,19 +2038,19 @@ void App::RenderTimelineBottom() {
     int64_t c1=ct.c1Ms, c2=ct.c2Ms, mx=ct.maxMs, c3=ct.c3Ms, c4=ct.c4Ms;
 
     if (c2>0 && c3>0) {
-        struct PZ { int64_t s, e; ImU32 col; const char* lbl; };
+        static constexpr ImU32 kTxtDark  = IM_COL32(180,168,138,155);
+        static constexpr ImU32 kTxtBlack = IM_COL32(20, 15,  5, 220);
+        struct PZ { int64_t s, e; ImU32 col; const char* lbl; ImU32 textCol; };
         PZ zones[] = {
-            {m_tlViewStart, c2-10000, IM_COL32(28,28,36,255), "Partial"},
-            {c2-10000, c2-2000,  IM_COL32(110,90,15,255),    "Bailey's"},
-            {c2-2000,  c2+2000,  IM_COL32(190,185,145,255),  "D.Ring"},
-            {c2+2000,  c2+45000, IM_COL32(115,48,68,255),    "Chrom"},
-            {c2+45000, mx-20000, IM_COL32(80,60,8,255),      "Corona"},
-            {mx-20000, mx+20000, IM_COL32(150,118,18,255),   "Max"},
-            {mx+20000, c3-45000, IM_COL32(80,60,8,255),      "Corona"},
-            {c3-45000, c3-2000,  IM_COL32(115,48,68,255),    "Chrom"},
-            {c3-2000,  c3+2000,  IM_COL32(190,185,145,255),  "D.Ring"},
-            {c3+2000,  c3+10000, IM_COL32(110,90,15,255),    "Bailey's"},
-            {c3+10000, m_tlViewEnd, IM_COL32(28,28,36,255),  "Partial"},
+            {m_tlViewStart, c2-30000, IM_COL32(28,28,36,255),    "Partial Solar Eclipse", kTxtDark },
+            {c2-30000, c2-10000, IM_COL32(190,185,145,255),      "Diamond Ring",          kTxtBlack},
+            {c2-10000, c2+10000, IM_COL32(110,90,15,255),        "Baily's Beads",         kTxtDark },
+            {c2+10000, mx-5000,  IM_COL32(80,60,8,255),          "Total Solar Eclipse",   kTxtDark },
+            {mx-5000,  mx+5000,  IM_COL32(150,118,18,255),       "Maximum",               kTxtDark },
+            {mx+5000,  c3-10000, IM_COL32(80,60,8,255),          "Total Solar Eclipse",   kTxtDark },
+            {c3-10000, c3+10000, IM_COL32(110,90,15,255),        "Baily's Beads",         kTxtDark },
+            {c3+10000, c3+30000, IM_COL32(190,185,145,255),      "Diamond Ring",          kTxtBlack},
+            {c3+30000, m_tlViewEnd, IM_COL32(28,28,36,255),      "Partial Solar Eclipse", kTxtDark },
         };
         for (auto& z : zones) {
             if (z.s >= z.e) continue;
@@ -1249,8 +2061,7 @@ void App::RenderTimelineBottom() {
             float zw = px2-px1;
             if (zw > 30.f) {
                 float tw = ImGui::CalcTextSize(z.lbl).x;
-                dl->AddText({px1+(zw-tw)*0.5f, phaseY+3.f},
-                            IM_COL32(180,168,138,155), z.lbl);
+                dl->AddText({px1+(zw-tw)*0.5f, phaseY+3.f}, z.textCol, z.lbl);
             }
         }
     } else {
@@ -1638,35 +2449,53 @@ void App::RenderTimelineBottom() {
         }
     }
 
-    // ── Click on ruler → set playhead (only when sequencer is idle/paused) ──
+    // ── Playhead drag (grab triangle ±8 px, hold, move) ──────────────────────
     {
-        GuiSeqMode sm = m_guiSeqMode.load();
-        bool canDrag  = (sm == GuiSeqMode::Idle || sm == GuiSeqMode::TestPaused);
-        if (canDrag && ImGui::IsWindowHovered()
-            && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            ImVec2 mp = ImGui::GetMousePos();
-            // Ruler area: between rulerY and rulerY + kRulerH, right of label column
-            if (mp.x > winPos.x + kLabelW && mp.x < winPos.x + winW
-                && mp.y >= rulerY && mp.y < rulerY + kRulerH) {
-                float relX  = mp.x - (winPos.x + kLabelW);
-                int64_t tMs = m_tlViewStart + int64_t(relX / cntW * vDur);
-                m_tlPlayheadMs.store(std::clamp(tMs, m_tlViewStart, m_tlViewEnd));
-                // Reset per-track next-block indices so resume picks correct start
+        GuiSeqMode sm    = m_guiSeqMode.load();
+        bool       canPh = (sm == GuiSeqMode::Idle || sm == GuiSeqMode::TestPaused);
+
+        // Cancel drag if mode changed externally
+        if (!canPh && m_tlPhDragging) m_tlPhDragging = false;
+
+        if (canPh && ImGui::IsWindowHovered()) {
+            ImVec2  mp    = ImGui::GetMousePos();
+            int64_t ph    = m_tlPlayheadMs.load();
+            float   phPx  = (ph >= m_tlViewStart && ph <= m_tlViewEnd)
+                          ? toPx(ph) : -9999.f;
+
+            // ── Start drag when clicking within 8 px of playhead triangle ────
+            if (!m_tlPhDragging && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                bool inRuler = mp.y >= rulerY && mp.y < rulerY + kRulerH + 8.f
+                            && mp.x > winPos.x + kLabelW
+                            && mp.x < winPos.x + winW;
+                if (inRuler && std::fabs(mp.x - phPx) <= 8.f)
+                    m_tlPhDragging = true;
+            }
+
+            // ── Update playhead while dragging ───────────────────────────────
+            if (m_tlPhDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                float   relX  = std::clamp(mp.x - (winPos.x + kLabelW), 0.f, cntW);
+                int64_t tMs   = m_tlViewStart + int64_t(relX / cntW * vDur);
+                int64_t newPh = std::clamp(tMs, m_tlViewStart, m_tlViewEnd);
+                m_tlPlayheadMs.store(newPh);
+                // Keep per-track next-block indices in sync for TestPaused resume
                 if (sm == GuiSeqMode::TestPaused) {
-                    int64_t ph = m_tlPlayheadMs.load();
                     int camIdx = 0;
                     for (int ti = 0;
                          ti < static_cast<int>(m_tracks.size()) && camIdx < kMaxCamTracks;
                          ++ti) {
-                        if (!m_tracks[ti].IsCamera()) { continue; }
-                        // Find first block at or after new playhead position
+                        if (!m_tracks[ti].IsCamera()) continue;
                         int ni = 0;
                         for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
-                            if (m_tracks[ti].blocks[ni].atMs >= ph) break;
+                            if (m_tracks[ti].blocks[ni].atMs >= newPh) break;
                         m_seqNextBlock[camIdx++] = ni;
                     }
                 }
             }
+
+            // ── End drag on mouse release ────────────────────────────────────
+            if (m_tlPhDragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+                m_tlPhDragging = false;
         }
     }
 
@@ -1703,6 +2532,7 @@ App::App() {
 
     // ── TotalControlConfig.db — active config ─────────────────────────────
     std::wstring configPath = dir + L"\\TotalControlConfig.db";
+    m_configPath = configPath;
     if (!std::filesystem::exists(configPath)) {
         std::filesystem::copy_file(defaultCfgPath, configPath);
         LogLine("First run: TotalControlConfig.db created from defaults");
@@ -1764,6 +2594,9 @@ App::App() {
         SeedBuiltinCalib();
         LoadCalibCache();
 
+        // Ephemeris cache tables (created if absent; data loaded on first fetch)
+        m_configDb.CreateEphTables();
+
         // Load saved timeline (overrides InitTracks defaults when data exists)
         auto saved = m_configDb.LoadTimeline();
         if (!saved.empty()) {
@@ -1823,6 +2656,10 @@ App::~App() {
     StopStatusThread();
 
     if (m_iqpThread.joinable()) m_iqpThread.join();
+    if (m_ephThread.joinable()) m_ephThread.join();
+    if (m_sdoThread.joinable()) m_sdoThread.join();
+
+    if (m_sdoSrv) { m_sdoSrv->Release(); m_sdoSrv = nullptr; }
 
     if (m_pipe.GetState() == PipeClient::State::Connected) {
         (void)m_pipe.Send("{\"cmd\":\"quit\"}");
@@ -1892,7 +2729,12 @@ void App::ApplyStyleDark() {
     c[ImGuiCol_ModalWindowDimBg]          = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
 }
 
-void App::OnInit() {
+void App::OnInit(ID3D11Device* d3dDev, ID3D11DeviceContext* d3dCtx) {
+    assert(d3dDev != nullptr);
+    assert(d3dCtx != nullptr);
+    m_d3dDev = d3dDev;
+    m_d3dCtx = d3dCtx;
+
     ImGuiIO& io = ImGui::GetIO();
     m_fontMono  = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 15.0f);
     m_fontLarge = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 24.0f);
@@ -1909,6 +2751,7 @@ void App::OnInit() {
     style.WindowBorderSize = 1.0f;
     style.WindowPadding    = ImVec2(12, 12);
 
+    TriggerSdoFetch();
     StartStatusThread();
 }
 
@@ -3281,6 +4124,28 @@ void App::OnFrame() {
         if (ImGui::Button(loading ? "Calculating..." : "Calculate Contacts", ImVec2(-1, 34)))
             TriggerIqpFetch();
         if (loading) ImGui::EndDisabled();
+    }
+
+    {
+        static const ImVec4 kGreen2 {0.15f, 0.90f, 0.35f, 1.0f};
+        static const ImVec4 kRed2   {0.95f, 0.22f, 0.18f, 1.0f};
+        static const ImVec4 kDim3   {0.40f, 0.40f, 0.45f, 1.0f};
+        int iqpSt2 = m_iqpState.load();
+        if (iqpSt2 == 1 || iqpSt2 == 2) {
+            ImGui::Spacing();
+            ImGui::PushFont(m_fontLarge);
+            if (iqpSt2 == 1) {
+                ImGui::TextColored(kDim3, "checking location...");
+            } else {
+                ContactTimes ct2;
+                { std::lock_guard lk(m_iqpMutex); ct2 = m_contacts; }
+                if (!ct2.apiOk)       ImGui::TextColored(kDim3,   "network error");
+                else if (!ct2.valid)  ImGui::TextColored(kRed2,   "NO ECLIPSE VISIBLE HERE");
+                else if (ct2.c2Ms>0) ImGui::TextColored(kGreen2, "YOU ARE IN THE TOTALITY ZONE");
+                else                  ImGui::TextColored(kRed2,   "YOU ARE OUTSIDE TOTALITY ZONE");
+            }
+            ImGui::PopFont();
+        }
     }
 
     ImGui::Spacing();

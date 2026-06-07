@@ -101,7 +101,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     // Application
     TotalControl::App app;
     g_app = &app;
-    app.OnInit();
+    app.OnInit(g_pd3dDevice, g_pd3dDeviceContext);
 
     // Rebuild font atlas after OnInit() added custom fonts
     ImGui_ImplDX11_InvalidateDeviceObjects();

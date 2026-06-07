@@ -161,6 +161,8 @@ add_executable(TotalControlGUI WIN32
     src/gui/Database.cpp
     src/gui/IqpClient.cpp
     src/gui/BesselCalc.cpp
+    src/gui/EphClient.cpp
+    src/gui/SdoClient.cpp
     src/gui/gui.rc
 )
 
@@ -188,6 +190,7 @@ target_link_libraries(TotalControlGUI PRIVATE
     sqlite3
     d3d11.lib dxgi.lib
     winhttp.lib
+    windowscodecs.lib
     kernel32.lib user32.lib gdi32.lib
     ole32.lib oleaut32.lib uuid.lib shell32.lib
 )
