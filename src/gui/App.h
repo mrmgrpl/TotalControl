@@ -165,22 +165,35 @@ private:
     float m_solarQ    =  0.f;   // q: parallactic angle; drawing uses (P₀-q)
     float m_solarZoom =  1.f;   // current zoom factor (mouse wheel; 0.2–20)
 
-    // ── SDO live solar image ─────────────────────────────────────────────────
-    // Downloaded from sdo.gsfc.nasa.gov, decoded JPEG → D3D11 texture.
-    void TriggerSdoFetch();
-    void SdoThreadProc(std::wstring cachePath);
-    void CreateSdoTexture();     // render thread only — creates D3D11 SRV
+    // ── GOES-19 SUVI Fe171 animation ─────────────────────────────────────────
+    // 300 frames from cdn.star.nesdis.noaa.gov; cadence 4 min; alpha=luminance.
+    struct SuviFrame { std::vector<uint8_t> rgba; int w = 0, h = 0; };
+
+    // Alignment calibration — editable live in Inspector panel
+    float m_suviHalfQ       = 0.99f * 600.f / 384.f;  // image half / disc radius
+    float m_suviFooterPx    = 10.f;   // disc centre offset from image centre (px)
+    float m_suviCorrRightPx =  8.f;   // additional shift right (image px)
+    float m_suviCorrUpPx    =  8.f;   // additional shift up   (image px)
+
+    void TriggerSuviFetch();
+    void SuviThreadProc();
+    void CreateSuviTextures();   // render thread only — uploads pending frames to D3D11
 
     ID3D11Device*              m_d3dDev    = nullptr;
     ID3D11DeviceContext*       m_d3dCtx    = nullptr;
-    ID3D11ShaderResourceView*  m_sdoSrv    = nullptr;  // null until first decode
-    std::thread                m_sdoThread;
-    std::atomic<bool>          m_sdoFetching{false};
-    std::atomic<bool>          m_sdoNewData{false};    // pixel buffer ready
-    mutable std::mutex         m_sdoPixelMutex;
-    std::vector<uint8_t>       m_sdoPixels;            // decoded RGBA (under mutex)
-    int                        m_sdoTexW = 0, m_sdoTexH = 0;
-    int64_t                    m_sdoFetchedAtMs = 0;   // UtcNowMs() of last attempt
+
+    std::vector<SuviFrame>                   m_suviPending;  // decoded, awaiting GPU upload
+    std::vector<ID3D11ShaderResourceView*>   m_suviSrvs;     // D3D11 SRV per frame (render thread)
+    mutable std::mutex                       m_suviMutex;    // guards m_suviPending
+    std::atomic<bool>                        m_suviNewFrames{false};
+
+    int     m_suviCurFrame    = 0;
+    float   m_suviAnimTimer   = 0.f;
+    float   m_suviAnimFps     = 30.f;   // 30 fps → 10s loop at 300 frames
+
+    std::thread        m_suviThread;
+    std::atomic<bool>  m_suviFetching{false};
+    int64_t            m_suviFetchedAtMs = 0;
 
     // ── JPL Horizons ephemeris ────────────────────────────────────────────────
     void TriggerEphFetch();
@@ -237,6 +250,11 @@ private:
     // ── Named timeline snapshots ─────────────────────────────────────────────
     void CreateCalibrationSnapshot();  // idempotent — skips if already exists
     void RenderSnapshotModal();        // ImGui modal: open / save-as / delete
+    void LoadAudioPreset(std::string_view lang); // populate audio track from eclipse_audio_<LANG>/
+
+    // Background audio file scanner — probes MP3 durations via MCI and caches to DB.
+    void ScanAudioFilesAsync();       // start or restart background scan
+    void AudioScanThreadProc();       // thread body
 
     bool                      m_showSnapOpen   = false;   // open-timeline modal
     bool                      m_showSnapSaveAs = false;   // save-as modal
@@ -274,15 +292,35 @@ private:
 
     // Per-track "next unfired block" index for up to 4 camera tracks.
     // Written only by m_seqThread while running; read by main thread only after join.
-    static constexpr int kMaxCamTracks = 4;
-    int m_seqNextBlock[kMaxCamTracks] = {};
+    static constexpr int kMaxCamTracks  = 4;
+    static constexpr int kMaxAudioTracks = 2;
+    int m_seqNextBlock[kMaxCamTracks]    = {};
+    int m_audioNextBlock[kMaxAudioTracks] = {};
 
     // Snapshot of playhead and real-time at the last Start/Resume
     int64_t m_testPlayheadAtStart = -1;
     int64_t m_testStartRealMs     = -1;
 
     std::thread       m_seqThread;
+    std::thread       m_audioSeqThread;   // independent audio-only tick loop
     std::atomic<bool> m_seqRun{false};
+
+    void AudioSeqThreadProc(GuiSeqMode mode, int64_t playheadStartMs, int64_t realStartMs);
+
+    // ── Audio file duration cache ─────────────────────────────────────────────
+    // Populated by AudioScanThreadProc; read by LoadAudioPreset + Inspector.
+    // Key: "LANG/filename.mp3" (e.g. "PL/01_pre_c1_10min.mp3")
+    std::map<std::string, int32_t> m_audioDurCache;
+    std::mutex                     m_audioDurMutex;
+    std::thread                    m_audioScanThread;
+    std::atomic<int>               m_audioScanProgress{0};    // files probed so far
+    std::atomic<int>               m_audioScanTotal{0};       // total files found
+    std::atomic<bool>              m_audioScanComplete{false}; // set by scan thread on finish
+    std::string                    m_pendingAudioReload;       // lang to reload after scan; main-thread only
+
+    // ── Photo preset ─────────────────────────────────────────────────────────
+    void AddPhotoPreset();
+    int  m_presetTargetTrack = 0;  // camera track index that receives AddPhotoPreset blocks
 };
 
 } // namespace TotalControl

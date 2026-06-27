@@ -255,7 +255,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 - `TotalControlGUI.log` — GUI, next to exe, append mode
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Current status (2026-06-08)
+## Current status (2026-06-27)
 
 | Module | Status |
 |---|---|
@@ -277,6 +277,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **TotalControlGUI Phase 3a–3c** | **DONE** |
 | **TotalControlGUI Phase 3d** | **DONE** |
 | **TotalControlGUI Solar Simulator** | **DONE 2026-06-08** |
+| **TotalControlGUI GOES-19 SUVI Fe171** | **DONE 2026-06-27** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -400,6 +401,40 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 - Zoom: mouse wheel, range 0.2×–20×
 
 **Next (after Solar Simulator)**: audio playback block, obscuration % display
+
+### TotalControlGUI — GOES-19 SUVI Fe171 animation (complete 2026-06-27)
+
+**Source**: `cdn.star.nesdis.noaa.gov/GOES19/SUVI/FD/Fe171/` — 1200×1200 JPEGs, cadence ~4 min
+
+**SuviThreadProc** (background, one instance):
+- Fetches CDN Apache directory listing (~10 MB HTML) → parses actual filenames (14-digit timestamp + `_GOES19-SUVI-Fe171-1200x1200.jpg` suffix)
+- Sorts chronologically, takes last 300 frames
+- **Smart cache** (`suvi_cache/` next to exe): loads cached files, downloads only missing, deletes files outside last-300
+- WIC JPEG decode → RGBA (alpha = max(R,G,B)); D3D11 texture per frame
+- Status in solar view: `SUVI N/300` (cyan, loading) or `SUVI N fr` (green, done)
+
+**Animation**: 30 fps, 300 frames = 10 s loop; `m_suviAnimFps = 30.f`
+
+**Image geometry** (1200×1200):
+- Solar disc: 768×768 px → radius 384 px; centre at X=600, Y=590 (10 px above image centre)
+- `kSuviHalfQ = image_half / disc_radius = 600/384` (base value)
+- Rendered rotated by `P_rad = (P₀ − q) × π/180`; alpha-blended over simulator background
+
+**SUVI ALIGNMENT panel** (Inspector column, below PALETTE):
+- 4 × `InputFloat` with +/− buttons, step 0.005 or 1 px
+- `m_suviHalfQ` — Skala dysku (disc scale relative to sunR)
+- `m_suviFooterPx` — Offset stopki (disc centre Y offset from image centre, image px)
+- `m_suviCorrRightPx` — Korekta prawo (shift right in image space, image px)
+- `m_suviCorrUpPx` — Korekta góra (shift up in image space, image px)
+- All 4 persisted to `TotalControlConfig.db` keys `suvi_half_q / suvi_footer_px / suvi_corr_right_px / suvi_corr_up_px` — survive restarts and GOES-19 orbital drift
+
+**Red alignment circle**: `AddCircle(cx, cy, sunR)` always drawn on top of SUVI image for visual verification
+
+**PITFALLs**:
+- SUVI filenames: SS and trailing digit vary with NOAA schedule — cannot be guessed; must fetch directory listing
+- CDN directory = ~10 MB Apache autoindex HTML; parse `href="NNNNNNNNNNNNNN_GOES19-SUVI-Fe171-1200x1200.jpg"`
+- `ImTextureID = ImU64` since ImGui 1.91.4 → cast: `(ImTextureID)(uintptr_t)srv`
+- `Database::SetSetting` takes `const char*` — use `.c_str()` on `std::to_string()` result
 
 ## Known pitfalls in IqpClient (maps.besselianelements.com API)
 

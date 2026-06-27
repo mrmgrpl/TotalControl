@@ -857,4 +857,82 @@ void Database::SetEphMeta(const std::string& eclDate, const std::string& locatio
     sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
 }
 
+// ─── Audio file duration cache ───────────────────────────────────────────────
+
+static constexpr const char* kCreateAudioFiles = R"SQL(
+    CREATE TABLE IF NOT EXISTS audio_files (
+        lang      TEXT    NOT NULL,
+        filename  TEXT    NOT NULL,
+        dur_ms    INTEGER NOT NULL,
+        PRIMARY KEY (lang, filename)
+    );
+)SQL";
+
+void Database::CreateAudioFilesTable() {
+    assert(m_db != nullptr);
+    Exec(kCreateAudioFiles);
+}
+
+void Database::SaveAudioFileDur(std::string_view lang,
+                                std::string_view filename,
+                                int32_t         durMs) {
+    assert(m_db != nullptr);
+    assert(!lang.empty() && !filename.empty());
+    assert(durMs >= 0);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "INSERT OR REPLACE INTO audio_files (lang, filename, dur_ms) VALUES (?,?,?);",
+        -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, lang.data(),     static_cast<int>(lang.size()),     SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, filename.data(), static_cast<int>(filename.size()), SQLITE_STATIC);
+    sqlite3_bind_int (st, 3, durMs);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+std::map<std::string, int32_t> Database::LoadAudioFileDurs() const {
+    assert(m_db != nullptr);
+    std::map<std::string, int32_t> out;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+            "SELECT lang, filename, dur_ms FROM audio_files;",
+            -1, &st, nullptr) != SQLITE_OK)
+        return out;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        std::string lang = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        std::string fn   = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+        int32_t     dur  = sqlite3_column_int(st, 2);
+        out[lang + "/" + fn] = dur;
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+std::vector<std::string> Database::LoadAudioCachedLangs() const {
+    assert(m_db != nullptr);
+    std::vector<std::string> out;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+            "SELECT DISTINCT lang FROM audio_files ORDER BY lang;",
+            -1, &st, nullptr) != SQLITE_OK)
+        return out;
+    while (sqlite3_step(st) == SQLITE_ROW)
+        out.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(st, 0)));
+    sqlite3_finalize(st);
+    return out;
+}
+
+void Database::ClearAudioFileDurs(std::string_view lang) {
+    assert(m_db != nullptr);
+    if (lang.empty()) {
+        sqlite3_exec(m_db, "DELETE FROM audio_files;", nullptr, nullptr, nullptr);
+    } else {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(m_db, "DELETE FROM audio_files WHERE lang=?;", -1, &st, nullptr);
+        sqlite3_bind_text(st, 1, lang.data(), static_cast<int>(lang.size()), SQLITE_STATIC);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+}
+
 } // namespace TotalControl

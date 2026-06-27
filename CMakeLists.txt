@@ -193,6 +193,7 @@ target_link_libraries(TotalControlGUI PRIVATE
     windowscodecs.lib
     kernel32.lib user32.lib gdi32.lib
     ole32.lib oleaut32.lib uuid.lib shell32.lib
+    winmm.lib
 )
 
 # GUI wymaga gotowego katalogu SRV
@@ -213,6 +214,16 @@ add_custom_command(TARGET TotalControlGUI POST_BUILD
         "$<TARGET_FILE_DIR:TotalControlSRV>/TotalControlGUI.exe"
     COMMENT "Copy TotalControlGUI.exe -> SRV output dir"
 )
+
+# Copy eclipse audio presets next to SRV exe (both Debug and Release)
+foreach(AUDIO_LANG en pl)
+    add_custom_command(TARGET TotalControlGUI POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/external/eclipse_audio_${AUDIO_LANG}"
+            "$<TARGET_FILE_DIR:TotalControlSRV>/eclipse_audio_${AUDIO_LANG}"
+        COMMENT "Copy eclipse_audio_${AUDIO_LANG} -> SRV output dir"
+    )
+endforeach()
 
 message(STATUS "TotalControl | CrSDK include : ${CRSDK_INCLUDE}")
 message(STATUS "TotalControl | CrSDK lib     : ${CRSDK_LIB}")

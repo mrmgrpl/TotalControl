@@ -6,10 +6,12 @@
 
 namespace TotalControl {
 
-// Download the latest SDO HMI Intensitygram (HMIIC) JPEG from NASA.
-// URL: https://sdo.gsfc.nasa.gov/assets/img/latest/latest_1024_HMIIC.jpg
-// Returns raw JPEG bytes on success, empty vector on failure.
-std::vector<uint8_t> FetchSdoJpeg(
+// Generic single-shot WinHTTP HTTPS GET.
+// Returns raw response bytes (up to maxBytes), or empty on error / non-200 status.
+std::vector<uint8_t> FetchHttpsBytes(
+    const wchar_t* host,
+    const wchar_t* path,
+    int maxBytes = 4 * 1024 * 1024,
     const std::function<void(std::string_view)>& logger = nullptr);
 
 } // namespace TotalControl

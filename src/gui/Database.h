@@ -4,6 +4,7 @@
 #include "BesselCalc.h"
 #include "Timeline.h"
 #include "EphClient.h"
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -89,6 +90,19 @@ public:
                                          const std::string& location) const;
     void                 SetEphMeta(const std::string& eclDate,
                                     const std::string& location);
+
+    // Audio file duration cache (TotalControlConfig.db)
+    // lang: uppercase 2-char tag e.g. "PL", "EN"; filename: bare name.
+    // Key in returned map: "LANG/filename.mp3".
+    void                              CreateAudioFilesTable();
+    void                              SaveAudioFileDur(std::string_view lang,
+                                                       std::string_view filename,
+                                                       int32_t durMs);
+    std::map<std::string, int32_t>    LoadAudioFileDurs() const;
+    // Returns sorted list of language tags that already have rows in the table.
+    std::vector<std::string>          LoadAudioCachedLangs() const;
+    // Deletes all rows for given lang; pass empty to delete ALL rows.
+    void                              ClearAudioFileDurs(std::string_view lang = {});
 
 private:
     sqlite3* m_db = nullptr;

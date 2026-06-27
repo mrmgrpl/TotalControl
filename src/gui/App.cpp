@@ -1,6 +1,7 @@
 ﻿#include "App.h"
 #include "TzEntry.h"
 #include "SdoClient.h"
+#include <winhttp.h>
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -12,8 +13,10 @@
 #include <cassert>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <mmsystem.h>
 #include <algorithm>
 #include <chrono>
+#include <set>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -31,6 +34,55 @@ static std::wstring ExeDir() {
     std::wstring s(path);
     auto slash = s.rfind(L'\\');
     return (slash != std::wstring::npos) ? s.substr(0, slash) : s;
+}
+
+// UTF-8 string → wstring
+static std::wstring Utf8ToW(std::string_view s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+// wstring → UTF-8 string
+static std::string WToUtf8(std::wstring_view w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                                nullptr, 0, nullptr, nullptr);
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                        s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+// Open an MP3 via MCI, read its length in milliseconds, then close. Returns 0 on failure.
+static int32_t MciProbeDurMs(const std::wstring& fullPath) {
+    static std::atomic<int> s_id{0};
+    std::wstring alias = L"tc_probe" + std::to_wstring(++s_id);
+    std::wstring open  = L"open \"" + fullPath + L"\" type mpegvideo alias " + alias;
+    if (mciSendStringW(open.c_str(), nullptr, 0, nullptr) != 0) return 0;
+    mciSendStringW((L"set " + alias + L" time format milliseconds").c_str(), nullptr, 0, nullptr);
+    wchar_t buf[32]{};
+    mciSendStringW((L"status " + alias + L" length").c_str(), buf, 32, nullptr);
+    mciSendStringW((L"close " + alias).c_str(), nullptr, 0, nullptr);
+    int32_t ms = static_cast<int32_t>(_wtoi(buf));
+    return (ms > 0) ? ms : 0;
+}
+
+// Fire-and-forget MP3 playback. Detaches a thread that opens, plays (blocking wait),
+// then closes the MCI device. Exception to NASA rule 3: one allocation per announcement,
+// no sequencer interaction, audio never blocks camera operations.
+static void MciPlayAsync(const std::wstring& fullPath) {
+    static std::atomic<int> s_id{0};
+    std::wstring alias = L"tc_play" + std::to_wstring(++s_id);
+    std::thread([fullPath, alias]() {
+        std::wstring open = L"open \"" + fullPath + L"\" type mpegvideo alias " + alias;
+        if (mciSendStringW(open.c_str(), nullptr, 0, nullptr) != 0) return;
+        mciSendStringW((L"set " + alias + L" time format milliseconds").c_str(), nullptr, 0, nullptr);
+        mciSendStringW((L"play " + alias + L" wait").c_str(), nullptr, 0, nullptr);
+        mciSendStringW((L"close " + alias).c_str(), nullptr, 0, nullptr);
+    }).detach();
 }
 
 // Returns UTC milliseconds since Unix epoch using high-resolution Windows clock.
@@ -406,188 +458,312 @@ void App::TriggerEphFetch() {
                                lat, lon, altM);
 }
 
-// ─── SDO live solar image ─────────────────────────────────────────────────────
+// ─── GOES-19 SUVI Fe171 animation ────────────────────────────────────────────
+// URL: cdn.star.nesdis.noaa.gov/GOES19/SUVI/FD/Fe171/YYYYDDDHHMMSS1_GOES19-SUVI-Fe171-600x600.jpg
+// Cadence: 4 min; SS=37 fixed; alpha = max(R,G,B) so black space is transparent.
 
-void App::TriggerSdoFetch() {
+void App::TriggerSuviFetch() {
     assert(m_d3dDev != nullptr);
-    assert(m_sdoTexW >= 0 && m_sdoTexH >= 0);
-    if (m_sdoFetching.load()) return;
-    m_sdoFetching.store(true);
-    m_sdoFetchedAtMs = UtcNowMs();
-    std::wstring cachePath = ExeDir() + L"\\TotalControlSDO.jpg";
-    if (m_sdoThread.joinable()) m_sdoThread.detach();
-    m_sdoThread = std::thread(&App::SdoThreadProc, this, std::move(cachePath));
+    if (m_suviFetching.load()) return;
+    m_suviFetching.store(true);
+    m_suviFetchedAtMs = UtcNowMs();
+    if (m_suviThread.joinable()) m_suviThread.detach();
+    m_suviThread = std::thread(&App::SuviThreadProc, this);
 }
 
-void App::SdoThreadProc(std::wstring cachePath) {
-    assert(!cachePath.empty());
-    assert(m_sdoFetching.load());
+void App::SuviThreadProc() {
+    assert(m_suviFetching.load());
     CoInitialize(nullptr);
 
-    auto logger = [this](std::string_view msg){ LogLine(msg); };
-    auto jpegBytes = FetchSdoJpeg(logger);
+    // SUVI Fe171 filenames have variable SS and trailing digit — cannot guess.
+    // Strategy: fetch CDN directory listing, parse actual 1200x1200 filenames,
+    // take last 300 (alphabetical = chronological), download each.
+    static constexpr int    kNumFrames    = 300;
+    static constexpr size_t kMaxJpegBytes = 2u * 1024u * 1024u;   // 1200x1200 ~1.35 MB each
+    static constexpr size_t kMaxDirBytes  = 20u * 1024u * 1024u;  // directory listing ~10 MB
 
-    if (jpegBytes.empty()) {
-        LogLine("SDO: network failed, trying cache");
-        HANDLE hf = CreateFileW(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                                nullptr, OPEN_EXISTING, 0, nullptr);
-        if (hf != INVALID_HANDLE_VALUE) {
-            DWORD sz = GetFileSize(hf, nullptr);
-            if (sz > 0 && sz < 4u * 1024u * 1024u) {
-                jpegBytes.resize(sz);
-                DWORD got = 0;
-                if (!ReadFile(hf, jpegBytes.data(), sz, &got, nullptr) || got != sz)
-                    jpegBytes.clear();
-            }
-            CloseHandle(hf);
-        }
-    } else {
-        // Save fresh download to cache
-        HANDLE hf = CreateFileW(cachePath.c_str(), GENERIC_WRITE, 0,
-                                nullptr, CREATE_ALWAYS, 0, nullptr);
-        if (hf != INVALID_HANDLE_VALUE) {
-            DWORD written = 0;
-            WriteFile(hf, jpegBytes.data(), static_cast<DWORD>(jpegBytes.size()),
-                      &written, nullptr);
-            CloseHandle(hf);
-        }
-    }
+    std::wstring cacheDir = ExeDir() + L"\\suvi_cache";
+    CreateDirectoryW(cacheDir.c_str(), nullptr);
 
-    if (jpegBytes.empty()) {
-        LogLine("SDO: no data available");
-        m_sdoFetching.store(false);
-        CoUninitialize();
-        return;
-    }
-
-    // WIC decode JPEG → RGBA
+    // ── WIC factory ──────────────────────────────────────────────────────────
     IWICImagingFactory* wicFac = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
                                   CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFac));
     if (FAILED(hr)) {
-        LogLine(std::format("SDO: WIC factory failed {:08x}", static_cast<unsigned>(hr)));
-        m_sdoFetching.store(false); CoUninitialize(); return;
+        LogLine(std::format("SUVI: WIC factory {:08x}", static_cast<unsigned>(hr)));
+        m_suviFetching.store(false); CoUninitialize(); return;
     }
 
-    IWICStream* stream = nullptr;
-    hr = wicFac->CreateStream(&stream);
-    if (SUCCEEDED(hr))
-        hr = stream->InitializeFromMemory(jpegBytes.data(),
-                                          static_cast<DWORD>(jpegBytes.size()));
-    if (FAILED(hr)) {
-        if (stream) stream->Release();
-        wicFac->Release(); m_sdoFetching.store(false); CoUninitialize(); return;
+    // JPEG -> RGBA; alpha = max(R,G,B) so black space becomes transparent
+    auto decodeJpeg = [&](const std::vector<uint8_t>& jpg) -> SuviFrame {
+        SuviFrame result;
+        if (jpg.empty()) return result;
+        IWICStream* ws = nullptr;
+        if (FAILED(wicFac->CreateStream(&ws))) return result;
+        HRESULT hrc = ws->InitializeFromMemory(const_cast<BYTE*>(jpg.data()),
+                                                static_cast<DWORD>(jpg.size()));
+        if (FAILED(hrc)) { ws->Release(); return result; }
+        IWICBitmapDecoder* dec = nullptr;
+        hrc = wicFac->CreateDecoderFromStream(ws, nullptr,
+                                               WICDecodeMetadataCacheOnLoad, &dec);
+        ws->Release();
+        if (FAILED(hrc)) return result;
+        IWICBitmapFrameDecode* frm = nullptr;
+        hrc = dec->GetFrame(0, &frm); dec->Release();
+        if (FAILED(hrc)) return result;
+        IWICFormatConverter* conv = nullptr;
+        hrc = wicFac->CreateFormatConverter(&conv);
+        if (SUCCEEDED(hrc))
+            hrc = conv->Initialize(frm, GUID_WICPixelFormat32bppRGBA,
+                                   WICBitmapDitherTypeNone, nullptr, 0.f,
+                                   WICBitmapPaletteTypeCustom);
+        frm->Release();
+        if (FAILED(hrc)) { if (conv) conv->Release(); return result; }
+        UINT imgW = 0, imgH = 0;
+        conv->GetSize(&imgW, &imgH);
+        std::vector<uint8_t> px(static_cast<size_t>(imgW) * imgH * 4);
+        hrc = conv->CopyPixels(nullptr, imgW * 4, static_cast<UINT>(px.size()), px.data());
+        conv->Release();
+        if (FAILED(hrc)) return result;
+        for (size_t p = 0; p + 3 < px.size(); p += 4)
+            px[p + 3] = std::max({ px[p], px[p+1], px[p+2] });
+        result.rgba = std::move(px);
+        result.w = static_cast<int>(imgW);
+        result.h = static_cast<int>(imgH);
+        return result;
+    };
+
+    int loaded = 0;
+    auto pushDecoded = [&](SuviFrame frame) {
+        if (frame.rgba.empty()) return;
+        { std::lock_guard lk(m_suviMutex); m_suviPending.push_back(std::move(frame)); }
+        if ((++loaded % 5) == 0) m_suviNewFrames.store(true);
+    };
+
+    // ── WinHTTP session + connection (reused for dir listing + all frames) ────
+    HINTERNET hSes = WinHttpOpen(L"TotalControlSUVI/1.0",
+                                  WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET hCon = nullptr;
+    if (hSes) {
+        WinHttpSetTimeouts(hSes, 30000, 30000, 30000, 30000);
+        hCon = WinHttpConnect(hSes, L"cdn.star.nesdis.noaa.gov",
+                              INTERNET_DEFAULT_HTTPS_PORT, 0);
     }
 
-    IWICBitmapDecoder* dec = nullptr;
-    hr = wicFac->CreateDecoderFromStream(stream, nullptr,
-                                         WICDecodeMetadataCacheOnLoad, &dec);
-    stream->Release();
-    if (FAILED(hr)) {
-        wicFac->Release(); m_sdoFetching.store(false); CoUninitialize(); return;
+    // Generic GET; returns body bytes up to maxBytes, empty on error/non-200.
+    auto httpGet = [&](const wchar_t* path, size_t maxBytes) -> std::vector<uint8_t> {
+        if (!hCon) return {};
+        HINTERNET hReq = WinHttpOpenRequest(hCon, L"GET", path, nullptr,
+                                             WINHTTP_NO_REFERER,
+                                             WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                             WINHTTP_FLAG_SECURE);
+        if (!hReq) return {};
+        bool ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                      WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+               && WinHttpReceiveResponse(hReq, nullptr);
+        if (!ok) { WinHttpCloseHandle(hReq); return {}; }
+        DWORD status = 0, statusSz = sizeof(status);
+        WinHttpQueryHeaders(hReq,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSz, WINHTTP_NO_HEADER_INDEX);
+        if (status != 200) { WinHttpCloseHandle(hReq); return {}; }
+        std::vector<uint8_t> body; body.reserve(256 * 1024);
+        DWORD avail = 0;
+        while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+            size_t off = body.size(); body.resize(off + avail);
+            DWORD got = 0;
+            if (!WinHttpReadData(hReq, body.data() + off, avail, &got)) break;
+            body.resize(off + got);
+            if (body.size() >= maxBytes) break;
+        }
+        WinHttpCloseHandle(hReq);
+        return body;
+    };
+
+    // ── Step 1: fetch CDN directory listing and parse 1200x1200 filenames ────
+    LogLine("SUVI: fetching directory listing…");
+    auto dirHtml = httpGet(L"/GOES19/SUVI/FD/Fe171/", kMaxDirBytes);
+    if (dirHtml.empty()) {
+        LogLine("SUVI: directory fetch failed");
+        wicFac->Release();
+        if (hCon) WinHttpCloseHandle(hCon);
+        if (hSes) WinHttpCloseHandle(hSes);
+        m_suviFetching.store(false); CoUninitialize(); return;
     }
 
-    IWICBitmapFrameDecode* frame = nullptr;
-    hr = dec->GetFrame(0, &frame);
-    dec->Release();
-    if (FAILED(hr)) {
-        wicFac->Release(); m_sdoFetching.store(false); CoUninitialize(); return;
+    // Scan for "NNNNNNNNNNNNNN_GOES19-SUVI-Fe171-1200x1200.jpg" (14-digit timestamp)
+    static constexpr std::string_view kSuffix = "_GOES19-SUVI-Fe171-1200x1200.jpg";
+    std::vector<std::string> names;
+    const char* p = reinterpret_cast<const char*>(dirHtml.data());
+    const char* end = p + dirHtml.size();
+    while (p < end) {
+        // Find suffix
+        const char* hit = std::search(p, end, kSuffix.begin(), kSuffix.end());
+        if (hit == end) break;
+        // Walk back 14 digits
+        if (hit < p + 14) { p = hit + 1; continue; }
+        const char* nameStart = hit - 14;
+        bool allDigits = true;
+        for (int i = 0; i < 14; ++i)
+            if (nameStart[i] < '0' || nameStart[i] > '9') { allDigits = false; break; }
+        if (allDigits) {
+            std::string name(nameStart, 14 + kSuffix.size());
+            if (names.empty() || names.back() != name)
+                names.push_back(std::move(name));
+        }
+        p = hit + kSuffix.size();
+    }
+    dirHtml.clear();   // free ~10 MB
+
+    if (names.empty()) {
+        LogLine("SUVI: no 1200x1200 files found in directory");
+        wicFac->Release();
+        if (hCon) WinHttpCloseHandle(hCon);
+        if (hSes) WinHttpCloseHandle(hSes);
+        m_suviFetching.store(false); CoUninitialize(); return;
     }
 
-    IWICFormatConverter* conv = nullptr;
-    hr = wicFac->CreateFormatConverter(&conv);
-    if (SUCCEEDED(hr))
-        hr = conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA,
-                              WICBitmapDitherTypeNone, nullptr, 0.f,
-                              WICBitmapPaletteTypeCustom);
-    frame->Release();
-    if (FAILED(hr)) {
-        if (conv) conv->Release();
-        wicFac->Release(); m_sdoFetching.store(false); CoUninitialize(); return;
-    }
+    // Sort chronologically (lexicographic = chronological for YYYYDDDHHMMSS? names)
+    std::sort(names.begin(), names.end());
+    LogLine(std::format("SUVI: {} files in directory; taking last {}",
+                        names.size(), kNumFrames));
 
-    UINT imgW = 0, imgH = 0;
-    conv->GetSize(&imgW, &imgH);
+    // Take last kNumFrames
+    if ((int)names.size() > kNumFrames)
+        names.erase(names.begin(), names.begin() + ((int)names.size() - kNumFrames));
 
-    std::vector<uint8_t> pixels(static_cast<size_t>(imgW) * imgH * 4);
-    hr = conv->CopyPixels(nullptr, imgW * 4,
-                          static_cast<UINT>(pixels.size()), pixels.data());
-    conv->Release(); wicFac->Release();
-    if (FAILED(hr)) {
-        m_sdoFetching.store(false); CoUninitialize(); return;
-    }
+    // ── Step 2: scan cache for existing files ────────────────────────────────
+    std::set<std::wstring> wantedSet;
+    for (const auto& n : names)
+        wantedSet.insert(std::wstring(n.begin(), n.end()));
 
-    // Circular alpha mask — outside the solar disc becomes transparent
-    float maskR  = 0.5f * static_cast<float>(std::min(imgW, imgH));
-    float centerX = static_cast<float>(imgW) * 0.5f;
-    float centerY = static_cast<float>(imgH) * 0.5f;
-    for (UINT y = 0; y < imgH; ++y) {
-        for (UINT x = 0; x < imgW; ++x) {
-            float dx = static_cast<float>(x) - centerX;
-            float dy = static_cast<float>(y) - centerY;
-            if (dx * dx + dy * dy > maskR * maskR)
-                pixels[(y * imgW + x) * 4 + 3] = 0;
+    std::set<std::wstring> cachedSet;
+    {
+        WIN32_FIND_DATAW fdw;
+        HANDLE hFind = FindFirstFileW((cacheDir + L"\\*.jpg").c_str(), &fdw);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do { cachedSet.insert(fdw.cFileName); }
+            while (FindNextFileW(hFind, &fdw));
+            FindClose(hFind);
         }
     }
 
-    {
-        std::lock_guard lk(m_sdoPixelMutex);
-        m_sdoPixels = std::move(pixels);
-        m_sdoTexW   = static_cast<int>(imgW);
-        m_sdoTexH   = static_cast<int>(imgH);
+    auto readCache = [&](const std::wstring& fname) -> std::vector<uint8_t> {
+        HANDLE hf = CreateFileW((cacheDir + L"\\" + fname).c_str(), GENERIC_READ,
+                                FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) return {};
+        DWORD sz = GetFileSize(hf, nullptr);
+        std::vector<uint8_t> buf;
+        if (sz > 0 && sz < kMaxJpegBytes) {
+            buf.resize(sz);
+            DWORD got = 0;
+            if (!ReadFile(hf, buf.data(), sz, &got, nullptr) || got != sz) buf.clear();
+        }
+        CloseHandle(hf);
+        return buf;
+    };
+
+    auto writeCache = [&](const std::wstring& fname, const std::vector<uint8_t>& data) {
+        if (data.empty()) return;
+        HANDLE hf = CreateFileW((cacheDir + L"\\" + fname).c_str(), GENERIC_WRITE, 0,
+                                nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) return;
+        DWORD wr = 0;
+        WriteFile(hf, data.data(), static_cast<DWORD>(data.size()), &wr, nullptr);
+        CloseHandle(hf);
+    };
+
+    // ── Step 3: load from cache + download missing, in chronological order ───
+    int fromCache = 0, downloaded = 0;
+    for (const auto& name : names) {
+        std::wstring wname(name.begin(), name.end());
+        std::vector<uint8_t> jpg;
+
+        if (cachedSet.count(wname)) {
+            jpg = readCache(wname);
+            if (!jpg.empty()) ++fromCache;
+        }
+        if (jpg.empty()) {
+            std::wstring cdnPath = L"/GOES19/SUVI/FD/Fe171/" + wname;
+            jpg = httpGet(cdnPath.c_str(), kMaxJpegBytes);
+            if (!jpg.empty()) { writeCache(wname, jpg); ++downloaded; }
+        }
+        pushDecoded(decodeJpeg(jpg));
     }
-    LogLine(std::format("SDO: decoded {}x{} px", imgW, imgH));
-    m_sdoNewData.store(true);
-    m_sdoFetching.store(false);
+
+    if (hCon) WinHttpCloseHandle(hCon);
+    if (hSes) WinHttpCloseHandle(hSes);
+    wicFac->Release();
+
+    // ── Step 4: delete cache files not in wanted set ─────────────────────────
+    int deleted = 0;
+    for (const auto& fname : cachedSet) {
+        if (!wantedSet.count(fname)) {
+            DeleteFileW((cacheDir + L"\\" + fname).c_str());
+            ++deleted;
+        }
+    }
+
+    m_suviNewFrames.store(true);
+    LogLine(std::format("SUVI: done — {} cache + {} CDN + {} deleted",
+                        fromCache, downloaded, deleted));
+    m_suviFetching.store(false);
     CoUninitialize();
 }
 
-void App::CreateSdoTexture() {
+void App::CreateSuviTextures() {
     assert(m_d3dDev != nullptr);
-    assert(m_sdoNewData.load());
-    m_sdoNewData.store(false);
+    assert(m_suviNewFrames.load());
+    m_suviNewFrames.store(false);
 
-    std::vector<uint8_t> pixels;
-    int w = 0, h = 0;
+    std::vector<SuviFrame> newFrames;
     {
-        std::lock_guard lk(m_sdoPixelMutex);
-        pixels = m_sdoPixels;
-        w = m_sdoTexW;
-        h = m_sdoTexH;
+        std::lock_guard lk(m_suviMutex);
+        newFrames = std::move(m_suviPending);
+        m_suviPending.clear();
     }
-    if (pixels.empty() || w <= 0 || h <= 0) return;
+    if (newFrames.empty()) return;
 
-    if (m_sdoSrv) { m_sdoSrv->Release(); m_sdoSrv = nullptr; }
+    for (auto& f : newFrames) {
+        if (f.rgba.empty() || f.w <= 0 || f.h <= 0) continue;
 
-    D3D11_TEXTURE2D_DESC td{};
-    td.Width            = static_cast<UINT>(w);
-    td.Height           = static_cast<UINT>(h);
-    td.MipLevels        = 1;
-    td.ArraySize        = 1;
-    td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
-    td.SampleDesc.Count = 1;
-    td.Usage            = D3D11_USAGE_DEFAULT;
-    td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width            = static_cast<UINT>(f.w);
+        td.Height           = static_cast<UINT>(f.h);
+        td.MipLevels        = 1;
+        td.ArraySize        = 1;
+        td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage            = D3D11_USAGE_DEFAULT;
+        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
 
-    D3D11_SUBRESOURCE_DATA init{};
-    init.pSysMem     = pixels.data();
-    init.SysMemPitch = static_cast<UINT>(w * 4);
+        D3D11_SUBRESOURCE_DATA init{};
+        init.pSysMem     = f.rgba.data();
+        init.SysMemPitch = static_cast<UINT>(f.w * 4);
 
-    ID3D11Texture2D* tex = nullptr;
-    HRESULT hr = m_d3dDev->CreateTexture2D(&td, &init, &tex);
-    if (FAILED(hr)) {
-        LogLine(std::format("SDO: CreateTexture2D failed {:08x}", static_cast<unsigned>(hr)));
-        return;
+        ID3D11Texture2D* tex = nullptr;
+        HRESULT hr = m_d3dDev->CreateTexture2D(&td, &init, &tex);
+        if (FAILED(hr)) {
+            LogLine(std::format("SUVI: CreateTexture2D {:08x}", static_cast<unsigned>(hr)));
+            continue;
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
+        srvd.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srvd.ViewDimension           = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvd.Texture2D.MipLevels     = 1;
+
+        ID3D11ShaderResourceView* srv = nullptr;
+        hr = m_d3dDev->CreateShaderResourceView(tex, &srvd, &srv);
+        tex->Release();
+        if (FAILED(hr)) {
+            LogLine(std::format("SUVI: CreateSRV {:08x}", static_cast<unsigned>(hr)));
+            continue;
+        }
+        m_suviSrvs.push_back(srv);
+        f.rgba.clear();   // free CPU memory after GPU upload
     }
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
-    srvd.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvd.ViewDimension           = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvd.Texture2D.MipLevels     = 1;
-    hr = m_d3dDev->CreateShaderResourceView(tex, &srvd, &m_sdoSrv);
-    tex->Release();
-    if (FAILED(hr))
-        LogLine(std::format("SDO: CreateSRV failed {:08x}", static_cast<unsigned>(hr)));
 }
 
 // ─── Camera overhead model (ILCE-7RM4A) ──────────────────────────────────────
@@ -846,6 +1022,8 @@ void App::SeqThreadProc(GuiSeqMode mode,
     for (int i = 0; i < kMaxCamTracks; ++i)
         nextBlock[i] = m_seqNextBlock[i];
 
+    // Audio is handled by m_audioSeqThread — not here.
+
     // ── Pre-arm deduplication ─────────────────────────────────────────────────
     // ARM is sent after a block fires only when the NEXT block has different
     // params (BlockParamsDiffer). Identical consecutive blocks skip the ARM —
@@ -1042,12 +1220,378 @@ void App::StartSeqThread(GuiSeqMode mode) {
     m_seqThread = std::thread([this, mode, playheadStart, nowReal]() {
         SeqThreadProc(mode, playheadStart, nowReal);
     });
+    // Audio runs in its own thread — unblocked by camera pipe latency.
+    m_audioSeqThread = std::thread([this, mode, playheadStart, nowReal]() {
+        AudioSeqThreadProc(mode, playheadStart, nowReal);
+    });
 }
 
 void App::StopSeqThread() {
     m_seqRun.store(false);
-    if (m_seqThread.joinable()) m_seqThread.join();
-    // m_seqNextBlock[] already updated by SeqThreadProc during run — preserved for resume
+    if (m_seqThread.joinable())      m_seqThread.join();
+    if (m_audioSeqThread.joinable()) m_audioSeqThread.join();
+    // m_seqNextBlock[] / m_audioNextBlock[] preserved for resume
+}
+
+void App::AudioSeqThreadProc(GuiSeqMode mode, int64_t playheadStartMs, int64_t realStartMs) {
+    assert(playheadStartMs >= 0 && realStartMs >= 0);
+
+    // Snapshot audio tracks at start so we never race with the render thread.
+    std::vector<TLTrack> audioTracks;
+    for (const auto& tr : m_tracks)
+        if (tr.IsAudio()) audioTracks.push_back(tr);
+
+    // Local next-block indices — written back to m_audioNextBlock on exit.
+    int next[kMaxAudioTracks];
+    for (int i = 0; i < kMaxAudioTracks; ++i)
+        next[i] = m_audioNextBlock[i];
+
+    std::wstring exeDir = ExeDir();
+
+    // 5 ms tick loop — completely independent of camera pipe-calls.
+    static constexpr int kMaxAudioTracks_ = kMaxAudioTracks; // capture for lambda
+    while (m_seqRun.load()) {
+        int64_t nowMs  = UtcNowMs();
+        int64_t simMs  = (mode == GuiSeqMode::TestRunning)
+                       ? (playheadStartMs + (nowMs - realStartMs))
+                       : nowMs;
+
+        int ai = 0;
+        for (const auto& tr : audioTracks) {
+            if (ai >= kMaxAudioTracks_) break;
+            int& ni = next[ai];
+            while (ni < static_cast<int>(tr.blocks.size())) {
+                const TLBlock& blk = tr.blocks[ni];
+                if (blk.atMs < 0)      { ++ni; continue; }
+                if (blk.atMs > simMs)    break;
+                if (!blk.audioFile.empty()) {
+                    std::wstring rel = Utf8ToW(blk.audioFile);
+                    for (auto& c : rel) if (c == L'/') c = L'\\';
+                    MciPlayAsync(exeDir + L"\\" + rel);
+                }
+                LogLine(std::format("SEQ_AUDIO ai={} idx={} drift={}ms file={}",
+                    ai, ni, nowMs - blk.atMs,
+                    blk.audioFile.empty() ? "-" : blk.audioFile));
+                ++ni;
+                m_audioNextBlock[ai] = ni;  // update visible to main thread
+            }
+            ++ai;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i] = next[i];
+}
+
+// ─── Audio file scanner ───────────────────────────────────────────────────────
+
+void App::ScanAudioFilesAsync() {
+    if (m_audioScanThread.joinable()) m_audioScanThread.join();
+    m_audioScanProgress.store(0);
+    m_audioScanTotal.store(0);
+    m_audioScanThread = std::thread([this]() { AudioScanThreadProc(); });
+}
+
+void App::AudioScanThreadProc() {
+    assert(m_audioScanProgress.load() == 0);
+
+    // Open separate DB connection (scan thread must not share m_configDb with render thread).
+    std::wstring exeDir = ExeDir();
+    Database db;
+    if (!db.Open(exeDir + L"\\TotalControlConfig.db")) return;
+    db.CreateAudioFilesTable();
+
+    // Load set of already-cached language tags — skip those dirs entirely.
+    auto cachedLangs = db.LoadAudioCachedLangs();
+    auto isCached = [&](const std::string& lang) {
+        for (const auto& l : cachedLangs) if (l == lang) return true;
+        return false;
+    };
+
+    // Collect (lang, filename, fullPath) only for uncached dirs.
+    // Dir must match eclipse_audio_XX exactly (2-character language suffix).
+    struct FileEntry { std::string lang; std::string filename; std::wstring fullPath; };
+    std::vector<FileEntry> files;
+
+    WIN32_FIND_DATAW dirFd{};
+    HANDLE dh = FindFirstFileW((exeDir + L"\\eclipse_audio_*").c_str(), &dirFd);
+    if (dh != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(dirFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            std::wstring dn  = dirFd.cFileName;
+            std::string  dns = WToUtf8(dn);
+            // Require exactly 2-character suffix: "eclipse_audio_PL" has length 16.
+            if (dns.size() != 16) continue;
+            std::string lang = dns.substr(14);
+            for (char& c : lang) c = static_cast<char>(
+                std::toupper(static_cast<unsigned char>(c)));
+            // Skip if this lang is already fully cached.
+            if (isCached(lang)) continue;
+
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((exeDir + L"\\" + dn + L"\\*.mp3").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    files.push_back({lang, WToUtf8(fd.cFileName),
+                                     exeDir + L"\\" + dn + L"\\" + fd.cFileName});
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+        } while (FindNextFileW(dh, &dirFd));
+        FindClose(dh);
+    }
+
+    m_audioScanTotal.store(static_cast<int>(files.size()));
+    if (files.empty()) {
+        LogLine("AudioScan: all eclipse_audio_XX dirs already cached — skipping probe");
+        return;
+    }
+
+    LogLine(std::format("AudioScan: probing {} new MP3 files", files.size()));
+
+    // Probe each file and save to DB immediately.
+    std::map<std::string, int32_t> newEntries;
+    for (const auto& f : files) {
+        int32_t dur = MciProbeDurMs(f.fullPath);
+        if (dur > 0) {
+            db.SaveAudioFileDur(f.lang, f.filename, dur);
+            newEntries[f.lang + "/" + f.filename] = dur;
+        }
+        m_audioScanProgress.fetch_add(1);
+    }
+
+    // Merge new entries into the in-memory cache under mutex.
+    { std::lock_guard lk(m_audioDurMutex);
+      for (auto& [k, v] : newEntries) m_audioDurCache[k] = v; }
+
+    LogLine(std::format("AudioScan: {} files probed and cached (audio_files table)",
+                        m_audioScanProgress.load()));
+
+    // Signal main thread that scan is done (checked in OnFrame).
+    m_audioScanComplete.store(true);
+}
+
+// ─── Audio preset ─────────────────────────────────────────────────────────────
+
+void App::LoadAudioPreset(std::string_view lang) {
+    assert(!lang.empty());
+
+    ContactTimes ct;
+    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+    if (!ct.valid) ct = m_beResult;
+    if (!ct.valid || ct.c2Ms <= 0) {
+        m_lastResult = "Audio Preset: calculate contacts first (C2 required)";
+        return;
+    }
+
+    // Reference contacts used for timing offsets.
+    // Max = midpoint of totality when not provided by source.
+    int64_t c1  = ct.c1Ms;
+    int64_t c2  = ct.c2Ms;
+    int64_t c3  = ct.c3Ms;
+    int64_t c4  = ct.c4Ms;
+    int64_t mx  = (ct.maxMs > 0) ? ct.maxMs : (c2 + c3) / 2;
+
+    // Table: {filename, reference_ms, offset_ms, estimated_dur_ms}
+    // Timing is derived from the filename convention used in generate_eclipse_audio.py.
+    // Short countdown numbers (1–9) are ~1.2 s; mid-speech clips ~4–8 s.
+    struct E { const char* file; int64_t ref; int64_t off; int32_t dur; };
+    static constexpr E kT[] = {
+        // PRE-C1
+        {"01_pre_c1_10min.mp3", 0, -600000, 8000},
+        {"02_pre_c1_5min.mp3",  0, -300000, 3000},
+        {"03_pre_c1_1min.mp3",  0,  -60000, 3000},
+        {"04_pre_c1_30s.mp3",   0,  -30000, 2000},
+        {"05_pre_c1_15s.mp3",   0,  -15000, 2000},
+        {"06_c1.mp3",           0,       0, 4000},
+        // PARTIAL PHASE — every 5 min countdown to C2
+        {"07_to_c2_60min.mp3",  1, -3600000, 7000},
+        {"08_to_c2_55min.mp3",  1, -3300000, 3000},
+        {"09_to_c2_50min.mp3",  1, -3000000, 3000},
+        {"10_to_c2_45min.mp3",  1, -2700000, 3000},
+        {"11_to_c2_40min.mp3",  1, -2400000, 3000},
+        {"12_to_c2_35min.mp3",  1, -2100000, 3000},
+        {"13_to_c2_30min.mp3",  1, -1800000, 8000},
+        {"14_to_c2_25min.mp3",  1, -1500000, 6000},
+        {"15_to_c2_20min.mp3",  1, -1200000, 8000},
+        {"16_to_c2_15min.mp3",  1,  -900000, 8000},
+        {"17_to_c2_10min.mp3",  1,  -600000, 5000},
+        // Per-minute
+        {"18_to_c2_9min.mp3",   1,  -540000, 8000},
+        {"19_to_c2_8min.mp3",   1,  -480000, 8000},
+        {"20_to_c2_7min.mp3",   1,  -420000, 5000},
+        {"21_to_c2_6min.mp3",   1,  -360000, 6000},
+        {"22_to_c2_5min.mp3",   1,  -300000, 3000},
+        {"23_to_c2_4min.mp3",   1,  -240000, 2000},
+        {"24_to_c2_3min.mp3",   1,  -180000, 5000},
+        {"25_to_c2_2min.mp3",   1,  -120000, 6000},
+        {"26_to_c2_1min.mp3",   1,   -60000, 6000},
+        // Final 45 s
+        {"27_to_c2_45s.mp3",    1,   -45000, 6000},
+        {"28_to_c2_30s.mp3",    1,   -30000, 6000},
+        {"29_to_c2_20s.mp3",    1,   -20000, 8000},
+        {"30_to_c2_15s.mp3",    1,   -15000, 2500},
+        // 14-1 countdown
+        {"31_to_c2_14s.mp3",    1,   -14000, 1200},
+        {"32_to_c2_13s.mp3",    1,   -13000, 1200},
+        {"33_to_c2_12s.mp3",    1,   -12000, 1200},
+        {"34_to_c2_11s.mp3",    1,   -11000, 1200},
+        {"35_to_c2_10s.mp3",    1,   -10000, 1200},
+        {"36_to_c2_9s.mp3",     1,    -9000, 1200},
+        {"37_to_c2_8s.mp3",     1,    -8000, 1200},
+        {"38_to_c2_7s.mp3",     1,    -7000, 1200},
+        {"39_to_c2_6s.mp3",     1,    -6000, 1200},
+        {"40_to_c2_5s.mp3",     1,    -5000, 1200},
+        {"41_to_c2_4s.mp3",     1,    -4000, 1200},
+        {"42_to_c2_3s.mp3",     1,    -3000, 1200},
+        {"43_to_c2_2s.mp3",     1,    -2000, 1200},
+        {"44_to_c2_1s.mp3",     1,    -1000, 1200},
+        // C2 — TOTALITY BEGIN
+        {"45_c2_totality.mp3",  1,        0, 3000},
+        // TOTALITY — countdown to max eclipse (Max-relative)
+        {"46_to_max_50s.mp3",   4,   -50000, 6000},
+        {"47_to_max_40s.mp3",   4,   -40000, 3000},
+        {"48_to_max_30s.mp3",   4,   -30000, 3000},
+        {"49_to_max_20s.mp3",   4,   -20000, 3000},
+        {"50_to_max_10s.mp3",   4,   -10000, 3000},
+        {"51_to_max_now.mp3",   4,        0, 2000},
+        {"52_max_eclipse.mp3",  4,     2000, 4000},
+        // TOTALITY — countdown to C3
+        {"53_to_c3_50s.mp3",    2,   -50000, 3000},
+        {"54_to_c3_40s.mp3",    2,   -40000, 3000},
+        {"55_to_c3_30s.mp3",    2,   -30000, 3000},
+        {"56_to_c3_20s.mp3",    2,   -20000, 3000},
+        {"57_to_c3_10s.mp3",    2,   -10000, 3000},
+        // 9-1 countdown to C3
+        {"58_to_c3_9s.mp3",     2,    -9000, 1200},
+        {"59_to_c3_8s.mp3",     2,    -8000, 1200},
+        {"60_to_c3_7s.mp3",     2,    -7000, 1200},
+        {"61_to_c3_6s.mp3",     2,    -6000, 1200},
+        {"62_to_c3_5s.mp3",     2,    -5000, 1200},
+        {"63_to_c3_4s.mp3",     2,    -4000, 1200},
+        {"64_to_c3_3s.mp3",     2,    -3000, 1200},
+        {"65_to_c3_2s.mp3",     2,    -2000, 1200},
+        {"66_to_c3_1s.mp3",     2,    -1000, 1200},
+        // C3 — TOTALITY END
+        {"67_c3.mp3",           2,        0, 4000},
+        {"68_post_c3_filters.mp3", 2,   3000, 5000},
+        // PARTIAL PHASE — countdown to C4
+        {"69_to_c4_60min.mp3",  3, -3600000, 4000},
+        {"70_to_c4_50min.mp3",  3, -3000000, 3000},
+        {"71_to_c4_40min.mp3",  3, -2400000, 3000},
+        {"72_to_c4_30min.mp3",  3, -1800000, 3000},
+        {"73_to_c4_20min.mp3",  3, -1200000, 3000},
+        {"74_to_c4_10min.mp3",  3,  -600000, 3000},
+        // Final 10 s to C4
+        {"75_to_c4_10s.mp3",    3,   -10000, 3000},
+        {"76_to_c4_9s.mp3",     3,    -9000, 1200},
+        {"77_to_c4_8s.mp3",     3,    -8000, 1200},
+        {"78_to_c4_7s.mp3",     3,    -7000, 1200},
+        {"79_to_c4_6s.mp3",     3,    -6000, 1200},
+        {"80_to_c4_5s.mp3",     3,    -5000, 1200},
+        {"81_to_c4_4s.mp3",     3,    -4000, 1200},
+        {"82_to_c4_3s.mp3",     3,    -3000, 1200},
+        {"83_to_c4_2s.mp3",     3,    -2000, 1200},
+        {"84_to_c4_1s.mp3",     3,    -1000, 1200},
+        // C4 — ECLIPSE END
+        {"85_c4_end.mp3",       3,        0, 8000},
+    };
+
+    // ref codes: 0=C1, 1=C2, 2=C3, 3=C4, 4=Max
+    auto refMs = [&](int r) -> int64_t {
+        switch (r) { case 0: return c1; case 1: return c2;
+                     case 2: return c3; case 3: return c4; default: return mx; }
+    };
+
+    // Prefix e.g. "eclipse_audio_PL\" (upper-case lang)
+    std::string prefix = "eclipse_audio_";
+    for (char ch : lang) prefix += static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    prefix += '\\';
+
+    // Find the first audio track and replace its blocks
+    TLTrack* audioTrk = nullptr;
+    for (auto& tr : m_tracks)
+        if (tr.IsAudio()) { audioTrk = &tr; break; }
+    if (!audioTrk) { m_lastResult = "Audio Preset: no audio track"; return; }
+
+    // Snapshot cache under mutex — read-only from this point
+    std::map<std::string, int32_t> durCache;
+    { std::lock_guard lk(m_audioDurMutex); durCache = m_audioDurCache; }
+
+    audioTrk->blocks.clear();
+    int loaded = 0;
+    for (const auto& e : kT) {
+        int64_t base = refMs(static_cast<int>(e.ref));
+        if (base <= 0) continue;
+        // Prefer DB-cached duration; fall back to compile-time estimate.
+        std::string cacheKey = std::string(lang) + "/" + e.file;
+        auto it = durCache.find(cacheKey);
+        TLBlock b;
+        b.type       = BlockType::Audio;
+        b.atMs       = base + e.off;
+        b.audioFile  = prefix + e.file;
+        b.audioDurMs = (it != durCache.end()) ? it->second : e.dur;
+        b.label      = e.file;
+        audioTrk->blocks.push_back(std::move(b));
+        ++loaded;
+    }
+
+    // Sort by time (entries are already ordered but contacts could be non-monotonic)
+    std::sort(audioTrk->blocks.begin(), audioTrk->blocks.end(),
+              [](const TLBlock& a, const TLBlock& b) { return a.atMs < b.atMs; });
+
+    m_tlDirty    = true;
+    m_lastResult = std::format("Audio Preset {} loaded — {} blocks", lang, loaded);
+    LogLine(m_lastResult);
+}
+
+// ─── Photo preset ─────────────────────────────────────────────────────────────
+
+void App::AddPhotoPreset() {
+    assert(m_presetTargetTrack >= 0);
+
+    ContactTimes ct;
+    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+    if (!ct.valid) ct = m_beResult;
+    if (!ct.valid || ct.c1Ms <= 0 || ct.c4Ms <= 0) {
+        m_lastResult = "Photo Preset: calculate contacts first (C1 and C4 required)";
+        return;
+    }
+
+    // Validate/fix target track — must be a camera track.
+    int ti = m_presetTargetTrack;
+    if (ti < 0 || ti >= static_cast<int>(m_tracks.size()) || m_tracks[ti].IsAudio()) {
+        ti = -1;
+        for (int i = 0; i < static_cast<int>(m_tracks.size()); ++i)
+            if (!m_tracks[i].IsAudio()) { ti = i; break; }
+        if (ti < 0) { m_lastResult = "Photo Preset: no camera track available"; return; }
+        m_presetTargetTrack = ti;
+    }
+
+    int64_t startMs = ct.c1Ms - 5LL * 60 * 1000;
+    int64_t endMs   = ct.c4Ms + 5LL * 60 * 1000;
+    static constexpr int64_t kStepMs = 60LL * 1000;
+
+    TLTrack& trk = m_tracks[ti];
+    trk.blocks.clear();
+
+    int count = 0;
+    for (int64_t t = startMs; t <= endMs; t += kStepMs) {
+        TLBlock b;
+        b.type   = BlockType::Single;
+        b.atMs   = t;
+        b.ss     = "1/8000";
+        b.iso    = 100;
+        b.fstop  = "6.3";
+        b.count  = 1;
+        trk.blocks.push_back(std::move(b));
+        ++count;
+    }
+
+    m_tlDirty    = true;
+    m_lastResult = std::format("Photo Preset: {} blocks on track \"{}\"", count, trk.label);
+    LogLine(m_lastResult);
 }
 
 // ─── Track initialization ─────────────────────────────────────────────────────
@@ -1151,6 +1695,16 @@ void App::RenderSequencerButtons() {
                     if (m_tracks[ti].blocks[ni].atMs >= ph) break;
                 m_seqNextBlock[camIdx++] = ni;
             }
+            int audioIdx = 0;
+            for (int ti = 0;
+                 ti < static_cast<int>(m_tracks.size()) && audioIdx < kMaxAudioTracks;
+                 ++ti) {
+                if (!m_tracks[ti].IsAudio()) continue;
+                int ni = 0;
+                for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
+                    if (m_tracks[ti].blocks[ni].atMs >= ph) break;
+                m_audioNextBlock[audioIdx++] = ni;
+            }
         }
         StartSeqThread(GuiSeqMode::TestRunning);
         LogLine("Sequencer: TEST RUN started");
@@ -1172,7 +1726,8 @@ void App::RenderSequencerButtons() {
             // Full reset to idle
             m_guiSeqMode.store(GuiSeqMode::Idle);
             m_tlPlayheadMs.store(-1);    // resets to C2-45s on next frame
-            for (int i = 0; i < kMaxCamTracks; ++i) m_seqNextBlock[i] = 0;
+            for (int i = 0; i < kMaxCamTracks;  ++i) m_seqNextBlock[i]   = 0;
+            for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i] = 0;
             LogLine("Sequencer: TEST reset to idle");
         }
     }
@@ -1194,7 +1749,8 @@ void App::RenderSequencerButtons() {
     ImGui::PushStyleColor(ImGuiCol_Text,          kRunText);
     if (ImGui::Button("\xe2\x96\xb6 RUN", kBtnSz)) {
         // RUN always starts from beginning of all tracks
-        for (int i = 0; i < kMaxCamTracks; ++i) m_seqNextBlock[i] = 0;
+        for (int i = 0; i < kMaxCamTracks;  ++i) m_seqNextBlock[i]   = 0;
+        for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i] = 0;
         StartSeqThread(GuiSeqMode::Running);
         LogLine("Sequencer: RUN started (production)");
         m_lastResult = "RUN started — real UTC timing";
@@ -1258,8 +1814,8 @@ void App::RenderStatusColumn() {
 
 void App::RenderSolarView() {
     assert(m_fontMono != nullptr);
-    // Upload decoded SDO pixels to D3D11 texture (render-thread only)
-    if (m_sdoNewData.load()) CreateSdoTexture();
+    // Upload any newly decoded SUVI frames to D3D11 (render-thread only)
+    if (m_suviNewFrames.load()) CreateSuviTextures();
     static constexpr float kPi = 3.14159265358979323846f;
     static const ImVec4    kGray{0.40f, 0.40f, 0.45f, 1.0f};
 
@@ -1352,6 +1908,25 @@ void App::RenderSolarView() {
         double moonV0 = ComputeMoonV(moonEph.ra_deg, moonEph.dec_deg);
         moonVrad      = static_cast<float>((moonV0 - q) * kPi / 180.0);
         hasMoonV      = true;
+    }
+
+    // ── Obscuration ─────────────────────────────────────────────────────────────
+    // Fraction of the Sun's disc area covered by the Moon (lens formula).
+    float moonDist = sqrtf((moonX - cx) * (moonX - cx) + (moonY - cy) * (moonY - cy));
+    float obscuration = 0.f;
+    {
+        float R1 = sunR, R2 = moonR, d = moonDist;
+        if (d < R1 + R2) {
+            if (d + R1 <= R2)       obscuration = 1.f;           // total: Moon covers Sun
+            else if (d + R2 <= R1)  obscuration = (R2*R2)/(R1*R1); // annular: Moon inside Sun
+            else {
+                float alpha = acosf(std::clamp((d*d + R1*R1 - R2*R2) / (2.f*d*R1), -1.f, 1.f));
+                float beta  = acosf(std::clamp((d*d + R2*R2 - R1*R1) / (2.f*d*R2), -1.f, 1.f));
+                float s     = (-d+R1+R2) * (d+R1-R2) * (d-R1+R2) * (d+R1+R2);
+                float area  = R1*R1 * alpha + R2*R2 * beta - 0.5f * sqrtf(std::max(0.f, s));
+                obscuration = std::clamp(area / (kPi * R1 * R1), 0.f, 1.f);
+            }
+        }
     }
 
     // cosAltSun: projection factor for az→screen (constant per frame)
@@ -1584,21 +2159,49 @@ void App::RenderSolarView() {
     dl->AddCircleFilled({cx,cy}, sunR*3.2f, IM_COL32(250,200,100, 9));
     dl->AddCircleFilled({cx,cy}, sunR*2.2f, IM_COL32(250,200,100,18));
 
-    // ── Sun disc — SDO image rotated so solar N aligns with N☉ axis ─────────
-    // N☉ in screen (y-down): rightDir=(cos P, sin P), downDir=(-sin P, cos P)
-    if (m_sdoSrv) {
-        float cosP = cosf(P_rad), sinP = sinf(P_rad);
-        float rx = sunR * cosP, ry = sunR * sinP;    // right × r
-        float dx = -sunR * sinP, dy = sunR * cosP;   // down × r
-        ImVec2 tl{ cx - rx - dx, cy - ry - dy };
-        ImVec2 tr{ cx + rx - dx, cy + ry - dy };
-        ImVec2 br{ cx + rx + dx, cy + ry + dy };
-        ImVec2 bl{ cx - rx + dx, cy - ry + dy };
-        dl->AddImageQuad(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_sdoSrv)),
-                         tl, tr, br, bl);
-    } else {
-        dl->AddCircleFilled({cx,cy}, sunR, IM_COL32(250,199,117,255));
-        dl->AddCircle      ({cx,cy}, sunR, IM_COL32(186,117, 23,255), 0, 1.f);
+    // ── SUVI Fe171 animation — rotated so solar N aligns with N☉ axis ──────
+    // SUVI FD 600×600: solar disc radius ≈ 180 px → half-quad = sunR × (300/180).
+    // Alpha = luminance → black space transparent; corona visible over grid/axes.
+    {
+        // Advance animation frame (render-thread only, no mutex needed)
+        m_suviAnimTimer += ImGui::GetIO().DeltaTime;
+        float frameSec = 1.0f / m_suviAnimFps;
+        if (m_suviAnimTimer >= frameSec) {
+            m_suviAnimTimer -= frameSec;
+            int n = (int)m_suviSrvs.size();
+            if (n > 0) m_suviCurFrame = (m_suviCurFrame + 1) % n;
+        }
+    }
+    {
+        int n = (int)m_suviSrvs.size();
+        if (n > 0 && m_suviCurFrame < n && m_suviSrvs[m_suviCurFrame]) {
+            float halfQ = sunR * m_suviHalfQ;
+            float sc    = sunR / 384.f;   // image-px → screen-px scale
+            float cosP  = cosf(P_rad), sinP = sinf(P_rad);
+            // image axes on screen: right=(cosP,sinP), down=(-sinP,cosP)
+            float adjCx = cx
+                + m_suviFooterPx    * sc * (-sinP)
+                + m_suviCorrRightPx * sc * ( cosP)
+                + m_suviCorrUpPx    * sc * ( sinP);
+            float adjCy = cy
+                + m_suviFooterPx    * sc * ( cosP)
+                + m_suviCorrRightPx * sc * ( sinP)
+                - m_suviCorrUpPx    * sc * ( cosP);
+            float rx = halfQ * cosP,  ry = halfQ * sinP;
+            float dxx = -halfQ * sinP, dyy = halfQ * cosP;
+            ImVec2 tl{ adjCx - rx - dxx, adjCy - ry - dyy };
+            ImVec2 tr{ adjCx + rx - dxx, adjCy + ry - dyy };
+            ImVec2 br{ adjCx + rx + dxx, adjCy + ry + dyy };
+            ImVec2 bl{ adjCx - rx + dxx, adjCy - ry + dyy };
+            dl->AddImageQuad(
+                static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_suviSrvs[m_suviCurFrame])),
+                tl, tr, br, bl);
+            dl->AddCircle({cx, cy}, sunR, IM_COL32(255, 0, 0, 200), 128, 2.f);
+        } else {
+            // Placeholder until SUVI frames arrive
+            dl->AddCircleFilled({cx, cy}, sunR, IM_COL32(250, 199, 117, 255));
+            dl->AddCircle      ({cx, cy}, sunR, IM_COL32(186, 117,  23, 255), 0, 1.f);
+        }
     }
 
     // ── Moon disc — totality: fully black when Moon covers Sun ───────────────
@@ -1709,15 +2312,33 @@ void App::RenderSolarView() {
     ImGui::PushFont(m_fontMono);
     if (hasEph && sunEph.utc_ms > 0) {
         float rot = m_solarP - m_solarQ;
-        // P = solar north from celestial N (changes <0.1°/h); q = parallactic angle;
-        // rot = P-q = effective camera rotation from zenith — this changes significantly
         ImGui::TextColored(kGray,
             "P=%.1f\xc2\xb0  q=%.1f\xc2\xb0  rot=%.1f\xc2\xb0  Alt=%.1f\xc2\xb0",
             m_solarP, m_solarQ, rot, static_cast<float>(sunEph.alt_deg));
+        // Obscuration — colour shifts: dim→amber→bright-yellow at totality
+        ImGui::SameLine();
+        float obsPct = obscuration * 100.f;
+        ImVec4 obsCol = (obsPct >= 99.9f) ? ImVec4(1.f, .95f, .3f, 1.f)   // totality
+                      : (obsPct >= 50.f)  ? ImVec4(.95f,.6f, .1f, 1.f)    // deep partial
+                      :                     ImVec4(.5f, .5f, .55f, 1.f);   // early partial
+        ImGui::TextColored(obsCol, " Obs=%.2f%%", obsPct);
     } else if (m_ephFetching.load()) {
         ImGui::TextColored({0.55f,0.75f,0.95f,1.f}, "EPH: fetching...");
     } else {
         ImGui::TextColored(kGray, "P=%.1f\xc2\xb0 (statyczny — brak efemeryd)", m_solarP);
+    }
+    // SUVI download progress
+    {
+        int n = (int)m_suviSrvs.size();
+        if (m_suviFetching.load()) {
+            ImGui::SameLine();
+            ImGui::TextColored({0.45f,0.80f,1.f,1.f},
+                "  SUVI %d/300", n);
+        } else if (n > 0) {
+            ImGui::SameLine();
+            ImGui::TextColored({0.35f,0.55f,0.35f,1.f},
+                "  SUVI %d fr", n);
+        }
     }
     ImGui::PopFont();
 }
@@ -1859,24 +2480,98 @@ void App::RenderInspectorColumn() {
         }
 
         if (b.type == BlockType::Audio) {
+            // Combo: MP3 files from eclipse_audio_*/ dirs — scanned once per combo open.
+            // audioFile stores relative path: "eclipse_audio_PL\01_pre_c1_10min.mp3"
             ImGui::TextColored(kGray, "File"); ImGui::SameLine(52);
-            char fileBuf[256];
-            snprintf(fileBuf, sizeof(fileBuf), "%s",
-                     b.audioFile.empty() ? "(none)" : b.audioFile.c_str());
+            const char* preview = b.audioFile.empty() ? "(none)" : b.audioFile.c_str();
             ImGui::SetNextItemWidth(-1);
-            ImGui::InputText("##af", fileBuf, sizeof(fileBuf), ImGuiInputTextFlags_ReadOnly);
-            if (ImGui::Button("Browse...", ImVec2(-1,0))) {
-                wchar_t fbuf[MAX_PATH] = {};
-                OPENFILENAMEW ofn{};
-                ofn.lStructSize = sizeof(ofn);
-                ofn.lpstrFilter = L"Audio MP3\0*.mp3\0All\0*.*\0";
-                ofn.lpstrFile   = fbuf;
-                ofn.nMaxFile    = MAX_PATH;
-                ofn.Flags       = OFN_FILEMUSTEXIST;
-                if (GetOpenFileNameW(&ofn)) {
-                    b.audioFile.clear();
-                    for (wchar_t wc : std::wstring(fbuf))
-                        b.audioFile += static_cast<char>(wc);
+            static std::vector<std::string> s_audioFiles;
+            static bool                     s_audScanned = false;
+            if (ImGui::BeginCombo("##afc", preview)) {
+                if (!s_audScanned) {
+                    s_audioFiles.clear();
+                    std::wstring exeDir = ExeDir();
+                    WIN32_FIND_DATAW dirFd{};
+                    HANDLE dh = FindFirstFileW((exeDir + L"\\eclipse_audio_*").c_str(), &dirFd);
+                    if (dh != INVALID_HANDLE_VALUE) {
+                        do {
+                            if (!(dirFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                            std::wstring dn   = dirFd.cFileName;
+                            std::string  dns  = WToUtf8(dn);
+                            WIN32_FIND_DATAW fd{};
+                            HANDLE h = FindFirstFileW((exeDir + L"\\" + dn + L"\\*.mp3").c_str(), &fd);
+                            if (h != INVALID_HANDLE_VALUE) {
+                                do { s_audioFiles.push_back(dns + "\\" + WToUtf8(fd.cFileName)); }
+                                while (FindNextFileW(h, &fd));
+                                FindClose(h);
+                            }
+                        } while (FindNextFileW(dh, &dirFd));
+                        FindClose(dh);
+                    }
+                    s_audScanned = true;
+                }
+                if (s_audioFiles.empty()) {
+                    ImGui::TextColored(kDim, "(no eclipse_audio_*/ dirs found)");
+                } else {
+                    for (const auto& rel : s_audioFiles) {
+                        bool sel = (rel == b.audioFile);
+                        if (ImGui::Selectable(rel.c_str(), sel)) {
+                            b.audioFile  = rel;
+                            // Build cache key: "LANG/filename.mp3" from "eclipse_audio_LANG\filename.mp3"
+                            std::string ckey;
+                            auto slash = rel.rfind('\\');
+                            if (slash == std::string::npos) slash = rel.rfind('/');
+                            if (slash != std::string::npos) {
+                                std::string dir = rel.substr(0, slash);   // "eclipse_audio_PL"
+                                std::string fn  = rel.substr(slash + 1);  // "01_...mp3"
+                                std::string tag = (dir.size() > 14) ? dir.substr(14) : dir;
+                                for (char& c : tag) c = static_cast<char>(
+                                    std::toupper(static_cast<unsigned char>(c)));
+                                ckey = tag + "/" + fn;
+                            }
+                            int32_t dur = 0;
+                            { std::lock_guard lk(m_audioDurMutex);
+                              auto it = m_audioDurCache.find(ckey);
+                              if (it != m_audioDurCache.end()) dur = it->second; }
+                            if (dur <= 0) {
+                                // Fallback: probe live (only if not yet in cache)
+                                std::wstring wrel = Utf8ToW(rel);
+                                for (auto& c : wrel) if (c == L'/') c = L'\\';
+                                dur = MciProbeDurMs(ExeDir() + L"\\" + wrel);
+                            }
+                            b.audioDurMs = (dur > 0) ? dur : 5000;
+                            m_tlDirty    = true;
+                        }
+                        if (sel) ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            } else {
+                s_audScanned = false;
+            }
+
+            // Duration (auto-detected from MP3 on file select)
+            ImGui::TextColored(kGray, "Dur"); ImGui::SameLine(52);
+            ImGui::Text("%.1f s", b.audioDurMs / 1000.f);
+
+            // Scan status — shown while AudioScanThreadProc is active or after
+            {
+                int prog  = m_audioScanProgress.load();
+                int total = m_audioScanTotal.load();
+                if (total > 0 && prog < total)
+                    ImGui::TextColored(ImVec4(.8f,.6f,.1f,1.f),
+                                       "Scanning: %d/%d MP3", prog, total);
+                else if (total > 0)
+                    ImGui::TextColored(ImVec4(.3f,.8f,.3f,1.f),
+                                       "Cached: %d files", total);
+            }
+
+            // Preview — fire-and-forget on detached thread
+            if (!b.audioFile.empty()) {
+                if (ImGui::Button("\xe2\x96\xb6 Play##aud", ImVec2(-1, 0))) {
+                    std::wstring wrel = Utf8ToW(b.audioFile);
+                    for (auto& c : wrel) if (c == L'/') c = L'\\';
+                    MciPlayAsync(ExeDir() + L"\\" + wrel);
                 }
             }
         }
@@ -1964,6 +2659,26 @@ void App::RenderInspectorColumn() {
         ImGui::Spacing();
         ImGui::PopID();
     }
+
+    // ── SUVI alignment calibration ────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("SUVI ALIGNMENT");
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(-1);
+    bool suviChanged = false;
+    ImGui::PushFont(m_fontMono);
+    if (ImGui::InputFloat("Skala dysku",   &m_suviHalfQ,       0.005f, 0.02f, "%.4f")) suviChanged = true;
+    if (ImGui::InputFloat("Offset stopki", &m_suviFooterPx,    1.0f,   5.0f,  "%.1f")) suviChanged = true;
+    if (ImGui::InputFloat("Korekta prawo", &m_suviCorrRightPx, 1.0f,   5.0f,  "%.1f")) suviChanged = true;
+    if (ImGui::InputFloat("Korekta gora",  &m_suviCorrUpPx,    1.0f,   5.0f,  "%.1f")) suviChanged = true;
+    ImGui::PopFont();
+    if (suviChanged) {
+        m_configDb.SetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str());
+        m_configDb.SetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str());
+        m_configDb.SetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str());
+        m_configDb.SetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str());
+    }
+    ImGui::Spacing();
 
     // ── Last command result ────────────────────────────────────────────────
     if (!m_lastResult.empty()) {
@@ -2088,22 +2803,41 @@ void App::RenderTimelineBottom() {
         dl->AddText({px+2.f, y+1.f}, m.col, m.lbl);
     }
 
-    // ── Ruler: ticks + rotated UTC labels ────────────────────────────────
-    float rulerY = phaseY + kPhaseH;
+    // ── Relative time strip + UTC ruler ──────────────────────────────────
+    static constexpr float kRelRulerH = 22.0f;  // strip above the UTC ruler
+    float relRulerY = phaseY + kPhaseH;
+    float rulerY    = relRulerY + kRelRulerH;
+
+    // Relative ruler backgrounds
+    dl->AddRectFilled({winPos.x,          relRulerY},
+                      {winPos.x + kLabelW - 2.f, relRulerY + kRelRulerH},
+                      IM_COL32(9, 9, 14, 255));
+    dl->AddRectFilled({winPos.x + kLabelW, relRulerY},
+                      {winPos.x + winW,    relRulerY + kRelRulerH},
+                      IM_COL32(7, 7, 13, 255));
+    // Bottom border separating relative strip from UTC ruler
+    dl->AddLine({winPos.x + kLabelW, relRulerY + kRelRulerH - 1.f},
+                {winPos.x + winW,    relRulerY + kRelRulerH - 1.f},
+                IM_COL32(28, 28, 46, 255), 1.f);
+    // Corner label
+    dl->AddText({winPos.x + 4.f, relRulerY + 5.f}, IM_COL32(55, 60, 85, 200), "rel");
+
+    // UTC ruler background
     dl->AddRectFilled({winPos.x, rulerY}, {winPos.x + winW, rulerY + kRulerH},
                       IM_COL32(10, 10, 14, 255));
 
-    // Collect ticks: phase transitions + 60s interval marks.
+    // Collect ticks: phase transitions + 60s / 10s / 1s interval marks.
     // Fixed-size stack array (no heap alloc): NASA rule 3.
-    struct RulerTick { int64_t ms; ImU32 col; bool isPhase; };
-    static constexpr int kMaxRulerTicks = 256;
+    // hf = height fraction (1.0 phase, 0.55 min, 0.35 10s, 0.18 1s)
+    struct RulerTick { int64_t ms; ImU32 col; bool isPhase; float hf; };
+    static constexpr int kMaxRulerTicks = 512;
     RulerTick ticks[kMaxRulerTicks];
     int numTicks = 0;
 
-    auto addTick = [&](int64_t ms, ImU32 col, bool phase) {
+    auto addTick = [&](int64_t ms, ImU32 col, bool phase, float hf = 1.0f) {
         assert(numTicks <= kMaxRulerTicks);
         if (numTicks < kMaxRulerTicks && ms >= m_tlViewStart && ms <= m_tlViewEnd)
-            ticks[numTicks++] = {ms, col, phase};
+            ticks[numTicks++] = {ms, col, phase, hf};
     };
 
     // Phase transition times
@@ -2112,39 +2846,67 @@ void App::RenderTimelineBottom() {
         constexpr ImU32 kMax = IM_COL32(255, 255, 255, 180);
         constexpr ImU32 kC14 = IM_COL32(140, 140, 165, 160);
         constexpr ImU32 kSub = IM_COL32(130, 110,  70, 140);
-        if (c1 > 0)  addTick(c1,          kC14,  true);
-        addTick(c2 - 10000, kSub,  true);
-        addTick(c2 -  2000, kSub,  true);
-        addTick(c2,         kC,    true);
-        addTick(c2 +  2000, kSub,  true);
-        addTick(c2 + 45000, kSub,  true);
-        addTick(mx - 20000, kSub,  true);
-        addTick(mx,         kMax,  true);
-        addTick(mx + 20000, kSub,  true);
-        addTick(c3 - 45000, kSub,  true);
-        addTick(c3 -  2000, kSub,  true);
-        addTick(c3,         kC,    true);
-        addTick(c3 +  2000, kSub,  true);
-        addTick(c3 + 10000, kSub,  true);
-        if (c4 > 0)  addTick(c4,          kC14,  true);
+        if (c1 > 0)  addTick(c1,          kC14, true, 1.0f);
+        addTick(c2 - 10000, kSub, true, 1.0f);
+        addTick(c2 -  2000, kSub, true, 1.0f);
+        addTick(c2,         kC,   true, 1.0f);
+        addTick(c2 +  2000, kSub, true, 1.0f);
+        addTick(c2 + 45000, kSub, true, 1.0f);
+        addTick(mx - 20000, kSub, true, 1.0f);
+        addTick(mx,         kMax, true, 1.0f);
+        addTick(mx + 20000, kSub, true, 1.0f);
+        addTick(c3 - 45000, kSub, true, 1.0f);
+        addTick(c3 -  2000, kSub, true, 1.0f);
+        addTick(c3,         kC,   true, 1.0f);
+        addTick(c3 +  2000, kSub, true, 1.0f);
+        addTick(c3 + 10000, kSub, true, 1.0f);
+        if (c4 > 0)  addTick(c4,          kC14, true, 1.0f);
     }
 
-    // 60-second ticks — only when >= 20px apart (avoid clutter at wide views)
-    float px60s = (vDur > 0) ? 60000.f * cntW / static_cast<float>(vDur) : 0.f;
+    float px1s  = (vDur > 0) ? 1000.f  * cntW / static_cast<float>(vDur) : 0.f;
+    float px10s = px1s * 10.f;
+    float px60s = px1s * 60.f;
+
+    // 60-second ticks — only when >= 20px apart
     if (px60s >= 20.f) {
-        int64_t t60 = 60000LL;
-        int64_t ft  = ((m_tlViewStart / t60) + 1) * t60;
-        // Bounded: max 300 iterations covers 5 h; zoom clamp is 4 h
+        int64_t ft = ((m_tlViewStart / 60000LL) + 1) * 60000LL;
         static constexpr int k60Max = 300;
         int loop60 = 0;
-        for (int64_t t = ft; t < m_tlViewEnd && loop60 < k60Max; t += t60, ++loop60) {
+        for (int64_t t = ft; t < m_tlViewEnd && loop60 < k60Max; t += 60000LL, ++loop60) {
             float tx = toPx(t);
-            bool nearPhase = false;
-            for (int i = 0; i < numTicks; ++i) {
-                if (fabsf(toPx(ticks[i].ms) - tx) < 8.f) { nearPhase = true; break; }
-            }
-            if (!nearPhase)
-                addTick(t, IM_COL32(55, 55, 80, 180), false);
+            bool tooClose = false;
+            for (int i = 0; i < numTicks; ++i)
+                if (fabsf(toPx(ticks[i].ms) - tx) < 8.f) { tooClose = true; break; }
+            if (!tooClose) addTick(t, IM_COL32(55, 55, 80, 180), false, 0.55f);
+        }
+    }
+
+    // 10-second ticks — when >= 15px apart
+    if (px10s >= 15.f) {
+        int64_t ft = ((m_tlViewStart / 10000LL) + 1) * 10000LL;
+        static constexpr int k10Max = 512;
+        int loop10 = 0;
+        for (int64_t t = ft; t < m_tlViewEnd && loop10 < k10Max; t += 10000LL, ++loop10) {
+            float tx = toPx(t);
+            bool tooClose = false;
+            for (int i = 0; i < numTicks; ++i)
+                if (fabsf(toPx(ticks[i].ms) - tx) < 5.f) { tooClose = true; break; }
+            if (!tooClose) addTick(t, IM_COL32(42, 42, 68, 155), false, 0.35f);
+        }
+    }
+
+    // 1-second ticks — when >= 8px apart
+    if (px1s >= 8.f) {
+        int64_t ft = ((m_tlViewStart / 1000LL) + 1) * 1000LL;
+        // Bounded: at 8px/s max ~240 s visible — well within kMaxRulerTicks budget
+        static constexpr int k1Max = 480;
+        int loop1 = 0;
+        for (int64_t t = ft; t < m_tlViewEnd && loop1 < k1Max; t += 1000LL, ++loop1) {
+            float tx = toPx(t);
+            bool tooClose = false;
+            for (int i = 0; i < numTicks; ++i)
+                if (fabsf(toPx(ticks[i].ms) - tx) < 3.f) { tooClose = true; break; }
+            if (!tooClose) addTick(t, IM_COL32(32, 32, 55, 120), false, 0.18f);
         }
     }
 
@@ -2152,12 +2914,11 @@ void App::RenderTimelineBottom() {
     std::sort(ticks, ticks + numTicks,
               [](const RulerTick& a, const RulerTick& b){ return a.ms < b.ms; });
 
-    // Draw ticks + rotated labels
+    // Draw ticks + rotated UTC labels (UTC labels only for hf >= 0.5: phase + 60s ticks)
     ImFont* lblFont  = m_fontMono ? m_fontMono : ImGui::GetIO().Fonts->Fonts[0];
     constexpr float kLblSz   = 15.0f;  // native m_fontMono size
-    constexpr float kTickH   =  7.0f;  // tick line height
-    // Minimum x-distance between adjacent labels (≈ font line height)
-    constexpr float kMinLblDx = 16.0f;
+    constexpr float kTickH   =  7.0f;  // full tick height (phase)
+    constexpr float kMinLblDx = 16.0f; // min px between UTC labels
     float lastLabelX = -9999.f;
 
     for (int i = 0; i < numTicks; ++i) {
@@ -2165,10 +2926,11 @@ void App::RenderTimelineBottom() {
         float tx = toPx(tk.ms);
         if (tx < winPos.x + kLabelW || tx > winPos.x + winW) continue;
 
-        float th = tk.isPhase ? kTickH : kTickH * 0.55f;
+        float th = tk.hf * kTickH;
         dl->AddLine({tx, rulerY}, {tx, rulerY + th}, tk.col, 1.f);
 
-        if (tx - lastLabelX >= kMinLblDx) {
+        // UTC label only for phase ticks and 60s ticks (hf >= 0.5)
+        if (tk.hf >= 0.5f && tx - lastLabelX >= kMinLblDx) {
             int64_t sv = tk.ms / 1000;
             char lb[12];
             snprintf(lb, sizeof(lb), "%02d:%02d:%02d",
@@ -2178,6 +2940,80 @@ void App::RenderTimelineBottom() {
             lastLabelX = tx;
         }
     }
+
+    // ── Relative time ruler (between phase bar and UTC ruler) ─────────────
+    // Shows Cx±M:SS / Cx±Ss relative to nearest contact at each tick position.
+    if (c1 > 0 || c2 > 0 || c3 > 0 || c4 > 0) {
+        constexpr float kRelLblSz = 10.5f;
+        constexpr float kRelMinDx = 48.f;   // min px between relative labels
+        // Choose label interval to match visible tick density
+        int64_t relInt = (px1s >= 8.f) ? 1000LL : (px10s >= 15.f) ? 10000LL : 60000LL;
+
+        // Contact table
+        const int64_t cMs[4]    = {c1, c2, c3, c4};
+        const char*   cName[4]  = {"C1", "C2", "C3", "C4"};
+        const ImU32   cCol[4]   = {IM_COL32(140,140,165,200), IM_COL32(255,200,40,220),
+                                   IM_COL32(255,200,40,220),  IM_COL32(140,140,165,200)};
+
+        float relLastX  = -9999.f;
+        int64_t rtFirst = ((m_tlViewStart / relInt) + 1) * relInt;
+        static constexpr int kRelMax = 512;
+        int relLoop = 0;
+        for (int64_t t = rtFirst; t < m_tlViewEnd && relLoop < kRelMax;
+             t += relInt, ++relLoop) {
+            float tx = toPx(t);
+            if (tx < winPos.x + kLabelW || tx > winPos.x + winW) continue;
+            if (tx - relLastX < kRelMinDx) continue;
+
+            // Nearest contact
+            int best = -1; int64_t bestD = INT64_MAX;
+            for (int ci = 0; ci < 4; ++ci) {
+                if (cMs[ci] <= 0) continue;
+                int64_t d = llabs(t - cMs[ci]);
+                if (d < bestD) { bestD = d; best = ci; }
+            }
+            if (best < 0) continue;
+
+            int64_t diff    = t - cMs[best];
+            int64_t absDiff = llabs(diff);
+            int totalSecs   = static_cast<int>(absDiff / 1000);
+            char lb[16];
+            if (diff == 0)
+                snprintf(lb, sizeof(lb), "%s", cName[best]);
+            else
+                snprintf(lb, sizeof(lb), "%s%s%ds",
+                         cName[best], diff < 0 ? "-" : "+", totalSecs);
+
+            dl->AddText(lblFont, kRelLblSz, {tx + 2.f, relRulerY + 5.f}, cCol[best], lb);
+            // Short tick mark down to separate the two rulers
+            dl->AddLine({tx, relRulerY + kRelRulerH - 5.f},
+                        {tx, relRulerY + kRelRulerH - 1.f},
+                        IM_COL32(50, 50, 75, 160), 1.f);
+            relLastX = tx;
+        }
+    }
+
+    // ── Reset-zoom button (ruler label area, bottom-left) ─────────────────
+    static constexpr int64_t kFitMarginMs = 5LL * 60 * 1000; // 5 min
+    ImGui::SetCursorScreenPos({winPos.x + 4.f, rulerY + kRulerH - 22.f});
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.12f,.12f,.18f,1.f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.22f,.22f,.32f,1.f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.30f,.28f,.12f,1.f));
+    if (ImGui::SmallButton(" \xe2\x86\x94 fit ##tz")) {  // ↔ fit
+        int64_t minMs = INT64_MAX, maxMs = INT64_MIN;
+        for (const auto& tr : m_tracks)
+            for (const auto& b : tr.blocks)
+                if (b.atMs >= 0) {
+                    minMs = std::min(minMs, b.atMs);
+                    maxMs = std::max(maxMs, b.atMs + BlockDurMs(b));
+                }
+        if (minMs == INT64_MAX) { minMs = ct.c1Ms; maxMs = ct.c4Ms; }
+        m_tlViewStart = minMs - kFitMarginMs;
+        m_tlViewEnd   = maxMs + kFitMarginMs;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Fit all blocks in view (+/-5 min margin)");
+    ImGui::PopStyleColor(3);
 
     // ── Tracks ────────────────────────────────────────────────────────────
     float tracksY = rulerY + kRulerH;
@@ -2322,10 +3158,36 @@ void App::RenderTimelineBottom() {
         float tyFill = ty + kTrackH - 2.f;   // bottom of visible content (2px gap below)
 
         // Label column
-        dl->AddRectFilled({winPos.x, ty}, {winPos.x+kLabelW-2, tyFill},
-                          IM_COL32(14, 14, 22, 255));
+        bool isPresetTarget = (!tr.IsAudio() && ti == m_presetTargetTrack);
+        ImU32 labelBg = isPresetTarget ? IM_COL32(28, 22, 6, 255) : IM_COL32(14, 14, 22, 255);
+        dl->AddRectFilled({winPos.x, ty}, {winPos.x + kLabelW - 2.f, tyFill}, labelBg);
         ImU32 lc = tr.IsAudio() ? IM_COL32(150,100,210,255) : IM_COL32(120,148,172,255);
-        dl->AddText({winPos.x+4.f, ty+7.f}, lc, tr.label.c_str());
+        dl->AddText({winPos.x + 20.f, ty + 7.f}, lc, tr.label.c_str());  // shifted right to make room
+        // Preset-target marker: amber filled triangle on the left edge (camera tracks only).
+        // Drawn with AddTriangleFilled so it works regardless of font glyph availability.
+        if (isPresetTarget) {
+            constexpr float kTx = 4.f, kTw = 10.f, kTh = 9.f;
+            float tcx = winPos.x + kTx + kTw * 0.5f;
+            float tty = ty + (kTrackH - kTh) * 0.5f;
+            dl->AddTriangleFilled({tcx - kTw * 0.5f, tty + kTh},
+                                  {tcx + kTw * 0.5f, tty + kTh},
+                                  {tcx,               tty},
+                                  IM_COL32(255, 185, 0, 240));
+            // Amber left border stripe
+            dl->AddRectFilled({winPos.x, ty}, {winPos.x + 2.5f, tyFill},
+                              IM_COL32(255, 165, 0, 200));
+        }
+        // Left-click on track label → set as photo-preset target (camera tracks only).
+        // Tooltip explains the gesture.
+        if (!tr.IsAudio()) {
+            ImVec2 mp = ImGui::GetMousePos();
+            bool hovered = (mp.x >= winPos.x && mp.x < winPos.x + kLabelW - 2.f
+                            && mp.y >= ty && mp.y < tyFill);
+            if (hovered && ImGui::IsMouseClicked(0))
+                m_presetTargetTrack = ti;
+            if (hovered && !isPresetTarget)
+                ImGui::SetTooltip("Click to set as photo preset target");
+        }
 
         // Track content bg
         ImU32 bg = (ti % 2 == 0) ? IM_COL32(14,14,20,255) : IM_COL32(12,12,18,255);
@@ -2342,9 +3204,16 @@ void App::RenderTimelineBottom() {
             if (bx2 < cx1 || bx > cx2) continue;
             float dx  = std::max(bx, cx1);
             float dx2 = std::min(bx2, cx2);
-            bool  dragged = (m_tlDragging && m_tlDragTrack==ti && m_tlDragBlock==bi);
-            bool  willDel = dragged && (ImGui::GetMousePos().y < m_tlScreenTopY);
-            ImU32 col     = willDel ? IM_COL32(200,40,40,200) : BlockColor(blk.type);
+            bool  dragged  = (m_tlDragging && m_tlDragTrack==ti && m_tlDragBlock==bi);
+            bool  willDel  = dragged && (ImGui::GetMousePos().y < m_tlScreenTopY);
+            // Audio overlap: red when this block's playback ends after the next block starts.
+            bool  audOverlap = blk.type == BlockType::Audio
+                            && bi + 1 < (int)tr.blocks.size()
+                            && tr.blocks[bi+1].atMs > 0
+                            && blk.atMs + blk.audioDurMs > tr.blocks[bi+1].atMs;
+            ImU32 col = willDel   ? IM_COL32(200, 40,  40, 200)
+                      : audOverlap ? IM_COL32(220, 40,  40, 220)
+                      :              BlockColor(blk.type);
             dl->AddRectFilled({dx, ty+2}, {dx2, tyFill}, col, 2.f);
             if (dx2-dx > 20.f && !blk.label.empty())
                 dl->AddText({dx+4.f, ty+6.f}, IM_COL32(240,240,240,215), blk.label.c_str());
@@ -2490,6 +3359,16 @@ void App::RenderTimelineBottom() {
                             if (m_tracks[ti].blocks[ni].atMs >= newPh) break;
                         m_seqNextBlock[camIdx++] = ni;
                     }
+                    int audioIdx = 0;
+                    for (int ti = 0;
+                         ti < static_cast<int>(m_tracks.size()) && audioIdx < kMaxAudioTracks;
+                         ++ti) {
+                        if (!m_tracks[ti].IsAudio()) continue;
+                        int ni = 0;
+                        for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
+                            if (m_tracks[ti].blocks[ni].atMs >= newPh) break;
+                        m_audioNextBlock[audioIdx++] = ni;
+                    }
                 }
             }
 
@@ -2555,6 +3434,12 @@ App::App() {
         std::string savedKey = m_configDb.GetSetting("iqp_api_key", "");
         if (!savedKey.empty()) SetApiKey(savedKey);
 
+        // SUVI alignment calibration (persisted so orbital drift adjustments survive restarts)
+        try { m_suviHalfQ       = std::stof(m_configDb.GetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str())); }       catch (...) {}
+        try { m_suviFooterPx    = std::stof(m_configDb.GetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str())); }    catch (...) {}
+        try { m_suviCorrRightPx = std::stof(m_configDb.GetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str())); } catch (...) {}
+        try { m_suviCorrUpPx    = std::stof(m_configDb.GetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str())); }    catch (...) {}
+
         LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",
                             m_homeTzIana, m_eclTzIana, m_obsLat, m_obsLon, m_obsAltM));
 
@@ -2596,6 +3481,12 @@ App::App() {
 
         // Ephemeris cache tables (created if absent; data loaded on first fetch)
         m_configDb.CreateEphTables();
+
+        // Audio file duration cache — create table, pre-load existing durations, start scan
+        m_configDb.CreateAudioFilesTable();
+        { std::lock_guard lk(m_audioDurMutex);
+          m_audioDurCache = m_configDb.LoadAudioFileDurs(); }
+        ScanAudioFilesAsync();
 
         // Load saved timeline (overrides InitTracks defaults when data exists)
         auto saved = m_configDb.LoadTimeline();
@@ -2655,11 +3546,13 @@ App::~App() {
 
     StopStatusThread();
 
-    if (m_iqpThread.joinable()) m_iqpThread.join();
-    if (m_ephThread.joinable()) m_ephThread.join();
-    if (m_sdoThread.joinable()) m_sdoThread.join();
+    if (m_iqpThread.joinable())       m_iqpThread.join();
+    if (m_ephThread.joinable())       m_ephThread.join();
+    if (m_suviThread.joinable())       m_suviThread.join();
+    if (m_audioScanThread.joinable()) m_audioScanThread.join();
 
-    if (m_sdoSrv) { m_sdoSrv->Release(); m_sdoSrv = nullptr; }
+    for (auto* srv : m_suviSrvs) if (srv) srv->Release();
+    m_suviSrvs.clear();
 
     if (m_pipe.GetState() == PipeClient::State::Connected) {
         (void)m_pipe.Send("{\"cmd\":\"quit\"}");
@@ -2751,7 +3644,7 @@ void App::OnInit(ID3D11Device* d3dDev, ID3D11DeviceContext* d3dCtx) {
     style.WindowBorderSize = 1.0f;
     style.WindowPadding    = ImVec2(12, 12);
 
-    TriggerSdoFetch();
+    TriggerSuviFetch();
     StartStatusThread();
 }
 
@@ -3747,6 +4640,60 @@ void App::RenderMenuBar() {
     if (ImGui::BeginMenu("Sequence")) {
         if (ImGui::MenuItem("Calculate Contacts")) TriggerIqpFetch();
         ImGui::Separator();
+        // Load Audio Preset: scan eclipse_audio_XX/ dirs (2-char lang suffix).
+        if (ImGui::BeginMenu("Load Audio Preset")) {
+            std::wstring exeDir = ExeDir();
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((exeDir + L"\\eclipse_audio_*").c_str(), &fd);
+            bool anyLang = false;
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                    std::string dns = WToUtf8(fd.cFileName);
+                    if (dns.size() != 16) continue;   // must be exactly eclipse_audio_XX
+                    std::string tag = dns.substr(14);
+                    for (char& c : tag) c = static_cast<char>(
+                        std::toupper(static_cast<unsigned char>(c)));
+                    if (ImGui::MenuItem(tag.c_str())) LoadAudioPreset(tag);
+                    anyLang = true;
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+            if (!anyLang)
+                ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1.f), "(no eclipse_audio_XX/ dirs)");
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        // Add Photo Preset: Single blocks every 1 min from C1-5min to C4+5min on ★ track.
+        if (ImGui::MenuItem("Add Photo Preset")) AddPhotoPreset();
+        ImGui::Separator();
+        // Reset Audio Presets — clears DB, rescans, then reloads current preset.
+        if (ImGui::MenuItem("Reset Audio Presets")) {
+            // Detect current audio language from the first audio block on the timeline.
+            m_pendingAudioReload.clear();
+            for (const auto& tr : m_tracks) {
+                if (!tr.IsAudio() || tr.blocks.empty()) continue;
+                const std::string& af = tr.blocks[0].audioFile;
+                // Path format: "eclipse_audio_PL\filename.mp3" — dir part is 16 chars.
+                auto sl = af.find('\\');
+                if (sl == std::string::npos) sl = af.find('/');
+                if (sl == 16 && af.size() > 16) {
+                    m_pendingAudioReload = af.substr(14, 2);
+                    for (char& c : m_pendingAudioReload)
+                        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                }
+                break;
+            }
+            m_configDb.ClearAudioFileDurs();
+            { std::lock_guard lk(m_audioDurMutex); m_audioDurCache.clear(); }
+            m_audioScanProgress.store(0);
+            m_audioScanTotal.store(0);
+            ScanAudioFilesAsync();
+            m_lastResult = m_pendingAudioReload.empty()
+                ? "Audio presets reset — rescanning all eclipse_audio_XX dirs"
+                : std::format("Audio presets reset — will reload {} after scan", m_pendingAudioReload);
+        }
+        ImGui::Separator();
         ImGui::MenuItem("Validate Timeline",   nullptr, false, false); // future
         ImGui::MenuItem("Auto-optimize",       nullptr, false, false); // future
         ImGui::EndMenu();
@@ -3850,6 +4797,14 @@ void App::RenderAboutModal() {
 
 void App::OnFrame() {
     ImGuiIO& io = ImGui::GetIO();
+
+    // ── Post-scan reload ──────────────────────────────────────────────────
+    // If a "Reset Audio Presets" triggered a rescan, reload the preset now.
+    if (m_audioScanComplete.exchange(false) && !m_pendingAudioReload.empty()) {
+        LoadAudioPreset(m_pendingAudioReload);
+        m_lastResult = std::format("Audio presets reloaded ({})", m_pendingAudioReload);
+        m_pendingAudioReload.clear();
+    }
 
     // ── Main menu bar ─────────────────────────────────────────────────────
     float menuH = 0.f;
@@ -4012,6 +4967,66 @@ void App::OnFrame() {
         }
 
         ImGui::PopFont();
+
+        // ── Prominent countdown D:HH:MM:SS.mmm ──────────────────────────────
+        // Counts down to C1; on arrival, switches automatically to C2, C3, C4.
+        {
+            ContactTimes ct;
+            int iqpSt = m_iqpState.load();
+            if (iqpSt == 2 || iqpSt == 3)
+                { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+            if (!ct.valid && m_beResult.valid) ct = m_beResult;
+
+            if (ct.valid) {
+                int64_t nowMs = UtcNowMs();
+                // Determine next upcoming contact
+                struct CdEvent { const char* lbl; int64_t ms; };
+                CdEvent events[] = {
+                    {"C1", ct.c1Ms}, {"C2", ct.c2Ms},
+                    {"C3", ct.c3Ms}, {"C4", ct.c4Ms}
+                };
+                const char* nextLbl = nullptr;
+                int64_t     nextMs  = 0;
+                for (auto& ev : events) {
+                    if (ev.ms > 0 && ev.ms > nowMs) {
+                        nextLbl = ev.lbl;
+                        nextMs  = ev.ms;
+                        break;
+                    }
+                }
+                ImGui::Spacing();
+                ImGui::PushFont(m_fontMono);
+                static const ImVec4 kCdGray {0.40f, 0.40f, 0.45f, 1.0f};
+                if (nextLbl) {
+                    int64_t rem  = nextMs - nowMs;          // ms remaining (>0)
+                    int64_t ms3  = rem % 1000;
+                    int64_t tot  = rem / 1000;
+                    int sec  = static_cast<int>(tot % 60);
+                    int min  = static_cast<int>((tot / 60) % 60);
+                    int hr   = static_cast<int>((tot / 3600) % 24);
+                    int day  = static_cast<int>(tot / 86400);
+                    ImGui::TextColored(kCdGray, "%s in:", nextLbl);
+                    char cdBuf[32];
+                    snprintf(cdBuf, sizeof(cdBuf), "%dd %02d:%02d:%02d.%03d",
+                             day, hr, min, sec, (int)ms3);
+                    ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.25f, 1.0f), "%s", cdBuf);
+                } else if (ct.c4Ms > 0) {
+                    // All contacts passed — show elapsed since C4
+                    int64_t el   = nowMs - ct.c4Ms;
+                    int64_t tot  = el / 1000;
+                    int sec  = static_cast<int>(tot % 60);
+                    int min  = static_cast<int>((tot / 60) % 60);
+                    int hr   = static_cast<int>((tot / 3600) % 24);
+                    int day  = static_cast<int>(tot / 86400);
+                    ImGui::TextColored(kCdGray, "C4+:");
+                    char cdBuf[32];
+                    snprintf(cdBuf, sizeof(cdBuf), "%dd %02d:%02d:%02d",
+                             day, hr, min, sec);
+                    ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", cdBuf);
+                }
+                ImGui::PopFont();
+            }
+        }
     }
 
     // ════════════════════════════════
