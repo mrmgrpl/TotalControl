@@ -286,15 +286,10 @@ void App::TriggerIqpFetch() {
     auto* statePtr   = &m_iqpState;
     auto* mutexPtr   = &m_iqpMutex;
     auto* contactPtr = &m_contacts;
-    auto* cfgDb      = &m_configDb;
 
     m_iqpThread = std::thread([id, lat, lon, altM, y, mo, d,
-                                statePtr, mutexPtr, contactPtr, cfgDb]() {
+                                statePtr, mutexPtr, contactPtr]() {
         auto ct = FetchContactTimes(id, lat, lon, altM, y, mo, d);
-        // Persist refreshed key so it survives next app restart
-        std::string newKey = GetCurrentApiKey();
-        if (!newKey.empty())
-            cfgDb->SetSetting("iqp_api_key", newKey.c_str());
         { std::lock_guard lk(*mutexPtr); *contactPtr = ct; }
         statePtr->store(ct.apiOk ? 2 : 3);
     });
@@ -3834,11 +3829,7 @@ App::App() {
         m_obsAltM = m_configDb.GetSettingInt("obs_alt_m", 0);
         SyncDecimalToDms();
 
-        // Load cached IQP API key (may be newer than compile-time default)
-        std::string savedKey = m_configDb.GetSetting("iqp_api_key", "");
-        if (!savedKey.empty()) SetApiKey(savedKey);
-
-        // Load dedicated BE REST API key (user-supplied, 40 hex chars, never in source)
+        // Load IQP API key (user-supplied, 40 hex chars, stored in Config.db, never in source)
         std::string beKey = m_configDb.GetSetting("be_api_key", "");
         if (!beKey.empty()) {
             SetBeApiKey(beKey);
@@ -5326,13 +5317,17 @@ void App::RenderOptionsWindow() {
     static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
     static const ImVec4 kGray {0.55f, 0.55f, 0.60f, 1.0f};
     static const ImVec4 kGreen{0.30f, 0.80f, 0.35f, 1.0f};
+    static const ImVec4 kLink {0.45f, 0.75f, 1.00f, 1.0f};
 
     ImGui::PushFont(m_fontMono);
 
-    // ── Besselian Elements REST API ────────────────────────────────────────────
-    ImGui::TextColored(kGold, "Besselian Elements REST API");
-    ImGui::TextColored(kGray, "Dedicated key (40 hex chars). Overrides the classic IQP scraping API.");
-    ImGui::TextColored(kGray, "Leave empty to use classic IQP (automatic key refresh from map page).");
+    // ── IQP API Key ────────────────────────────────────────────────────────────
+    ImGui::TextColored(kGold, "IQP API Key  (besselianelements.com)");
+    ImGui::TextColored(kGray, "Klucz (40 znakow hex) uzyskasz kontaktujac sie z zespolem:");
+    ImGui::TextColored(kLink, "  https://www.besselianelements.com/");
+    ImGui::TextColored(kGray, "Bez klucza: czasy C1-C4 z lokalnego modelu Bessela (zielona kolumna).");
+    ImGui::TextColored(kGray, "Z kluczem:  czasy C1-C4 z IQP API automatycznie (niebieska kolumna).");
+    ImGui::TextColored(kGray, "Mozna tez wejsc na strone i recznie przepisac czasy do aplikacji.");
     ImGui::Spacing();
 
     ImGuiInputTextFlags keyFlags = m_beKeyVisible

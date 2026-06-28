@@ -33,13 +33,9 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
                                double lat, double lon, int altM,
                                int year, int month, int day);
 
-// Classic IQP key (maps.besselianelements.com, 128-char hex, auto-refreshed).
-// Call SetApiKey() on startup with the value from config DB.
-void        SetApiKey(const std::string& key);
-std::string GetCurrentApiKey();
-
-// Dedicated BE REST API key (40-char hex, user-supplied, never auto-refreshed).
-// When non-empty, FetchContactTimes uses the AWS endpoint first.
+// IQP REST API key (40-char hex, user-supplied via Options window, stored in Config.db).
+// When set, FetchContactTimes calls the dedicated AWS endpoint.
+// When empty, FetchContactTimes returns {} and App uses local BE model (CalcBesselian).
 void        SetBeApiKey(const std::string& key);
 std::string GetBeApiKey();
 
