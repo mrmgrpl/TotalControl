@@ -26,6 +26,18 @@
 
 namespace TotalControl {
 
+// ─── Live View shared memory layout ──────────────────────────────────────────
+// Mirrored verbatim in src/CameraController.cpp (keep in sync).
+// GUI reads (App::LvThreadProc), SRV writes (CameraController).
+static constexpr uint32_t kLvDataMax  = 2u * 1024u * 1024u;
+static constexpr uint32_t kLvShmTotal = 8u + kLvDataMax;
+struct LvShmLayout {
+    volatile LONG frameNo;   // incremented by SRV after each write
+    uint32_t      jpegSize;
+    uint8_t       data[kLvDataMax];
+};
+static_assert(sizeof(LvShmLayout) == 8 + 2u * 1024u * 1024u, "LvShmLayout size mismatch");
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 static std::wstring ExeDir() {
@@ -788,6 +800,171 @@ void App::CreateSuviTextures() {
         }
         m_suviSrvs.push_back(srv);
         f.rgba.clear();   // free CPU memory after GPU upload
+    }
+}
+
+// ─── Live View thread ────────────────────────────────────────────────────────
+
+void App::StartLvThread() {
+    assert(!m_lvThread.joinable());
+    m_lvThreadRun.store(true);
+    m_lvThread = std::thread(&App::LvThreadProc, this);
+}
+
+void App::StopLvThread() {
+    m_lvThreadRun.store(false);
+    if (m_lvThread.joinable()) m_lvThread.join();
+}
+
+void App::LvThreadProc() {
+    assert(m_lvThreadRun.load());
+    CoInitialize(nullptr);
+
+    IWICImagingFactory* wicFac = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                   CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFac));
+    if (FAILED(hr)) {
+        LogLine(std::format("LV: WIC factory {:08x}", static_cast<unsigned>(hr)));
+        m_lvThreadRun.store(false);
+        CoUninitialize(); return;
+    }
+
+    // JPEG → RGBA (straight alpha = 255, no luminance mapping like SUVI)
+    auto decodeJpeg = [&](const uint8_t* src, uint32_t sz) -> LvFrame {
+        assert(src != nullptr && sz > 0);
+        LvFrame result;
+        IWICStream* ws = nullptr;
+        if (FAILED(wicFac->CreateStream(&ws))) return result;
+        if (FAILED(ws->InitializeFromMemory(const_cast<BYTE*>(src), sz))) {
+            ws->Release(); return result;
+        }
+        IWICBitmapDecoder* dec = nullptr;
+        HRESULT hrc = wicFac->CreateDecoderFromStream(ws, nullptr,
+                                                        WICDecodeMetadataCacheOnLoad, &dec);
+        ws->Release();
+        if (FAILED(hrc)) return result;
+        IWICBitmapFrameDecode* frm = nullptr;
+        hrc = dec->GetFrame(0, &frm); dec->Release();
+        if (FAILED(hrc)) return result;
+        IWICFormatConverter* conv = nullptr;
+        hrc = wicFac->CreateFormatConverter(&conv);
+        if (SUCCEEDED(hrc))
+            hrc = conv->Initialize(frm, GUID_WICPixelFormat32bppRGBA,
+                                    WICBitmapDitherTypeNone, nullptr, 0.f,
+                                    WICBitmapPaletteTypeCustom);
+        frm->Release();
+        if (FAILED(hrc)) { if (conv) conv->Release(); return result; }
+        UINT imgW = 0, imgH = 0;
+        conv->GetSize(&imgW, &imgH);
+        result.rgba.resize(static_cast<size_t>(imgW) * imgH * 4, 255);
+        hrc = conv->CopyPixels(nullptr, imgW * 4,
+                                static_cast<UINT>(result.rgba.size()), result.rgba.data());
+        conv->Release();
+        if (FAILED(hrc)) { result.rgba.clear(); return result; }
+        result.w = static_cast<int>(imgW);
+        result.h = static_cast<int>(imgH);
+        return result;
+    };
+
+    uint32_t lastFrameNo[kMaxCamTracks] = {};
+
+    // Bounded loop: 1e6 × 200 ms ≈ 55 hours — stopped in practice via m_lvThreadRun flag.
+    static constexpr int kMaxLvIter = 1'000'000;
+    for (int iter = 0; iter < kMaxLvIter && m_lvThreadRun.load(); ++iter) {
+        ::Sleep(200);
+
+        for (int ci = 0; ci < kMaxCamTracks; ++ci) {
+            if (!m_lvEnabled[ci]) continue;
+
+            wchar_t shmName[64];
+            swprintf_s(shmName, _countof(shmName), L"TotalControl_LV_%d", ci);
+            HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, shmName);
+            if (!hMap) continue;   // SRV hasn't called lv_start yet — silent skip
+
+            const void* view = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, kLvShmTotal);
+            if (!view) { CloseHandle(hMap); continue; }
+
+            const auto* layout = static_cast<const LvShmLayout*>(view);
+            // volatile read: on x86-64 an aligned 4-byte load is naturally atomic
+            uint32_t frameNo = static_cast<uint32_t>(layout->frameNo);
+
+            if (frameNo != lastFrameNo[ci] && frameNo > 0) {
+                uint32_t jpegSz = layout->jpegSize;
+                LvFrame frame;
+                if (jpegSz > 0 && jpegSz <= kLvDataMax)
+                    frame = decodeJpeg(layout->data, jpegSz);
+                if (!frame.rgba.empty()) {
+                    std::lock_guard lk(m_lvMutex);
+                    m_lvPending[ci] = std::move(frame);
+                    m_lvNewData[ci] = true;
+                    m_lvNewFrames.store(true);
+                }
+                lastFrameNo[ci] = frameNo;
+            }
+
+            UnmapViewOfFile(view);
+            CloseHandle(hMap);
+        }
+    }
+
+    wicFac->Release();
+    CoUninitialize();
+}
+
+void App::CreateLvTextures() {
+    assert(m_d3dDev != nullptr);
+    m_lvNewFrames.store(false);
+
+    LvFrame frames[kMaxCamTracks];
+    bool    hasNew[kMaxCamTracks] = {};
+    {
+        std::lock_guard lk(m_lvMutex);
+        for (int ci = 0; ci < kMaxCamTracks; ++ci) {
+            if (!m_lvNewData[ci]) continue;
+            frames[ci]      = std::move(m_lvPending[ci]);
+            hasNew[ci]      = true;
+            m_lvNewData[ci] = false;
+        }
+    }
+
+    for (int ci = 0; ci < kMaxCamTracks; ++ci) {
+        if (!hasNew[ci] || frames[ci].rgba.empty()) continue;
+
+        if (m_lvSrv[ci]) { m_lvSrv[ci]->Release(); m_lvSrv[ci] = nullptr; }
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width            = static_cast<UINT>(frames[ci].w);
+        td.Height           = static_cast<UINT>(frames[ci].h);
+        td.MipLevels        = 1;
+        td.ArraySize        = 1;
+        td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage            = D3D11_USAGE_DEFAULT;
+        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+
+        D3D11_SUBRESOURCE_DATA init{};
+        init.pSysMem     = frames[ci].rgba.data();
+        init.SysMemPitch = static_cast<UINT>(frames[ci].w * 4);
+
+        ID3D11Texture2D* tex = nullptr;
+        if (FAILED(m_d3dDev->CreateTexture2D(&td, &init, &tex))) {
+            LogLine(std::format("LV[{}]: CreateTexture2D failed", ci)); continue;
+        }
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
+        srvd.Format              = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srvd.ViewDimension       = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvd.Texture2D.MipLevels = 1;
+
+        ID3D11ShaderResourceView* srv = nullptr;
+        HRESULT hr = m_d3dDev->CreateShaderResourceView(tex, &srvd, &srv);
+        tex->Release();
+        if (SUCCEEDED(hr)) {
+            m_lvSrv[ci] = srv;
+            m_lvW[ci]   = frames[ci].w;
+            m_lvH[ci]   = frames[ci].h;
+        } else {
+            LogLine(std::format("LV[{}]: CreateSRV failed {:08x}", ci, static_cast<unsigned>(hr)));
+        }
     }
 }
 
@@ -2283,6 +2460,45 @@ void App::RenderSolarView() {
         dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
     }
 
+    // ── Live View overlay (alpha-blended camera image over simulator) ────────────
+    // Upload any newly decoded LV frames to D3D11 (render-thread only).
+    // Rendered as rotated quad matching the camera's FOV rectangle in the simulator.
+    // Frame outlines redrawn on top of LV so borders stay visible at any opacity.
+    if (m_lvNewFrames.load()) CreateLvTextures();
+    {
+        static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
+        const ImU32 lvAlpha = static_cast<ImU32>(m_lvOpacity * 255.f + 0.5f);
+        const ImU32 lvCol   = IM_COL32(255, 255, 255, lvAlpha);
+
+        for (int ci = 0; ci < kMaxCamTracks && ci < (int)m_camConfigs.size(); ++ci) {
+            if (!m_lvEnabled[ci] || !m_lvSrv[ci]) continue;
+            const CamConfig& cc = m_camConfigs[ci];
+            if (cc.focalMm <= 0) continue;
+
+            float f    = static_cast<float>(cc.focalMm);
+            float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
+            float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
+            float rot  = cc.applyP ? P_rad : 0.f;
+            float hw   = fovW * scale * 0.5f;
+            float hh   = fovH * scale * 0.5f;
+            float cr   = cosf(rot), sr = sinf(rot);
+
+            // Rotated corners (same transform as DrawFrame lambda)
+            ImVec2 tl{ cx + (-hw)*cr - (-hh)*sr, cy + (-hw)*sr + (-hh)*cr };
+            ImVec2 tr{ cx + ( hw)*cr - (-hh)*sr, cy + ( hw)*sr + (-hh)*cr };
+            ImVec2 br{ cx + ( hw)*cr - ( hh)*sr, cy + ( hw)*sr + ( hh)*cr };
+            ImVec2 bl{ cx + (-hw)*cr - ( hh)*sr, cy + (-hw)*sr + ( hh)*cr };
+
+            dl->AddImageQuad(
+                static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_lvSrv[ci])),
+                tl, tr, br, bl,
+                {0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}, lvCol);
+
+            // Redraw frame outline on top of LV image (white, semi-transparent)
+            DrawFrame(fovW, fovH, rot, IM_COL32(255, 255, 255, 180), false);
+        }
+    }
+
     // ── Solar rotation axis N☉ ────────────────────────────────────────────────
     // Direction from centre: N pole = (sin P, -cos P) in screen (y-down)
     float axNx = sinf(P_rad);
@@ -2795,6 +3011,60 @@ void App::RenderInspectorColumn() {
         m_configDb.SetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str());
         LogLine(std::format("SUVI align: halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f}",
                             m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx));
+    }
+    ImGui::Spacing();
+
+    // ── Live View overlay controls ─────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("LIVE VIEW");
+    ImGui::Spacing();
+    {
+        bool anyEnabled = false;
+        assert(m_camConfigs.size() <= 64);
+        for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci) {
+            const CamConfig& cc = m_camConfigs[ci];
+            bool online = false;
+            {
+                std::lock_guard lk(m_camerasMutex);
+                for (const auto& cs : m_cameras)
+                    if (cs.guid == cc.guid && cs.valid) { online = true; break; }
+            }
+            bool prev = m_lvEnabled[ci];
+            ImGui::PushFont(m_fontMono);
+            std::string lbl = std::format("{}{}##lv{}",
+                online ? "\xe2\x97\x8f" : "\xe2\x97\x8b", cc.model, ci);
+            if (ImGui::Checkbox(lbl.c_str(), &m_lvEnabled[ci])) {
+                if (m_lvEnabled[ci]) {
+                    auto res = m_pipe.SendRequest(
+                        std::format(R"({{"cmd":"lv_start","cam":"{}"}})", ci));
+                    (void)res;
+                    if (!m_lvThread.joinable()) StartLvThread();
+                    m_configDb.SetSettingInt(
+                        std::format("lv_enabled_{}", ci).c_str(), 1);
+                } else {
+                    auto res = m_pipe.SendRequest(
+                        std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", ci));
+                    (void)res;
+                    if (m_lvSrv[ci]) { m_lvSrv[ci]->Release(); m_lvSrv[ci] = nullptr; }
+                    m_configDb.SetSettingInt(
+                        std::format("lv_enabled_{}", ci).c_str(), 0);
+                }
+            }
+            ImGui::PopFont();
+            if (m_lvEnabled[ci]) anyEnabled = true;
+            (void)prev;
+        }
+        ImGui::Spacing();
+        // Opacity slider: 0 = model only, 100 = LV only
+        int opPct = static_cast<int>(m_lvOpacity * 100.f + 0.5f);
+        ImGui::PushFont(m_fontMono);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderInt("##lv_op", &opPct, 0, 100, "LV %d%%")) {
+            m_lvOpacity = static_cast<float>(opPct) / 100.f;
+            m_configDb.SetSettingInt("lv_opacity_pct", opPct);
+        }
+        ImGui::PopFont();
+        (void)anyEnabled;
     }
     ImGui::Spacing();
 
@@ -3630,6 +3900,14 @@ App::App() {
         m_camConfigs = m_configDb.LoadCamConfigs();
         m_showCamCfgWnd.assign(m_camConfigs.size(), false);
 
+        // Live view overlay settings
+        m_lvOpacity = static_cast<float>(
+            m_configDb.GetSettingInt("lv_opacity_pct", 50)) / 100.f;
+        for (int ci = 0; ci < kMaxCamTracks; ++ci)
+            m_lvEnabled[ci] = m_configDb.GetSettingInt(
+                std::format("lv_enabled_{}", ci).c_str(), 0) != 0;
+        // Thread started lazily when user enables first camera in Inspector
+
         // Load saved timeline (overrides InitTracks defaults when data exists)
         auto saved = m_configDb.LoadTimeline();
         if (!saved.empty()) {
@@ -3687,6 +3965,9 @@ App::~App() {
     m_guiSeqMode.store(GuiSeqMode::Idle);
 
     StopStatusThread();
+    StopLvThread();
+    for (int ci = 0; ci < kMaxCamTracks; ++ci)
+        if (m_lvSrv[ci]) { m_lvSrv[ci]->Release(); m_lvSrv[ci] = nullptr; }
 
     if (m_iqpThread.joinable())       m_iqpThread.join();
     if (m_ephThread.joinable())       m_ephThread.join();

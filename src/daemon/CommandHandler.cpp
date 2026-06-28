@@ -1134,6 +1134,23 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         return true;
     }
 
+    // ── lv_start ──────────────────────────────────────────────────────────────
+    if (cmd == L"lv_start") {
+        int lvIdx = 0;
+        for (int i = 0; i < (int)m_cams.size(); ++i)
+            if (m_cams[i] == cam) { lvIdx = i; break; }
+        bool ok = cam->StartLiveView(lvIdx);
+        resp = ok ? Ok() : Err(L"lv_failed", L"shared memory or camera error");
+        return true;
+    }
+
+    // ── lv_stop ───────────────────────────────────────────────────────────────
+    if (cmd == L"lv_stop") {
+        cam->StopLiveView();
+        resp = Ok();
+        return true;
+    }
+
     resp = Err(L"unknown_cmd");
     return true;
 }

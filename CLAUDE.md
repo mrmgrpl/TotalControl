@@ -255,7 +255,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 - `TotalControlGUI.log` — GUI, next to exe, append mode
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Current status (2026-06-28)
+## Current status (2026-06-29)
 
 | Module | Status |
 |---|---|
@@ -280,6 +280,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **TotalControlGUI GOES-19 SUVI Fe171** | **DONE 2026-06-27** |
 | **TotalControlGUI TLTrack focalMm** | **DONE 2026-06-28** |
 | **TotalControlGUI Camera Config menu** | **DONE 2026-06-28** |
+| **TotalControlGUI Live View overlay** | **DONE 2026-06-29** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -482,6 +483,49 @@ DB table: `camera_config (guid TEXT PK, model TEXT, focal_mm INTEGER, apply_p IN
 
 **PITFALL**: `std::vector<bool>` returns proxy objects, not `bool*` — `ImGui::Begin` requires `bool*`.
 Use local `bool wndOpen = m_showCamCfgWnd[ci]; ImGui::Begin(..., &wndOpen); m_showCamCfgWnd[ci] = wndOpen;`
+
+### TotalControlGUI — Live View overlay (complete 2026-06-29)
+
+**Purpose**: final alignment check before totality — overlay camera's real live image on the solar simulator to compare actual vs. model framing. Opacity slider blends between pure model and pure LV.
+
+**IPC mechanism: Named Shared Memory**
+- SRV writes: `TotalControl_LV_<camIdx>` (2 MB + 8 B header)
+- Layout (identical in `CameraController.cpp` and `App.cpp`):
+  ```cpp
+  struct LvShmLayout {
+      volatile LONG frameNo;   // incremented after each JPEG write
+      uint32_t      jpegSize;
+      uint8_t       data[2*1024*1024];
+  };
+  ```
+- Write: `std::memcpy(data) → _WriteBarrier() → InterlockedIncrement(frameNo)`
+- Read: volatile read of `frameNo`; copy when changed; decode JPEG via WIC
+
+**SRV side (CameraController)**:
+- `StartLiveView(camIdx)`: `SetDeviceSetting(Setting_Key_EnableLiveView=0, value=1)` + `CreateFileMapping` + `MapViewOfFile`; pre-allocated `m_lvBuf` (2 MB, in `Init()`)
+- `StopLiveView()`: `m_lvActive=false` → `SetDeviceSetting(0,0)` → `Sleep(50)` → `UnmapViewOfFile`
+- `DeviceCallback::OnNotifyMonitorUpdated(CrMonitorUpdated_LiveView)`: `GetLiveViewImageInfo` → `GetLiveViewImage` → write SHM
+- `m_lvActive` (atomic bool): guards callback against writing to unmapped SHM during StopLiveView
+
+**GUI side (App)**:
+- `m_lvThread` polls SHM every 200ms (5 fps); WIC JPEG decode → `m_lvPending[ci]` under `m_lvMutex`
+- `m_lvNewFrames` (atomic bool): set by thread, cleared by `CreateLvTextures()` on render thread
+- `CreateLvTextures()`: D3D11 Texture2D + SRV per camera (same pattern as SUVI)
+- **Rendering**: in `RenderSolarView()` after Moon disc, before solar axis:
+  - `AddImageQuad` centered on sun position (`cx,cy`), sized by camera FOV, rotated by `applyP ? P_rad : 0`
+  - Alpha = `m_lvOpacity × 255`; then redraws white frame outline on top
+- **Inspector UI**: `SeparatorText("LIVE VIEW")` → checkbox per camera (●/○ + model) → `SliderInt` 0-100% opacity
+- Toggle ON: pipe `{"cmd":"lv_start","cam":"N"}` + start `m_lvThread` (lazy)
+- Toggle OFF: pipe `{"cmd":"lv_stop","cam":"N"}` + release SRV
+
+**Pipe commands**: `{"cmd":"lv_start","cam":"0"}` / `{"cmd":"lv_stop","cam":"0"}`
+
+**PITFALLs**:
+- `m_lvBuf` must be pre-allocated in `Init()` (NASA rule 3: no heap after init)
+- `StopLiveView`: set `m_lvActive=false` BEFORE `SetDeviceSetting(0)`, then `Sleep(50)` before `UnmapViewOfFile` — prevents race with in-flight callbacks
+- Focus magnifier (camera zoom) reflects automatically in LV stream — no extra command needed
+- LV aspect ratio when camera uses focus magnifier differs from sensor (camera crops) — `AddImageQuad` stretches to frame rect; operator sees zoomed view stretched to full frame (acceptable for focus check)
+- CommandHandler: `lv_start`/`lv_stop` use the outer-scope `cam` pointer (already routed at line 592) — do NOT redeclare `cam` inside these branches (C4456 shadow warning)
 
 ## Known pitfalls in IqpClient (maps.besselianelements.com API)
 

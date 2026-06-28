@@ -331,6 +331,30 @@ private:
     std::vector<CamConfig> m_camConfigs;
     std::vector<bool>      m_showCamCfgWnd;  // one flag per m_camConfigs entry
 
+    // ── Live View overlay on solar simulator ──────────────────────────────────
+    // Frames arrive via named SHM (TotalControl_LV_<ci>), decoded JPEG→RGBA by
+    // m_lvThread, uploaded to D3D11 by CreateLvTextures (render thread only),
+    // rendered in RenderSolarView as alpha-blended quad matching camera FOV rect.
+    bool   m_lvEnabled[kMaxCamTracks] = {};  // per-camera toggle (persisted to DB)
+    float  m_lvOpacity                = 0.5f; // 0 = model only, 1 = LV only
+
+    struct LvFrame { std::vector<uint8_t> rgba; int w = 0, h = 0; };
+    LvFrame                         m_lvPending[kMaxCamTracks];
+    bool                            m_lvNewData[kMaxCamTracks] = {};
+    mutable std::mutex              m_lvMutex;
+    std::atomic<bool>               m_lvNewFrames { false };
+    ID3D11ShaderResourceView*       m_lvSrv[kMaxCamTracks]  = {};
+    int                             m_lvW[kMaxCamTracks]    = {};
+    int                             m_lvH[kMaxCamTracks]    = {};
+
+    std::thread       m_lvThread;
+    std::atomic<bool> m_lvThreadRun { false };
+
+    void StartLvThread();
+    void StopLvThread();
+    void LvThreadProc();
+    void CreateLvTextures();   // render thread only
+
     // ── Photo preset ─────────────────────────────────────────────────────────
     void AddPhotoPreset();
     int  m_presetTargetTrack = 0;  // camera track index that receives AddPhotoPreset blocks

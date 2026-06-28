@@ -8,14 +8,28 @@
 #include "CrDeviceProperty.h"
 #include "CrCommandData.h"
 #include "CrError.h"
+#include "CrImageDataBlock.h"
 #pragma warning(pop)
 
 #include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
+#include <cstring>
 #include <sstream>
 #include <string>
+
+// ─── Live View shared memory layout ──────────────────────────────────────────
+// Mirrored verbatim in src/gui/App.cpp (keep in sync).
+// SRV writes (CameraController), GUI reads (App::LvThreadProc).
+static constexpr uint32_t kLvDataMax  = 2u * 1024u * 1024u;   // 2 MB JPEG buffer
+static constexpr uint32_t kLvShmTotal = 8u + kLvDataMax;       // total mapping size
+struct LvShmLayout {
+    volatile LONG frameNo;   // incremented after each write; GUI reads for change detection
+    uint32_t      jpegSize;  // valid byte count in data[]
+    uint8_t       data[kLvDataMax];
+};
+static_assert(sizeof(LvShmLayout) == 8 + 2u * 1024u * 1024u, "LvShmLayout size mismatch");
 
 namespace SDK = SCRSDK;
 
@@ -139,7 +153,31 @@ public:
     void OnNotifyRemoteFirmwareUpdateResult(CrInt32u, const void*) override {}
     void OnReceivePlaybackTimeCode(CrInt32u) override {}
     void OnReceivePlaybackData(CrInt8u, CrInt32, CrInt8u*, CrInt64, CrInt64, CrInt32, CrInt32) override {}
-    void OnNotifyMonitorUpdated(CrInt32u, CrInt32u) override {}
+    void OnNotifyMonitorUpdated(CrInt32u type, CrInt32u) override {
+        assert(type == SDK::CrMonitorUpdated_LiveView || type == SDK::CrMonitorUpdated_OSD);
+        if (type != SDK::CrMonitorUpdated_LiveView) return;
+        if (!m_owner->m_lvActive.load(std::memory_order_acquire)) return;
+        void* view = m_owner->m_lvShmView;
+        if (!view) return;
+        auto h = static_cast<SDK::CrDeviceHandle>(m_owner->m_deviceHandle);
+        SDK::CrImageInfo imgInfo;
+        if (SDK::GetLiveViewImageInfo(h, &imgInfo) != 0) return;
+        uint32_t bufSz = imgInfo.GetBufferSize();
+        if (bufSz == 0 || bufSz > static_cast<uint32_t>(m_owner->m_lvBuf.size())) return;
+        SDK::CrImageDataBlock imgBlock;
+        imgBlock.SetSize(bufSz);
+        imgBlock.SetData(m_owner->m_lvBuf.data());
+        if (SDK::GetLiveViewImage(h, &imgBlock) != 0) return;
+        uint32_t jpegSz = imgBlock.GetImageSize();
+        if (jpegSz == 0 || jpegSz > kLvDataMax) return;
+        const uint8_t* jpegPtr = imgBlock.GetImageData();
+        if (!jpegPtr) return;
+        auto* layout = static_cast<LvShmLayout*>(view);
+        layout->jpegSize = jpegSz;
+        std::memcpy(layout->data, jpegPtr, jpegSz);
+        _WriteBarrier();                        // data must be visible before frameNo changes
+        InterlockedIncrement(&layout->frameNo);
+    }
 
 private:
     CameraController* m_owner;
@@ -185,6 +223,7 @@ bool CameraController::Init() {
         delete m_callback; m_callback = nullptr;
         return false;
     }
+    m_lvBuf.resize(kLvDataMax);  // pre-allocate during init (NASA rule 3: no heap after running)
     m_initialized = true;
     Log(L"SDK::Init OK");
     return true;
@@ -267,6 +306,7 @@ bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int conn
 
 void CameraController::Disconnect() {
     if (!m_connected) return;
+    StopLiveView();  // disable LV stream and release SHM before SDK disconnect
     if (m_deviceHandle == 0) {
         Log(L"Disconnect: connected flag set but no handle — inconsistent state");
         m_connected = false;
@@ -394,6 +434,55 @@ bool CameraController::GetPropRaw(uint32_t code, uint64_t& out) {
     out = props[0].GetCurrentValue();
     SDK::ReleaseDeviceProperties(h, props);
     return true;
+}
+
+// ─── Live View ────────────────────────────────────────────────────────────────
+
+bool CameraController::StartLiveView(int camIdx) {
+    assert(m_connected && m_deviceHandle != 0);
+    assert(camIdx >= 0 && camIdx < 8);  // at most 8 simultaneous cameras
+    StopLiveView();  // clean up any previous SHM before creating a new one
+
+    wchar_t shmName[64];
+    swprintf_s(shmName, _countof(shmName), L"TotalControl_LV_%d", camIdx);
+    m_lvMapHandle = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
+                                        PAGE_READWRITE, 0, kLvShmTotal, shmName);
+    if (!m_lvMapHandle) {
+        Logf(L"LV: CreateFileMapping '%s' failed err=%lu", shmName, GetLastError());
+        return false;
+    }
+    m_lvShmView = MapViewOfFile(m_lvMapHandle, FILE_MAP_WRITE, 0, 0, kLvShmTotal);
+    if (!m_lvShmView) {
+        Logf(L"LV: MapViewOfFile failed err=%lu", GetLastError());
+        CloseHandle(m_lvMapHandle); m_lvMapHandle = nullptr;
+        return false;
+    }
+    std::memset(m_lvShmView, 0, 8);  // zero frameNo + jpegSize so GUI ignores stale data
+
+    auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    SDK::CrError err = SDK::SetDeviceSetting(h, SDK::Setting_Key_EnableLiveView, 1);
+    if (err != 0)
+        Logf(L"LV: EnableLiveView SetDeviceSetting err=0x%04X (non-fatal — may auto-enable)", (unsigned)err);
+
+    m_lvActive.store(true, std::memory_order_release);
+    Logf(L"LV: started  SHM=%s  buf=%u KB", shmName, (unsigned)(kLvDataMax / 1024));
+    return true;
+}
+
+void CameraController::StopLiveView() {
+    // Set inactive first so in-flight OnNotifyMonitorUpdated callbacks see it and bail out.
+    m_lvActive.store(false, std::memory_order_release);
+
+    if (m_deviceHandle != 0 && m_connected) {
+        auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+        (void)SDK::SetDeviceSetting(h, SDK::Setting_Key_EnableLiveView, 0);
+    }
+    // Brief pause: let any callback already past the m_lvActive check finish before unmap.
+    if (m_lvShmView) ::Sleep(50);
+
+    if (m_lvShmView)   { UnmapViewOfFile(m_lvShmView);  m_lvShmView   = nullptr; }
+    if (m_lvMapHandle) { CloseHandle(m_lvMapHandle);     m_lvMapHandle = nullptr; }
+    Log(L"LV: stopped");
 }
 
 bool CameraController::SendCmd(int cmdId, int param) {

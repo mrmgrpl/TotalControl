@@ -114,6 +114,13 @@ public:
     bool SetStoreDestination(const wchar_t* dest); // "card","pc","both"
     bool IsPropCached(uint32_t code, long long value) const; // true → no SDK call needed
 
+    // ── Live View ────────────────────────────────────────────────────────────
+    // StartLiveView enables the camera's LV stream and creates named shared memory
+    // "TotalControl_LV_<camIdx>" (2 MB + 8 B header) that the GUI reads.
+    // StopLiveView disables LV and unmaps the shared memory.
+    bool StartLiveView(int camIdx = 0);
+    void StopLiveView();
+
     // ── Shoot ────────────────────────────────────────────────────────────────
     // holdForBurst=true: keeps Release button pressed until all captures arrive,
     // then releases (required for CrDrive_Cont_Bracket_* — camera fires N shots
@@ -159,6 +166,12 @@ private:
     std::atomic<bool>       m_shutdownReq   { false };
     std::atomic<int>        m_capturedCount { 0 };
     int                     m_capturedTarget { 1 };
+
+    // Live view shared memory (SHM)
+    HANDLE                  m_lvMapHandle   = nullptr;
+    void*                   m_lvShmView     = nullptr;
+    std::atomic<bool>       m_lvActive      { false };  // guards SHM access in callback
+    std::vector<uint8_t>    m_lvBuf;                    // pre-allocated JPEG buffer (2 MB)
 };
 
 } // namespace TotalControl
