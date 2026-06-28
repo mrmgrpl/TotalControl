@@ -58,6 +58,8 @@ static std::string WToUtf8(std::wstring_view w) {
 
 // Open an MP3 via MCI, read its length in milliseconds, then close. Returns 0 on failure.
 static int32_t MciProbeDurMs(const std::wstring& fullPath) {
+    assert(!fullPath.empty());              // rule 5: path must be non-empty
+    assert(fullPath.size() < MAX_PATH);    // rule 5: path must fit Win32 API limit
     static std::atomic<int> s_id{0};
     std::wstring alias = L"tc_probe" + std::to_wstring(++s_id);
     std::wstring open  = L"open \"" + fullPath + L"\" type mpegvideo alias " + alias;
@@ -74,6 +76,8 @@ static int32_t MciProbeDurMs(const std::wstring& fullPath) {
 // then closes the MCI device. Exception to NASA rule 3: one allocation per announcement,
 // no sequencer interaction, audio never blocks camera operations.
 static void MciPlayAsync(const std::wstring& fullPath) {
+    assert(!fullPath.empty());             // rule 5: path must be non-empty
+    assert(fullPath.size() < MAX_PATH);   // rule 5: path must fit Win32 API limit
     static std::atomic<int> s_id{0};
     std::wstring alias = L"tc_play" + std::to_wstring(++s_id);
     std::thread([fullPath, alias]() {
@@ -465,6 +469,12 @@ void App::TriggerEphFetch() {
 void App::TriggerSuviFetch() {
     assert(m_d3dDev != nullptr);
     if (m_suviFetching.load()) return;
+    // Release previous batch textures so the refreshed batch replaces them cleanly.
+    // Called only from the render thread — D3D resource release is safe here.
+    for (auto* srv : m_suviSrvs) if (srv) srv->Release();
+    m_suviSrvs.clear();
+    m_suviCurFrame  = 0;
+    m_suviAnimTimer = 0.f;
     m_suviFetching.store(true);
     m_suviFetchedAtMs = UtcNowMs();
     if (m_suviThread.joinable()) m_suviThread.detach();
@@ -473,6 +483,7 @@ void App::TriggerSuviFetch() {
 
 void App::SuviThreadProc() {
     assert(m_suviFetching.load());
+    assert(m_d3dDev != nullptr);   // rule 5: D3D device must be set before SUVI fetch is triggered
     CoInitialize(nullptr);
 
     // SUVI Fe171 filenames have variable SS and trailing digit — cannot guess.
@@ -597,7 +608,12 @@ void App::SuviThreadProc() {
     std::vector<std::string> names;
     const char* p = reinterpret_cast<const char*>(dirHtml.data());
     const char* end = p + dirHtml.size();
+    // Rule 2: each iteration advances p by at least kSuffix.size() (32 chars),
+    // so the loop executes at most dirHtml.size() / kSuffix.size() times.
+    const size_t kMaxIter = kMaxDirBytes / kSuffix.size() + 1;   // ≤ 655 362 with 20 MB cap
+    size_t iterCount = 0;
     while (p < end) {
+        assert(++iterCount <= kMaxIter);  // rule 2: explicit upper bound
         // Find suffix
         const char* hit = std::search(p, end, kSuffix.begin(), kSuffix.end());
         if (hit == end) break;
@@ -1235,6 +1251,7 @@ void App::StopSeqThread() {
 
 void App::AudioSeqThreadProc(GuiSeqMode mode, int64_t playheadStartMs, int64_t realStartMs) {
     assert(playheadStartMs >= 0 && realStartMs >= 0);
+    assert(mode == GuiSeqMode::TestRunning || mode == GuiSeqMode::Running);  // rule 5: only valid run modes
 
     // Snapshot audio tracks at start so we never race with the render thread.
     std::vector<TLTrack> audioTracks;
@@ -1244,7 +1261,7 @@ void App::AudioSeqThreadProc(GuiSeqMode mode, int64_t playheadStartMs, int64_t r
     // Local next-block indices — written back to m_audioNextBlock on exit.
     int next[kMaxAudioTracks];
     for (int i = 0; i < kMaxAudioTracks; ++i)
-        next[i] = m_audioNextBlock[i];
+        next[i] = m_audioNextBlock[i].load(std::memory_order_relaxed);
 
     std::wstring exeDir = ExeDir();
 
@@ -1273,7 +1290,7 @@ void App::AudioSeqThreadProc(GuiSeqMode mode, int64_t playheadStartMs, int64_t r
                     ai, ni, nowMs - blk.atMs,
                     blk.audioFile.empty() ? "-" : blk.audioFile));
                 ++ni;
-                m_audioNextBlock[ai] = ni;  // update visible to main thread
+                m_audioNextBlock[ai].store(ni, std::memory_order_relaxed);  // live: render may read
             }
             ++ai;
         }
@@ -1281,7 +1298,7 @@ void App::AudioSeqThreadProc(GuiSeqMode mode, int64_t playheadStartMs, int64_t r
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i] = next[i];
+    for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i].store(next[i], std::memory_order_relaxed);
 }
 
 // ─── Audio file scanner ───────────────────────────────────────────────────────
@@ -1295,6 +1312,7 @@ void App::ScanAudioFilesAsync() {
 
 void App::AudioScanThreadProc() {
     assert(m_audioScanProgress.load() == 0);
+    assert(m_audioScanTotal.load() == 0);   // rule 5: totals must be reset before scan starts
 
     // Open separate DB connection (scan thread must not share m_configDb with render thread).
     std::wstring exeDir = ExeDir();
@@ -1376,6 +1394,7 @@ void App::AudioScanThreadProc() {
 
 void App::LoadAudioPreset(std::string_view lang) {
     assert(!lang.empty());
+    assert(lang.size() <= 10);   // rule 5: lang is a short country code ("PL", "EN", …)
 
     ContactTimes ct;
     { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
@@ -1550,6 +1569,7 @@ void App::LoadAudioPreset(std::string_view lang) {
 
 void App::AddPhotoPreset() {
     assert(m_presetTargetTrack >= 0);
+    assert(m_presetTargetTrack < static_cast<int>(m_tracks.size()));  // rule 5: target track must exist
 
     ContactTimes ct;
     { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
@@ -1703,7 +1723,7 @@ void App::RenderSequencerButtons() {
                 int ni = 0;
                 for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
                     if (m_tracks[ti].blocks[ni].atMs >= ph) break;
-                m_audioNextBlock[audioIdx++] = ni;
+                m_audioNextBlock[audioIdx++].store(ni, std::memory_order_relaxed);
             }
         }
         StartSeqThread(GuiSeqMode::TestRunning);
@@ -1727,7 +1747,7 @@ void App::RenderSequencerButtons() {
             m_guiSeqMode.store(GuiSeqMode::Idle);
             m_tlPlayheadMs.store(-1);    // resets to C2-45s on next frame
             for (int i = 0; i < kMaxCamTracks;  ++i) m_seqNextBlock[i]   = 0;
-            for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i] = 0;
+            for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i].store(0, std::memory_order_relaxed);
             LogLine("Sequencer: TEST reset to idle");
         }
     }
@@ -1750,7 +1770,7 @@ void App::RenderSequencerButtons() {
     if (ImGui::Button("\xe2\x96\xb6 RUN", kBtnSz)) {
         // RUN always starts from beginning of all tracks
         for (int i = 0; i < kMaxCamTracks;  ++i) m_seqNextBlock[i]   = 0;
-        for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i] = 0;
+        for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i].store(0, std::memory_order_relaxed);
         StartSeqThread(GuiSeqMode::Running);
         LogLine("Sequencer: RUN started (production)");
         m_lastResult = "RUN started — real UTC timing";
@@ -1816,6 +1836,13 @@ void App::RenderSolarView() {
     assert(m_fontMono != nullptr);
     // Upload any newly decoded SUVI frames to D3D11 (render-thread only)
     if (m_suviNewFrames.load()) CreateSuviTextures();
+    // Periodic re-fetch: refresh every 30 min so the animation stays current
+    // during long sessions (e.g. hours of eclipse processing on-site).
+    static constexpr int64_t kSuviRefetchMs = 30LL * 60 * 1000;
+    if (!m_suviFetching.load() && m_suviFetchedAtMs > 0 &&
+        UtcNowMs() - m_suviFetchedAtMs > kSuviRefetchMs) {
+        TriggerSuviFetch();
+    }
     static constexpr float kPi = 3.14159265358979323846f;
     static const ImVec4    kGray{0.40f, 0.40f, 0.45f, 1.0f};
 
@@ -2160,19 +2187,20 @@ void App::RenderSolarView() {
     dl->AddCircleFilled({cx,cy}, sunR*2.2f, IM_COL32(250,200,100,18));
 
     // ── SUVI Fe171 animation — rotated so solar N aligns with N☉ axis ──────
-    // SUVI FD 600×600: solar disc radius ≈ 180 px → half-quad = sunR × (300/180).
+    // SUVI FD 1200×1200: solar disc radius ≈ 384 px → half-quad = sunR × m_suviHalfQ.
     // Alpha = luminance → black space transparent; corona visible over grid/axes.
-    {
+    // When disabled or no frames available, a plain amber disc is shown silently.
+    if (m_suviEnabled) {
         // Advance animation frame (render-thread only, no mutex needed)
-        m_suviAnimTimer += ImGui::GetIO().DeltaTime;
-        float frameSec = 1.0f / m_suviAnimFps;
-        if (m_suviAnimTimer >= frameSec) {
-            m_suviAnimTimer -= frameSec;
-            int n = (int)m_suviSrvs.size();
-            if (n > 0) m_suviCurFrame = (m_suviCurFrame + 1) % n;
+        {
+            m_suviAnimTimer += ImGui::GetIO().DeltaTime;
+            float frameSec = 1.0f / m_suviAnimFps;
+            if (m_suviAnimTimer >= frameSec) {
+                m_suviAnimTimer -= frameSec;
+                int n = (int)m_suviSrvs.size();
+                if (n > 0) m_suviCurFrame = (m_suviCurFrame + 1) % n;
+            }
         }
-    }
-    {
         int n = (int)m_suviSrvs.size();
         if (n > 0 && m_suviCurFrame < n && m_suviSrvs[m_suviCurFrame]) {
             float halfQ = sunR * m_suviHalfQ;
@@ -2198,10 +2226,14 @@ void App::RenderSolarView() {
                 tl, tr, br, bl);
             dl->AddCircle({cx, cy}, sunR, IM_COL32(255, 0, 0, 200), 128, 2.f);
         } else {
-            // Placeholder until SUVI frames arrive
+            // No frames yet (loading or offline) — silent amber disc placeholder
             dl->AddCircleFilled({cx, cy}, sunR, IM_COL32(250, 199, 117, 255));
             dl->AddCircle      ({cx, cy}, sunR, IM_COL32(186, 117,  23, 255), 0, 1.f);
         }
+    } else {
+        // SUVI disabled by user — plain amber disc, no animation
+        dl->AddCircleFilled({cx, cy}, sunR, IM_COL32(250, 199, 117, 255));
+        dl->AddCircle      ({cx, cy}, sunR, IM_COL32(186, 117,  23, 255), 0, 1.f);
     }
 
     // ── Moon disc — totality: fully black when Moon covers Sun ───────────────
@@ -2326,19 +2358,6 @@ void App::RenderSolarView() {
         ImGui::TextColored({0.55f,0.75f,0.95f,1.f}, "EPH: fetching...");
     } else {
         ImGui::TextColored(kGray, "P=%.1f\xc2\xb0 (statyczny — brak efemeryd)", m_solarP);
-    }
-    // SUVI download progress
-    {
-        int n = (int)m_suviSrvs.size();
-        if (m_suviFetching.load()) {
-            ImGui::SameLine();
-            ImGui::TextColored({0.45f,0.80f,1.f,1.f},
-                "  SUVI %d/300", n);
-        } else if (n > 0) {
-            ImGui::SameLine();
-            ImGui::TextColored({0.35f,0.55f,0.35f,1.f},
-                "  SUVI %d fr", n);
-        }
     }
     ImGui::PopFont();
 }
@@ -2663,6 +2682,30 @@ void App::RenderInspectorColumn() {
     // ── SUVI alignment calibration ────────────────────────────────────────
     ImGui::Spacing();
     ImGui::SeparatorText("SUVI ALIGNMENT");
+    ImGui::Spacing();
+    // Toggle: SUVI ON / OFF
+    {
+        ImGui::PushFont(m_fontMono);
+        if (m_suviEnabled) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.10f,.30f,.10f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.15f,.42f,.15f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.08f,.22f,.08f,1.f));
+            if (ImGui::Button("SUVI: ON ##stog", ImVec2(-1, 0))) {
+                m_suviEnabled = false;
+                m_configDb.SetSettingInt("suvi_enabled", 0);
+            }
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.22f,.16f,.16f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.32f,.22f,.22f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.16f,.12f,.12f,1.f));
+            if (ImGui::Button("SUVI: OFF##stog", ImVec2(-1, 0))) {
+                m_suviEnabled = true;
+                m_configDb.SetSettingInt("suvi_enabled", 1);
+            }
+        }
+        ImGui::PopStyleColor(3);
+        ImGui::PopFont();
+    }
     ImGui::Spacing();
     ImGui::SetNextItemWidth(-1);
     bool suviChanged = false;
@@ -3367,7 +3410,7 @@ void App::RenderTimelineBottom() {
                         int ni = 0;
                         for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
                             if (m_tracks[ti].blocks[ni].atMs >= newPh) break;
-                        m_audioNextBlock[audioIdx++] = ni;
+                        m_audioNextBlock[audioIdx++].store(ni, std::memory_order_relaxed);
                     }
                 }
             }
@@ -3434,11 +3477,12 @@ App::App() {
         std::string savedKey = m_configDb.GetSetting("iqp_api_key", "");
         if (!savedKey.empty()) SetApiKey(savedKey);
 
-        // SUVI alignment calibration (persisted so orbital drift adjustments survive restarts)
+        // SUVI alignment calibration + toggle (persisted; orbital drift + user pref)
         try { m_suviHalfQ       = std::stof(m_configDb.GetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str())); }       catch (...) {}
         try { m_suviFooterPx    = std::stof(m_configDb.GetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str())); }    catch (...) {}
         try { m_suviCorrRightPx = std::stof(m_configDb.GetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str())); } catch (...) {}
         try { m_suviCorrUpPx    = std::stof(m_configDb.GetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str())); }    catch (...) {}
+        m_suviEnabled = m_configDb.GetSettingInt("suvi_enabled", 1) != 0;
 
         LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",
                             m_homeTzIana, m_eclTzIana, m_obsLat, m_obsLon, m_obsAltM));

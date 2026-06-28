@@ -194,6 +194,7 @@ private:
     std::thread        m_suviThread;
     std::atomic<bool>  m_suviFetching{false};
     int64_t            m_suviFetchedAtMs = 0;
+    bool               m_suviEnabled     = true;  // show SUVI image (persisted to DB)
 
     // ── JPL Horizons ephemeris ────────────────────────────────────────────────
     void TriggerEphFetch();
@@ -295,7 +296,9 @@ private:
     static constexpr int kMaxCamTracks  = 4;
     static constexpr int kMaxAudioTracks = 2;
     int m_seqNextBlock[kMaxCamTracks]    = {};
-    int m_audioNextBlock[kMaxAudioTracks] = {};
+    // m_audioNextBlock is written by m_audioSeqThread during the run (live progress) and
+    // may be read by the render thread concurrently for display — must be atomic.
+    std::atomic<int> m_audioNextBlock[kMaxAudioTracks]{};
 
     // Snapshot of playhead and real-time at the last Start/Resume
     int64_t m_testPlayheadAtStart = -1;
