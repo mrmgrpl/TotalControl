@@ -5296,80 +5296,124 @@ void App::RenderMenuBar() {
 // ─── About modal ──────────────────────────────────────────────────────────────
 
 void App::RenderAboutModal() {
+    assert(true); // invariant: always callable; m_showAbout guards early-out
     if (!m_showAbout) return;
     ImGui::OpenPopup("About TotalControl");
-    ImGui::SetNextWindowSize(ImVec2(480, 420), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(580, 620), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
-    if (ImGui::BeginPopupModal("About TotalControl", &m_showAbout,
-                               ImGuiWindowFlags_NoResize)) {
-        static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
-        static const ImVec4 kGray {0.55f, 0.55f, 0.60f, 1.0f};
-        static const ImVec4 kLink {0.45f, 0.75f, 1.00f, 1.0f};
+    if (!ImGui::BeginPopupModal("About TotalControl", &m_showAbout,
+                                ImGuiWindowFlags_NoResize))
+        return;
 
-        ImGui::PushFont(m_fontLarge);
-        ImGui::TextColored(kGold, "TotalControl");
-        ImGui::PopFont();
-        ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(kGray, "Solar Eclipse Photography Controller");
-        ImGui::TextColored(kGray, "Phase 3b  |  TSE 2026-08-12  Burgos/Lerma");
-        ImGui::PopFont();
+    static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
+    static const ImVec4 kGray {0.55f, 0.55f, 0.60f, 1.0f};
+    static const ImVec4 kLink {0.45f, 0.75f, 1.00f, 1.0f};
 
-        ImGui::Separator();
-        ImGui::Spacing();
+    ImGui::PushFont(m_fontLarge);
+    ImGui::TextColored(kGold, "TotalControl");
+    ImGui::PopFont();
+    ImGui::PushFont(m_fontMono);
+    ImGui::TextColored(kGray, "Solar Eclipse Photography Controller");
+    ImGui::TextColored(kGray, "TSE 2026-08-12  Burgos / Lerma, Spain  (totality 103.9 s)");
+    ImGui::PopFont();
 
-        ImGui::PushFont(m_fontMono);
+    ImGui::Separator();
 
-        ImGui::TextColored(kGold, "Technologies");
-        ImGui::TextColored(kGray, "  Sony CrSDK          Camera Remote SDK v2.x");
-        ImGui::TextColored(kGray, "  Dear ImGui v1.91.6  Omar Cornut (MIT)");
-        ImGui::TextColored(kGray, "  SQLite 3.53.1       Public domain");
-        ImGui::TextColored(kGray, "  WinHTTP             Windows SDK");
-        ImGui::Spacing();
+    // scrollable body (44px reserved for Close button + separator)
+    ImGui::BeginChild("##about_body", ImVec2(0, -44.f), false, ImGuiWindowFlags_None);
+    ImGui::PushFont(m_fontMono);
 
-        ImGui::TextColored(kGold, "Eclipse Data & Algorithms");
-        ImGui::TextColored(kGray, "  NASA Eclipse Data   Fred Espenak");
-        ImGui::TextColored(kGray, "  IQP API             maps.besselianelements.com");
-        ImGui::TextColored(kGray, "  Besselian Algo      Jean Meeus");
-        ImGui::TextColored(kGray, "                      'Astronomical Algorithms'");
-        ImGui::TextColored(kGray, "  Eclipse geometry    Greg Miller");
-        ImGui::TextColored(kGray, "                      celestialprogramming.com");
-        ImGui::Spacing();
-
-        ImGui::TextColored(kGold, "Author");
-        ImGui::TextColored(kGray, "  Andrzej Nowak  (mrmgrpl)");
-        ImGui::Spacing();
-
-        ImGui::TextColored(kGold, "Links");
-        if (ImGui::MenuItem("  github.com/mrmgrpl/TotalControl")) {
-            ShellExecuteW(nullptr, L"open",
-                L"https://github.com/mrmgrpl/TotalControl",
-                nullptr, nullptr, SW_SHOWNORMAL);
+    // helper: clickable blue link rendered as MenuItem
+    struct S {
+        static void Link(const char* label, const wchar_t* url, const ImVec4& col) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            if (ImGui::MenuItem(label))
+                ShellExecuteW(nullptr, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+            ImGui::PopStyleColor();
         }
-        if (ImGui::MenuItem("  maps.besselianelements.com")) {
-            ShellExecuteW(nullptr, L"open",
-                L"https://maps.besselianelements.com",
-                nullptr, nullptr, SW_SHOWNORMAL);
-        }
-        if (ImGui::MenuItem("  NASA Eclipse Page  (Espenak)")) {
-            ShellExecuteW(nullptr, L"open",
-                L"https://eclipse.gsfc.nasa.gov/",
-                nullptr, nullptr, SW_SHOWNORMAL);
-        }
+    };
 
-        ImGui::PopFont();
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
+    // ── Libraries ─────────────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::TextColored(kGold, "Biblioteki / Libraries");
+    ImGui::TextColored(kGray, "  Sony Camera Remote SDK (CrSDK)  Sony Corp.");
+    ImGui::TextColored(kGray, "    Camera control, live view, property polling");
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  Dear ImGui v1.91.6  Omar Cornut  (MIT License)");
+    S::Link(      "    github.com/ocornut/imgui",    L"https://github.com/ocornut/imgui",  kLink);
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  SQLite 3.53.1  D. Richard Hipp  (Public domain)");
+    S::Link(      "    sqlite.org",                  L"https://www.sqlite.org",            kLink);
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  WinHTTP / Direct3D 11 / WIC  Microsoft Windows SDK");
+    ImGui::TextColored(kGray, "    HTTPS fetch, GPU rendering, JPEG decode");
 
-        float btnW = 80.f;
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - btnW) * 0.5f);
-        if (ImGui::Button("Close", ImVec2(btnW, 0)))
-            m_showAbout = false;
+    // ── Eclipse Data & Algorithms ──────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::TextColored(kGold, "Dane zaciemien / Eclipse Data & Algorithms");
+    ImGui::TextColored(kGray, "  Fred Espenak  (\"Mr. Eclipse\")  NASA GSFC (ret.)");
+    ImGui::TextColored(kGray, "    Exposure model, Besselian elements, 11 898 eclipses");
+    S::Link(      "    eclipse.gsfc.nasa.gov",       L"https://eclipse.gsfc.nasa.gov/",    kLink);
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  IQP API -- contact times C1-C4 in real time");
+    S::Link(      "    maps.besselianelements.com",  L"https://maps.besselianelements.com",kLink);
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  Jean Meeus  \"Astronomical Algorithms\"");
+    ImGui::TextColored(kGray, "    Willmann-Bell 2nd ed. -- Besselian element computation");
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  Greg Miller -- Besselian Elements for Solar Eclipses");
+    ImGui::TextColored(kGray, "    C2/C3 contact geometry, local circumstances");
+    S::Link(      "    celestialprogramming.com",    L"https://www.celestialprogramming.com/", kLink);
 
-        ImGui::EndPopup();
-    }
+    // ── Solar Imagery & Ephemeris ──────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::TextColored(kGold, "Obrazy i efemerdy / Solar Imagery & Ephemeris");
+    ImGui::TextColored(kGray, "  JPL Horizons  NASA Jet Propulsion Laboratory");
+    ImGui::TextColored(kGray, "    Sun, Moon & 5 planets -- positions, angular sizes");
+    S::Link(      "    ssd.jpl.nasa.gov/horizons",   L"https://ssd.jpl.nasa.gov/horizons/",kLink);
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  SDO HMI Intensitygram  NASA Goddard SFC");
+    ImGui::TextColored(kGray, "    Live solar disc image (latest_1024_HMIIC.jpg)");
+    S::Link(      "    sdo.gsfc.nasa.gov",           L"https://sdo.gsfc.nasa.gov/",        kLink);
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  GOES-19 SUVI Fe171  NOAA/NESDIS");
+    ImGui::TextColored(kGray, "    EUV corona animation -- 300 frames, 30 fps, 4-min cadence");
+    S::Link(      "    star.nesdis.noaa.gov",        L"https://star.nesdis.noaa.gov/",     kLink);
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  IANA Timezone Database -- 598 IANA zones, DST via Windows");
+    S::Link(      "    iana.org/time-zones",         L"https://www.iana.org/time-zones",   kLink);
+
+    // ── Acknowledgments ────────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::TextColored(kGold, "Podziekowania / Acknowledgments");
+    ImGui::TextColored(kGray, "  Fred Espenak -- 40+ lat tabel zaciemien dla fotografow");
+    ImGui::TextColored(kGray, "  Ekipa IQP -- API prognoz zaciemien w czasie rzeczywistym");
+    ImGui::TextColored(kGray, "  Omar Cornut -- Dear ImGui, immediate-mode UI bez kompromisow");
+    ImGui::TextColored(kGray, "  NASA SDO i NOAA GOES-19 -- otwarte dane sloneczne");
+    ImGui::TextColored(kGray, "  Zespol JPL SSD -- serwis efemerydy Horizons");
+    ImGui::TextColored(kGray, "  Jean Meeus -- algorytmy astronomiczne ponadczasowe");
+
+    // ── Author ─────────────────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::TextColored(kGold, "Autor / Author");
+    ImGui::TextColored(kGray, "  Andrzej Nowak  (mrmgrpl)");
+    S::Link(      "    github.com/mrmgrpl/TotalControl",
+                  L"https://github.com/mrmgrpl/TotalControl",                              kLink);
+
+    assert(true); // postcondition: all sections rendered without skipping EndChild/PopFont
+    ImGui::PopFont();
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    ImGui::Spacing();
+    float btnW = 80.f;
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - btnW) * 0.5f);
+    if (ImGui::Button("Close", ImVec2(btnW, 0)))
+        m_showAbout = false;
+
+    ImGui::EndPopup();
 }
 
 // ─── Main frame ───────────────────────────────────────────────────────────────
