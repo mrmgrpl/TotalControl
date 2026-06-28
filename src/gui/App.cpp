@@ -4578,7 +4578,7 @@ void App::RenderContactTimesSection() {
     ContactTimes iqpCt;
     { std::lock_guard lk(m_iqpMutex); iqpCt = m_contacts; }
 
-    const char* iqpLabel = (iqpCt.source == ContactSource::BesselApi) ? "BE API" : "IQP";
+    const char* iqpLabel = (iqpCt.source == ContactSource::BesselApi) ? "IQP API" : "IQP";
     renderSection(iqpLabel, iqpCt, iqpSt == 1,
                   ImVec4{0.45f, 0.75f, 1.00f, 1.0f});   // blue
     ImGui::Spacing();
@@ -5628,8 +5628,8 @@ void App::OnFrame() {
                 } else if (ct.valid) {
                     // Source label shown once on C1 line
                     const char* srcLabel =
-                        (ct.source == ContactSource::BesselApi) ? "BE API" :
-                        (ct.source == ContactSource::IQP)       ? "IQP"    : "BE";
+                        (ct.source == ContactSource::BesselApi) ? "IQP API" :
+                        (ct.source == ContactSource::IQP)       ? "IQP"     : "BE";
 
                     // Helper: format UTC ms → "HH:MM:SS"
                     auto fmtUtc = [](int64_t ms, char* buf, int len) {
