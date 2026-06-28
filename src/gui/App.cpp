@@ -1838,7 +1838,7 @@ void App::RenderSolarView() {
     if (m_suviNewFrames.load()) CreateSuviTextures();
     // Periodic re-fetch: refresh every 30 min so the animation stays current
     // during long sessions (e.g. hours of eclipse processing on-site).
-    static constexpr int64_t kSuviRefetchMs = 30LL * 60 * 1000;
+    static constexpr int64_t kSuviRefetchMs = 1LL * 60 * 1000;
     if (!m_suviFetching.load() && m_suviFetchedAtMs > 0 &&
         UtcNowMs() - m_suviFetchedAtMs > kSuviRefetchMs) {
         TriggerSuviFetch();
