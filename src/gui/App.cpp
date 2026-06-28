@@ -471,12 +471,17 @@ void App::TriggerSuviFetch() {
     if (m_suviFetching.load()) return;
     // Release previous batch textures so the refreshed batch replaces them cleanly.
     // Called only from the render thread — D3D resource release is safe here.
+    LogLine(std::format(
+        "SUVI: TriggerFetch srvs={} halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f} msSinceLastDone={}",
+        (int)m_suviSrvs.size(), m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx,
+        m_suviFetchedAtMs.load() > 0 ? UtcNowMs() - m_suviFetchedAtMs.load() : -1LL));
     for (auto* srv : m_suviSrvs) if (srv) srv->Release();
     m_suviSrvs.clear();
     m_suviCurFrame  = 0;
     m_suviAnimTimer = 0.f;
     m_suviFetching.store(true);
-    m_suviFetchedAtMs = UtcNowMs();
+    // m_suviFetchedAtMs is set at completion (SuviThreadProc end) so the 1-min
+    // interval is measured from when the previous fetch FINISHED, not started.
     if (m_suviThread.joinable()) m_suviThread.detach();
     m_suviThread = std::thread(&App::SuviThreadProc, this);
 }
@@ -722,8 +727,9 @@ void App::SuviThreadProc() {
     }
 
     m_suviNewFrames.store(true);
-    LogLine(std::format("SUVI: done — {} cache + {} CDN + {} deleted",
-                        fromCache, downloaded, deleted));
+    LogLine(std::format("SUVI: done — {} cache + {} CDN + {} deleted  pending={}",
+                        fromCache, downloaded, deleted, (int)m_suviPending.size()));
+    m_suviFetchedAtMs.store(UtcNowMs());   // interval measured from completion, not start
     m_suviFetching.store(false);
     CoUninitialize();
 }
@@ -1839,8 +1845,9 @@ void App::RenderSolarView() {
     // Periodic re-fetch: refresh every 30 min so the animation stays current
     // during long sessions (e.g. hours of eclipse processing on-site).
     static constexpr int64_t kSuviRefetchMs = 1LL * 60 * 1000;
-    if (!m_suviFetching.load() && m_suviFetchedAtMs > 0 &&
-        UtcNowMs() - m_suviFetchedAtMs > kSuviRefetchMs) {
+    if (const int64_t fetchedAt = m_suviFetchedAtMs.load();
+        !m_suviFetching.load() && fetchedAt > 0 &&
+        UtcNowMs() - fetchedAt > kSuviRefetchMs) {
         TriggerSuviFetch();
     }
     static constexpr float kPi = 3.14159265358979323846f;
@@ -2203,6 +2210,12 @@ void App::RenderSolarView() {
         }
         int n = (int)m_suviSrvs.size();
         if (n > 0 && m_suviCurFrame < n && m_suviSrvs[m_suviCurFrame]) {
+            // Log once when frames first appear after a fetch (frame 0, cur==0).
+            if (m_suviCurFrame == 0 && n == 1) {
+                LogLine(std::format(
+                    "SUVI: first frame visible  halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f} P_rad={:.4f}",
+                    m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx, P_rad));
+            }
             float halfQ = sunR * m_suviHalfQ;
             float sc    = sunR / 384.f;   // image-px → screen-px scale
             float cosP  = cosf(P_rad), sinP = sinf(P_rad);
@@ -3478,10 +3491,21 @@ App::App() {
         if (!savedKey.empty()) SetApiKey(savedKey);
 
         // SUVI alignment calibration + toggle (persisted; orbital drift + user pref)
-        try { m_suviHalfQ       = std::stof(m_configDb.GetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str())); }       catch (...) {}
-        try { m_suviFooterPx    = std::stof(m_configDb.GetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str())); }    catch (...) {}
-        try { m_suviCorrRightPx = std::stof(m_configDb.GetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str())); } catch (...) {}
-        try { m_suviCorrUpPx    = std::stof(m_configDb.GetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str())); }    catch (...) {}
+        // suvi_calib_ver < 2 → one-time migration to v2 measured defaults (2026-06-28)
+        constexpr int kSuviCalibVer = 2;
+        if (m_configDb.GetSettingInt("suvi_calib_ver", 0) < kSuviCalibVer) {
+            // Overwrite any stale values with the v2 calibration; members already hold them.
+            m_configDb.SetSetting   ("suvi_half_q",        std::to_string(m_suviHalfQ).c_str());
+            m_configDb.SetSetting   ("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str());
+            m_configDb.SetSetting   ("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str());
+            m_configDb.SetSetting   ("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str());
+            m_configDb.SetSettingInt("suvi_calib_ver", kSuviCalibVer);
+        } else {
+            try { m_suviHalfQ       = std::stof(m_configDb.GetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str())); }       catch (...) {}
+            try { m_suviFooterPx    = std::stof(m_configDb.GetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str())); }    catch (...) {}
+            try { m_suviCorrRightPx = std::stof(m_configDb.GetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str())); } catch (...) {}
+            try { m_suviCorrUpPx    = std::stof(m_configDb.GetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str())); }    catch (...) {}
+        }
         m_suviEnabled = m_configDb.GetSettingInt("suvi_enabled", 1) != 0;
 
         LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",

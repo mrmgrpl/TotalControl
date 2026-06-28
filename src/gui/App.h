@@ -170,10 +170,11 @@ private:
     struct SuviFrame { std::vector<uint8_t> rgba; int w = 0, h = 0; };
 
     // Alignment calibration — editable live in Inspector panel
-    float m_suviHalfQ       = 0.99f * 600.f / 384.f;  // image half / disc radius
-    float m_suviFooterPx    = 10.f;   // disc centre offset from image centre (px)
-    float m_suviCorrRightPx =  8.f;   // additional shift right (image px)
-    float m_suviCorrUpPx    =  8.f;   // additional shift up   (image px)
+    // v2 defaults measured on real GOES-19 imagery 2026-06-28
+    float m_suviHalfQ       = 1.5250f;  // image half / disc radius
+    float m_suviFooterPx    = 20.f;     // disc centre offset from image centre (px)
+    float m_suviCorrRightPx = -24.f;    // additional shift right (image px)
+    float m_suviCorrUpPx    =   0.f;    // additional shift up   (image px)
 
     void TriggerSuviFetch();
     void SuviThreadProc();
@@ -193,7 +194,7 @@ private:
 
     std::thread        m_suviThread;
     std::atomic<bool>  m_suviFetching{false};
-    int64_t            m_suviFetchedAtMs = 0;
+    std::atomic<int64_t> m_suviFetchedAtMs{0};  // set at completion, not start → interval from end of fetch
     bool               m_suviEnabled     = true;  // show SUVI image (persisted to DB)
 
     // ── JPL Horizons ephemeris ────────────────────────────────────────────────
