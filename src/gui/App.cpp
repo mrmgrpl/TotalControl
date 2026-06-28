@@ -2734,6 +2734,8 @@ void App::RenderInspectorColumn() {
         m_configDb.SetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str());
         m_configDb.SetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str());
         m_configDb.SetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str());
+        LogLine(std::format("SUVI align: halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f}",
+                            m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx));
     }
     ImGui::Spacing();
 
