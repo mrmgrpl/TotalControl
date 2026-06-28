@@ -141,13 +141,25 @@ static std::string HttpsGet(const wchar_t* host, const std::string& path,
 
 // ─── IQP REST API ─────────────────────────────────────────────────────────────
 
-// Parse "YYYY-MM-DDTHH:MM:SS[.S*]Z" → UTC ms since epoch. Returns -1 on failure.
-static int64_t ParseIso8601Ms(const std::string& json, const char* key) {
-    std::string s = JsonStr(json, key);
-    if (s.empty()) return -1;
+// Actual response format (discovered from log):
+// {
+//   "eclipse_type": "TOTAL ECLIPSE",
+//   "duration": "1m 44.2s",
+//   "eclipse_events": [
+//     {"event_type":"c1",  "utc_date":"2026-08-12", "utc_time":"17:33:54"},
+//     {"event_type":"c2",  "utc_date":"2026-08-12", "utc_time":"18:28:53.700000"},
+//     {"event_type":"max", "utc_date":"2026-08-12", "utc_time":"18:29:46"},
+//     {"event_type":"c3",  "utc_date":"2026-08-12", "utc_time":"18:30:37.900000"},
+//     {"event_type":"c4",  "utc_date":"2026-08-12", "utc_time":"19:22:12"}
+//   ]
+// }
+
+// Convert separate date "YYYY-MM-DD" + time "HH:MM:SS[.S*]" → UTC ms since epoch.
+static int64_t DateTimeToUtcMs(const std::string& date, const std::string& time) {
     int yr = 0, mo = 0, dy = 0, hh = 0, mm = 0;
     float ss = 0.f;
-    if (sscanf_s(s.c_str(), "%d-%d-%dT%d:%d:%f", &yr, &mo, &dy, &hh, &mm, &ss) < 5) return -1;
+    if (sscanf_s(date.c_str(), "%d-%d-%d", &yr, &mo, &dy) < 3) return -1;
+    if (sscanf_s(time.c_str(), "%d:%d:%f",  &hh, &mm, &ss) < 2) return -1;
     using namespace std::chrono;
     auto ymd = year_month_day{ year(yr), month(static_cast<unsigned>(mo)),
                                day(static_cast<unsigned>(dy)) };
@@ -155,6 +167,40 @@ static int64_t ParseIso8601Ms(const std::string& json, const char* key) {
     int64_t timeMs = (int64_t(hh) * 3600 + int64_t(mm) * 60) * 1000
                    + static_cast<int64_t>(ss * 1000.f + 0.5f);
     return dateMs + timeMs;
+}
+
+// Parse eclipse_events array; set c1/c2/c3/c4/max from matching event_type entries.
+// Objects have no nesting so simple {…} scan works.
+static void ParseEclipseEvents(const std::string& body, ContactTimes& out) {
+    auto arrPos = body.find("\"eclipse_events\"");
+    if (arrPos == std::string::npos) return;
+    auto arrStart = body.find('[', arrPos);
+    if (arrStart == std::string::npos) return;
+
+    size_t pos = arrStart + 1;
+    static constexpr int kMaxEvents = 16;
+    for (int ev = 0; ev < kMaxEvents; ++ev) {
+        size_t objStart = body.find('{', pos);
+        if (objStart == std::string::npos) break;
+        size_t objEnd   = body.find('}', objStart);
+        if (objEnd   == std::string::npos) break;
+        pos = objEnd + 1;
+
+        std::string obj = body.substr(objStart, objEnd - objStart + 1);
+        std::string evType = JsonStr(obj, "event_type");
+        std::string utcDate = JsonStr(obj, "utc_date");
+        std::string utcTime = JsonStr(obj, "utc_time");
+        if (evType.empty() || utcDate.empty() || utcTime.empty()) continue;
+
+        int64_t ms = DateTimeToUtcMs(utcDate, utcTime);
+        if      (evType == "c1")  out.c1Ms  = ms;
+        else if (evType == "c2")  out.c2Ms  = ms;
+        else if (evType == "c3")  out.c3Ms  = ms;
+        else if (evType == "c4")  out.c4Ms  = ms;
+        else if (evType == "max") out.maxMs = ms;
+
+        if (pos >= body.size() || body[pos] == ']') break;
+    }
 }
 
 static ContactTimes FetchBesselApiTimes(const std::string& eclipseId,
@@ -182,6 +228,7 @@ static ContactTimes FetchBesselApiTimes(const std::string& eclipseId,
 
     IqpLog(std::format("IQP-API raw: {}", body));
 
+    // Check for API-level error
     std::string errMsg = JsonStr(body, "message");
     if (errMsg.empty()) errMsg = JsonStr(body, "error");
     if (!errMsg.empty() && errMsg != "OK") {
@@ -189,20 +236,12 @@ static ContactTimes FetchBesselApiTimes(const std::string& eclipseId,
         return result;
     }
 
-    result.c1Ms  = ParseIso8601Ms(body, "c1");
-    result.c2Ms  = ParseIso8601Ms(body, "c2");
-    result.c3Ms  = ParseIso8601Ms(body, "c3");
-    result.c4Ms  = ParseIso8601Ms(body, "c4");
-    result.maxMs = ParseIso8601Ms(body, "max");
-
+    // Top-level fields
     result.duration = JsonStr(body, "duration");
-    std::string typeStr = JsonStr(body, "type");
-    if (typeStr.empty()) typeStr = JsonStr(body, "eclipse_type");
-    if (!typeStr.empty()) {
-        for (char& c : typeStr)
-            c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
-        result.eclType = typeStr;
-    }
+    result.eclType  = JsonStr(body, "eclipse_type");
+
+    // Contact times from eclipse_events array
+    ParseEclipseEvents(body, result);
 
     result.apiOk  = true;
     result.valid  = result.c1Ms > 0;
