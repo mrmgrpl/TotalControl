@@ -479,6 +479,7 @@ void App::TriggerSuviFetch() {
     m_suviSrvs.clear();
     m_suviCurFrame  = 0;
     m_suviAnimTimer = 0.f;
+    { std::lock_guard lk(m_suviMutex); m_suviPending.clear(); }
     m_suviFetching.store(true);
     // m_suviFetchedAtMs is set at completion (SuviThreadProc end) so the 1-min
     // interval is measured from when the previous fetch FINISHED, not started.
