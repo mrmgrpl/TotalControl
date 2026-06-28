@@ -196,6 +196,7 @@ private:
     std::atomic<bool>  m_suviFetching{false};
     std::atomic<int64_t> m_suviFetchedAtMs{0};  // set at completion, not start → interval from end of fetch
     bool               m_suviEnabled     = true;  // show SUVI image (persisted to DB)
+    bool               m_suviJustCleared = false; // set by TriggerSuviFetch, resets s_prevSrvN
 
     // ── JPL Horizons ephemeris ────────────────────────────────────────────────
     void TriggerEphFetch();

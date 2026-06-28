@@ -472,14 +472,16 @@ void App::TriggerSuviFetch() {
     // Release previous batch textures so the refreshed batch replaces them cleanly.
     // Called only from the render thread — D3D resource release is safe here.
     LogLine(std::format(
-        "SUVI: TriggerFetch srvs={} halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f} msSinceLastDone={}",
+        "SUVI: TriggerFetch srvs={} halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f} rot={:.2f}deg msSinceLastDone={}",
         (int)m_suviSrvs.size(), m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx,
+        m_solarP - m_solarQ,
         m_suviFetchedAtMs.load() > 0 ? UtcNowMs() - m_suviFetchedAtMs.load() : -1LL));
     for (auto* srv : m_suviSrvs) if (srv) srv->Release();
     m_suviSrvs.clear();
     m_suviCurFrame  = 0;
     m_suviAnimTimer = 0.f;
     { std::lock_guard lk(m_suviMutex); m_suviPending.clear(); }
+    m_suviJustCleared = true;
     m_suviFetching.store(true);
     // m_suviFetchedAtMs is set at completion (SuviThreadProc end) so the 1-min
     // interval is measured from when the previous fetch FINISHED, not started.
@@ -2211,12 +2213,15 @@ void App::RenderSolarView() {
         }
         int n = (int)m_suviSrvs.size();
         if (n > 0 && m_suviCurFrame < n && m_suviSrvs[m_suviCurFrame]) {
-            // Log once when frames first appear after a fetch (frame 0, cur==0).
-            if (m_suviCurFrame == 0 && n == 1) {
+            // Log once on 0→N transition (frames arrive in batches so n==1 is rarely true).
+            static int s_prevSrvN = 0;
+            if (m_suviJustCleared) { s_prevSrvN = 0; m_suviJustCleared = false; }
+            if (s_prevSrvN == 0 && n > 0) {
                 LogLine(std::format(
-                    "SUVI: first frame visible  halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f} P_rad={:.4f}",
-                    m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx, P_rad));
+                    "SUVI: first frame visible  halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f} rot={:.2f}deg",
+                    m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx, m_solarP - m_solarQ));
             }
+            s_prevSrvN = n;
             float halfQ = sunR * m_suviHalfQ;
             float sc    = sunR / 384.f;   // image-px → screen-px scale
             float cosP  = cosf(P_rad), sinP = sinf(P_rad);
