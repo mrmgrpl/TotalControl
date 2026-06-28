@@ -2385,10 +2385,19 @@ void App::RenderSolarView() {
         }
     }
 
-    // ── Corona glow ───────────────────────────────────────────────────────────
-    dl->AddCircleFilled({cx,cy}, sunR*4.5f, IM_COL32(250,200,100, 4));
-    dl->AddCircleFilled({cx,cy}, sunR*3.2f, IM_COL32(250,200,100, 9));
-    dl->AddCircleFilled({cx,cy}, sunR*2.2f, IM_COL32(250,200,100,18));
+    // ── Corona glow — color gradient from pearl-white (limb) to amber (outer) ───
+    // Circles drawn outside-in; color mirrors real corona photometry:
+    //   outer streamers (> 3R): amber/orange  →  inner corona (< 1.2R): pearl white.
+    // All circles are behind SUVI — when SUVI loads the inner ones are hidden;
+    // outer circles (> 1.5×sunR) peek out past the SUVI disc edge as far-corona glow.
+    dl->AddCircleFilled({cx,cy}, sunR*9.0f, IM_COL32(220,140, 50,  2));  // far outer, deep amber
+    dl->AddCircleFilled({cx,cy}, sunR*6.5f, IM_COL32(235,160, 60,  3));
+    dl->AddCircleFilled({cx,cy}, sunR*4.5f, IM_COL32(245,175, 75,  6));  // outer corona
+    dl->AddCircleFilled({cx,cy}, sunR*3.0f, IM_COL32(250,190, 90, 11));
+    dl->AddCircleFilled({cx,cy}, sunR*2.1f, IM_COL32(252,208,115, 18));  // mid corona, warm amber
+    dl->AddCircleFilled({cx,cy}, sunR*1.5f, IM_COL32(254,225,155, 26));  // inner, pale yellow
+    dl->AddCircleFilled({cx,cy}, sunR*1.2f, IM_COL32(255,245,210, 36));  // limb, near white
+    dl->AddCircleFilled({cx,cy}, sunR*1.06f,IM_COL32(255,255,245, 50));  // immediate limb, pearl
 
     // ── SUVI Fe171 animation — rotated so solar N aligns with N☉ axis ──────
     // SUVI FD 1200×1200: solar disc radius ≈ 384 px → half-quad = sunR × m_suviHalfQ.

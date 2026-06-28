@@ -52,7 +52,7 @@ src/
     Database.h/.cpp          # SQLite3 wrapper (Open/Exec/GetSetting/SetSetting)
     IqpClient.h/.cpp         # WinHTTP GET to maps.besselianelements.com + key-refresh
     BesselCalc.h/.cpp        # C1/C2/Max/C3/C4 from NASA Besselian elements
-    TzEntry.h / EclipseEntry.h / Timezones.h   # data structs for DB rows
+    TzEntry.h / EclipseEntry.h   # data structs for DB rows
   visualization/             # stubs: Renderer3D, Overlay2D, CameraPreview
 
 include/
