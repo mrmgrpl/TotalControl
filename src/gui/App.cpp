@@ -2164,10 +2164,27 @@ void App::RenderSolarView() {
         }
     };
 
-    // 240mm — horizontal (no rotation): captures landscape context
-    DrawFrame(8.57f, 5.72f, 0.f,   IM_COL32(136,135,128,180), /*dashed=*/true);
-    // 900mm — rotated by P: long axis aligned with solar equator for corona framing
-    DrawFrame(2.29f, 1.53f, P_rad, IM_COL32(24, 95, 165, 220), /*dashed=*/false);
+    // Camera frames — driven by m_camConfigs (focal length + applyP per camera)
+    // Sony full-frame sensor: 35.9 × 24.0 mm
+    {
+        static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
+        static constexpr ImU32 kFrameColors[4] = {
+            IM_COL32( 24,  95, 165, 220),   // niebieski
+            IM_COL32( 55, 160,  70, 220),   // zielony
+            IM_COL32(180,  60,  60, 220),   // czerwony
+            IM_COL32(200, 140,  30, 220),   // bursztyn
+        };
+        assert(m_camConfigs.size() <= 64);
+        for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
+            const CamConfig& cc = m_camConfigs[ci];
+            if (cc.focalMm <= 0) continue;
+            float f    = static_cast<float>(cc.focalMm);
+            float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
+            float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
+            float rot  = cc.applyP ? P_rad : 0.f;
+            DrawFrame(fovW, fovH, rot, kFrameColors[ci % 4], ci == 0 /*dashed*/);
+        }
+    }
 
     // ── Visible planets (clip rect handles bounds) ────────────────────────────
     if (hasEph && sunEph.utc_ms > 0) {
@@ -2335,16 +2352,36 @@ void App::RenderSolarView() {
         dl->AddText({c3x + 4.f,  c3y + 4.f},  IM_COL32(153, 60, 29, 220), "C3");
     }
 
-    // ── Frame labels (top corners) ────────────────────────────────────────────
-    dl->AddText({ox+4.f, oy+4.f}, IM_COL32(95,94,90,200),
-                "240mm  8.6\xc2\xb0\xc3\x97""5.7\xc2\xb0  (0\xc2\xb0)");
+    // ── Frame labels (stacked top-left, one per camera) ──────────────────────
     {
-        char lbl900[48];
-        float rot = m_solarP - m_solarQ;   // P-q: effective field rotation from zenith
-        snprintf(lbl900, sizeof(lbl900),
-                 "900mm  2.3\xc2\xb0\xc3\x97""1.5\xc2\xb0  (rot=%.0f\xc2\xb0)", rot);
-        dl->AddText({ox+szW-ImGui::CalcTextSize(lbl900).x-4.f, oy+4.f},
-                    IM_COL32(24,95,165,200), lbl900);
+        static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
+        static constexpr ImU32 kFrameColors[4] = {
+            IM_COL32( 24,  95, 165, 200),
+            IM_COL32( 55, 160,  70, 200),
+            IM_COL32(180,  60,  60, 200),
+            IM_COL32(200, 140,  30, 200),
+        };
+        float lineY = oy + 4.f;
+        float rot   = m_solarP - m_solarQ;
+        assert(m_camConfigs.size() <= 64);
+        for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
+            const CamConfig& cc = m_camConfigs[ci];
+            if (cc.focalMm <= 0) continue;
+            float f    = static_cast<float>(cc.focalMm);
+            float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
+            float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
+            char lbl[72];
+            if (cc.applyP)
+                snprintf(lbl, sizeof(lbl),
+                    "%s  %dmm  %.1f\xc2\xb0\xc3\x97%.1f\xc2\xb0  (P=%.0f\xc2\xb0)",
+                    cc.model.c_str(), cc.focalMm, fovW, fovH, rot);
+            else
+                snprintf(lbl, sizeof(lbl),
+                    "%s  %dmm  %.1f\xc2\xb0\xc3\x97%.1f\xc2\xb0  (0\xc2\xb0)",
+                    cc.model.c_str(), cc.focalMm, fovW, fovH);
+            dl->AddText({ox + 4.f, lineY}, kFrameColors[ci % 4], lbl);
+            lineY += ImGui::GetTextLineHeight() + 2.f;
+        }
     }
 
     // ── Zoom hint (bottom-right inside clip rect) ─────────────────────────────
@@ -2389,8 +2426,25 @@ void App::RenderInspectorColumn() {
 
     ImGui::SeparatorText("INSPECTOR");
 
-    bool hasSel = m_selTrack >= 0 && m_selTrack < (int)m_tracks.size()
+    bool hasTrack = m_selTrack >= 0 && m_selTrack < (int)m_tracks.size();
+    bool hasSel   = hasTrack
                && m_selBlock >= 0 && m_selBlock < (int)m_tracks[m_selTrack].blocks.size();
+
+    // Track-level: focal length — shown for any selected camera track
+    if (hasTrack && m_tracks[m_selTrack].IsCamera()) {
+        TLTrack& tr = m_tracks[m_selTrack];
+        ImGui::PushFont(m_fontMono);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+        ImGui::TextColored(kGray, "Ogniskowa"); ImGui::SameLine(80);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputInt("##focal_mm", &tr.focalMm, 10, 50)) {
+            if (tr.focalMm < 0) tr.focalMm = 0;
+            m_tlDirty = true;
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopFont();
+        ImGui::Spacing();
+    }
 
     if (!hasSel) {
         ImGui::PushFont(m_fontMono);
@@ -3226,7 +3280,14 @@ void App::RenderTimelineBottom() {
         ImU32 labelBg = isPresetTarget ? IM_COL32(28, 22, 6, 255) : IM_COL32(14, 14, 22, 255);
         dl->AddRectFilled({winPos.x, ty}, {winPos.x + kLabelW - 2.f, tyFill}, labelBg);
         ImU32 lc = tr.IsAudio() ? IM_COL32(150,100,210,255) : IM_COL32(120,148,172,255);
-        dl->AddText({winPos.x + 20.f, ty + 7.f}, lc, tr.label.c_str());  // shifted right to make room
+        bool hasFocal = tr.IsCamera() && tr.focalMm > 0;
+        float labelY  = hasFocal ? ty + 2.f : ty + 7.f;
+        dl->AddText({winPos.x + 20.f, labelY}, lc, tr.label.c_str());  // shifted right to make room
+        if (hasFocal) {
+            char focalBuf[16];
+            snprintf(focalBuf, sizeof(focalBuf), "%d mm", tr.focalMm);
+            dl->AddText({winPos.x + 20.f, ty + 15.f}, IM_COL32(100, 180, 120, 220), focalBuf);
+        }
         // Preset-target marker: amber filled triangle on the left edge (camera tracks only).
         // Drawn with AddTriangleFilled so it works regardless of font glyph availability.
         if (isPresetTarget) {
@@ -3563,6 +3624,11 @@ App::App() {
         { std::lock_guard lk(m_audioDurMutex);
           m_audioDurCache = m_configDb.LoadAudioFileDurs(); }
         ScanAudioFilesAsync();
+
+        // Camera config — create table and load previously registered cameras
+        m_configDb.CreateCamConfigTable();
+        m_camConfigs = m_configDb.LoadCamConfigs();
+        m_showCamCfgWnd.assign(m_camConfigs.size(), false);
 
         // Load saved timeline (overrides InitTracks defaults when data exists)
         auto saved = m_configDb.LoadTimeline();
@@ -4624,6 +4690,131 @@ void App::ExportTimelineJson() {
     LogLine(m_lastResult);
 }
 
+// ─── Camera config ────────────────────────────────────────────────────────────
+
+void App::MergeCamerasIntoCamConfigs() {
+    assert(m_camConfigs.size() == m_showCamCfgWnd.size());
+    std::vector<CamStatus> snap;
+    { std::lock_guard lk(m_camerasMutex); snap = m_cameras; }
+
+    for (const CamStatus& cs : snap) {
+        if (cs.guid.empty() || cs.model.empty()) continue;
+        auto it = std::find_if(m_camConfigs.begin(), m_camConfigs.end(),
+            [&](const CamConfig& cc){ return cc.guid == cs.guid; });
+        if (it == m_camConfigs.end()) {
+            CamConfig cc;
+            cc.guid    = cs.guid;
+            cc.model   = cs.model;
+            cc.focalMm = 0;
+            cc.applyP  = true;
+            m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP);
+            m_camConfigs.push_back(std::move(cc));
+            m_showCamCfgWnd.push_back(false);
+            LogLine(std::format("CamConfig: registered {} ({})", cs.model, cs.guid));
+        }
+    }
+}
+
+void App::RenderCamConfigWindows() {
+    assert(m_camConfigs.size() == m_showCamCfgWnd.size());
+    static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
+    static const ImVec4 kDim  {0.28f, 0.28f, 0.32f, 1.0f};
+
+    for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
+        if (!m_showCamCfgWnd[ci]) continue;
+        CamConfig& cc = m_camConfigs[ci];
+
+        std::string wndTitle = cc.model + " \xc2\xb7 " + cc.guid + "##camcfg"
+                               + std::to_string(ci);
+        ImGui::SetNextWindowSize({420.f, 360.f}, ImGuiCond_FirstUseEver);
+        // std::vector<bool> returns proxy, not bool* — use local copy for ImGui::Begin
+        bool wndOpen = m_showCamCfgWnd[ci];
+        if (!ImGui::Begin(wndTitle.c_str(), &wndOpen)) {
+            ImGui::End();
+            m_showCamCfgWnd[ci] = wndOpen;
+            continue;
+        }
+
+        // Snapshot live status for this camera
+        CamStatus live;
+        { std::lock_guard lk(m_camerasMutex);
+          for (const auto& cs : m_cameras)
+              if (cs.guid == cc.guid) { live = cs; break; } }
+        bool online = live.valid;
+
+        ImGui::PushFont(m_fontMono);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+
+        // ── Detected parameters (read-only) ─────────────────────────────────
+        ImGui::SeparatorText("Detected Parameters");
+
+        auto Row = [&](const char* key, const std::string& val) {
+            ImGui::TextColored(kGray, "%s", key); ImGui::SameLine(90.f);
+            if (online) ImGui::TextUnformatted(val.c_str());
+            else        ImGui::TextColored(kDim, "\xe2\x80\x94");  // —
+        };
+
+        Row("Model",   cc.model);
+        Row("GUID",    cc.guid);
+        if (online) {
+            // Battery bar + percent
+            ImGui::TextColored(kGray, "Battery"); ImGui::SameLine(90.f);
+            {
+                float pct = live.batteryPct / 100.f;
+                ImVec4 bc = pct > 0.5f ? ImVec4(0.2f,0.7f,0.3f,1.f)
+                           : pct > 0.2f ? ImVec4(0.8f,0.6f,0.1f,1.f)
+                                        : ImVec4(0.8f,0.2f,0.2f,1.f);
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, bc);
+                ImGui::ProgressBar(pct, ImVec2(80.f, 0.f));
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+                ImGui::Text("%d%%", live.batteryPct);
+            }
+            Row("Mode",   live.mode);
+            Row("SS",     live.ss);
+            Row("ISO",    std::to_string(live.iso));
+            Row("f/",     live.fnum);
+            Row("Focus",  live.focus);
+            Row("Drive",  live.drive);
+            {
+                std::string s1 = live.slot1Status;
+                if (live.slot1Remaining >= 0)
+                    s1 += std::format("  ({})", live.slot1Remaining);
+                Row("Slot 1", s1);
+                std::string s2 = live.slot2Status;
+                if (live.slot2Remaining >= 0)
+                    s2 += std::format("  ({})", live.slot2Remaining);
+                Row("Slot 2", s2);
+            }
+        } else {
+            ImGui::TextColored(kDim, "  (Not connected)");
+        }
+
+        ImGui::Spacing();
+        // ── Configuration ───────────────────────────────────────────────────
+        ImGui::SeparatorText("Configuration");
+
+        ImGui::TextColored(kGray, "Ogniskowa"); ImGui::SameLine(90.f);
+        ImGui::SetNextItemWidth(80.f);
+        if (ImGui::InputInt("##focal_cfg", &cc.focalMm, 0, 0)) {
+            if (cc.focalMm < 0) cc.focalMm = 0;
+            m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP);
+        }
+        ImGui::SameLine(); ImGui::TextColored(kGray, "mm");
+
+        ImGui::TextColored(kGray, "Apply P");  ImGui::SameLine(90.f);
+        if (ImGui::Checkbox("##applyP_cfg", &cc.applyP))
+            m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP);
+        ImGui::SameLine();
+        ImGui::TextColored(kDim, cc.applyP ? "obrot P (korona)" : "poziomo (krajobraz)");
+
+        ImGui::PopStyleVar();
+        ImGui::PopFont();
+        ImGui::End();
+        m_showCamCfgWnd[ci] = wndOpen;
+    }
+}
+
 // ─── Menu bar ─────────────────────────────────────────────────────────────────
 
 void App::RenderMenuBar() {
@@ -4709,6 +4900,28 @@ void App::RenderMenuBar() {
         if (ImGui::MenuItem("Style: Dark"))    ApplyStyleDark();
         if (ImGui::MenuItem("Style: Classic")) ImGui::StyleColorsClassic();
         if (ImGui::MenuItem("Style: Light"))   ImGui::StyleColorsLight();
+        ImGui::EndMenu();
+    }
+
+    // ── Camera Config ─────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("Camera Config")) {
+        if (m_camConfigs.empty()) {
+            ImGui::TextDisabled("No cameras registered");
+            ImGui::TextDisabled("Connect camera to discover");
+        }
+        for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
+            const CamConfig& cc = m_camConfigs[ci];
+            bool online = false;
+            { std::lock_guard lk(m_camerasMutex);
+              for (const auto& cs : m_cameras)
+                  if (cs.guid == cc.guid) { online = true; break; } }
+            // \xe2\x97\x8f = ● (U+25CF), \xe2\x97\x8b = ○ (U+25CB)
+            std::string label = std::format("{}  {}  {}##camcfgmenu{}",
+                online ? "\xe2\x97\x8f" : "\xe2\x97\x8b",
+                cc.model, cc.guid, ci);
+            if (ImGui::MenuItem(label.c_str()))
+                m_showCamCfgWnd[ci] = true;
+        }
         ImGui::EndMenu();
     }
 
@@ -4873,6 +5086,9 @@ void App::RenderAboutModal() {
 
 void App::OnFrame() {
     ImGuiIO& io = ImGui::GetIO();
+
+    // ── Merge newly connected cameras into persistent config ──────────────
+    if (m_configDb.IsOpen()) MergeCamerasIntoCamConfigs();
 
     // ── Post-scan reload ──────────────────────────────────────────────────
     // If a "Reset Audio Presets" triggered a rescan, reload the preset now.
@@ -5292,6 +5508,9 @@ void App::OnFrame() {
         ImGui::ShowDemoWindow(&m_showDemoWindow);
 
     ImGui::End();
+
+    // ── Camera config floating windows (outside host window) ─────────────
+    RenderCamConfigWindows();
 
     // ── persist timeline when changed ─────────────────────────────────────
     if (m_tlDirty && m_configDb.IsOpen()) {

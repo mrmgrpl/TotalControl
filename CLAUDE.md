@@ -255,7 +255,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 - `TotalControlGUI.log` — GUI, next to exe, append mode
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Current status (2026-06-27)
+## Current status (2026-06-28)
 
 | Module | Status |
 |---|---|
@@ -278,6 +278,8 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **TotalControlGUI Phase 3d** | **DONE** |
 | **TotalControlGUI Solar Simulator** | **DONE 2026-06-08** |
 | **TotalControlGUI GOES-19 SUVI Fe171** | **DONE 2026-06-27** |
+| **TotalControlGUI TLTrack focalMm** | **DONE 2026-06-28** |
+| **TotalControlGUI Camera Config menu** | **DONE 2026-06-28** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -430,11 +432,56 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 
 **Red alignment circle**: `AddCircle(cx, cy, sunR)` always drawn on top of SUVI image for visual verification
 
+**Periodic re-fetch**: every 1 minute measured from **completion** of previous fetch (not from start) — avoids
+immediate re-fetch loop when download takes > 1 min. `m_suviFetchedAtMs` set at end of `SuviThreadProc`.
+
 **PITFALLs**:
 - SUVI filenames: SS and trailing digit vary with NOAA schedule — cannot be guessed; must fetch directory listing
 - CDN directory = ~10 MB Apache autoindex HTML; parse `href="NNNNNNNNNNNNNN_GOES19-SUVI-Fe171-1200x1200.jpg"`
 - `ImTextureID = ImU64` since ImGui 1.91.4 → cast: `(ImTextureID)(uintptr_t)srv`
 - `Database::SetSetting` takes `const char*` — use `.c_str()` on `std::to_string()` result
+- `m_suviPending.clear()` must be called in `TriggerSuviFetch()` to avoid stale frame accumulation across cycles
+- Calibration defaults stored in DB with `suvi_calib_ver` key; v2 defaults: halfQ=1.5250, foot=20, corrR=-24, corrU=0
+
+### TotalControlGUI — TLTrack focal length (complete 2026-06-28)
+
+- `TLTrack::focalMm` (int, default 0) — lens focal length in mm per timeline camera track
+- DB: `focal_mm` column in `tl_tracks` and `tl_snap_tracks`; `ALTER TABLE ADD COLUMN` migration for existing DBs
+- Inspector column: `InputInt "Ogniskowa"` shown when any camera track is selected (above block params)
+- Timeline track header: second line shows `"240 mm"` in green when focalMm > 0
+
+### TotalControlGUI — Camera Config menu (complete 2026-06-28)
+
+**Menu bar → Camera Config** — per-camera configuration windows.
+
+**Data model** (`Database::CamConfig`):
+```cpp
+struct CamConfig {
+    std::string guid;       // primary key — permanent, never updated after first detection
+    std::string model;      // e.g. "ILCE-7RM4A" — recorded once on first detection
+    int         focalMm = 0;   // configured lens focal length (0 = no frame drawn)
+    bool        applyP  = true; // true → rotate solar frame by P_rad; false → horizontal (0°)
+};
+```
+DB table: `camera_config (guid TEXT PK, model TEXT, focal_mm INTEGER, apply_p INTEGER)`
+
+**Discovery**: `MergeCamerasIntoCamConfigs()` called every frame — merges `m_cameras` snapshot into
+`m_camConfigs`; new cameras auto-registered in DB on first connection (model+GUID recorded once, immutable).
+
+**Camera Config window** (floating, per camera):
+- Section 1 "Detected Parameters": Model, GUID, Battery bar+%, Mode, SS, ISO, f/, Focus, Drive, Slot1/Slot2 (live from `m_cameras`; "Not connected" when offline)
+- Section 2 "Configuration": `Ogniskowa` InputInt (step=0, free text entry — supports zoom lenses) + `Apply P` checkbox (true=corona framing rotated by P_rad, false=horizontal landscape)
+- Changes saved immediately to DB via `SaveCamConfig()`
+
+**Solar simulator frames** — dynamic, replace hardcoded 240mm/900mm:
+- Loop over `m_camConfigs`; skip if `focalMm == 0`
+- FOV: `fovW = 2·atan2(35.9/2, f)`, `fovH = 2·atan2(24.0/2, f)` (Sony full-frame 35.9×24.0mm hardcoded for now)
+- Rotation: `applyP ? P_rad : 0.f`
+- Color palette: niebieski/zielony/czerwony/bursztyn; first camera dashed, rest solid
+- Labels: stacked top-left, format `"ILCE-7RM4A  240mm  8.6°×5.7°  (P=15°)"`
+
+**PITFALL**: `std::vector<bool>` returns proxy objects, not `bool*` — `ImGui::Begin` requires `bool*`.
+Use local `bool wndOpen = m_showCamCfgWnd[ci]; ImGui::Begin(..., &wndOpen); m_showCamCfgWnd[ci] = wndOpen;`
 
 ## Known pitfalls in IqpClient (maps.besselianelements.com API)
 

@@ -88,6 +88,10 @@ private:
     void RenderAboutModal();
     void RenderSequencerButtons();   // TEST RUN / STOP / RUN / STOP RUN in Col1
     void ExportTimelineJson();
+
+    // Camera configuration
+    void MergeCamerasIntoCamConfigs();
+    void RenderCamConfigWindows();
     void NewTimeline();
     void DeleteSelectedBlock();
     void DuplicateSelectedBlock();
@@ -322,6 +326,10 @@ private:
     std::atomic<int>               m_audioScanTotal{0};       // total files found
     std::atomic<bool>              m_audioScanComplete{false}; // set by scan thread on finish
     std::string                    m_pendingAudioReload;       // lang to reload after scan; main-thread only
+
+    // ── Camera config ─────────────────────────────────────────────────────────
+    std::vector<CamConfig> m_camConfigs;
+    std::vector<bool>      m_showCamCfgWnd;  // one flag per m_camConfigs entry
 
     // ── Photo preset ─────────────────────────────────────────────────────────
     void AddPhotoPreset();

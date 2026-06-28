@@ -35,6 +35,7 @@ struct TLTrack {
     std::string          type;          // "camera" | "audio"
     std::string          cameraId;
     std::string          label;
+    int                  focalMm  = 0;  // lens focal length in mm (0 = unset)
     std::vector<TLBlock> blocks;
 
     bool IsCamera() const { return type == "camera"; }

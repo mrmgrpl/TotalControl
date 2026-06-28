@@ -208,7 +208,8 @@ static constexpr const char* kCreateTlTracks = R"SQL(
         sort_order INTEGER NOT NULL DEFAULT 0,
         type       TEXT    NOT NULL DEFAULT 'camera',
         camera_id  TEXT    NOT NULL DEFAULT '',
-        label      TEXT    NOT NULL DEFAULT ''
+        label      TEXT    NOT NULL DEFAULT '',
+        focal_mm   INTEGER NOT NULL DEFAULT 0
     );
 )SQL";
 
@@ -239,6 +240,10 @@ void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
 
     Exec(kCreateTlTracks);
     Exec(kCreateTlBlocks);
+    // Migration: add focal_mm if this is an older DB without the column (error ignored if it exists)
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_tracks ADD COLUMN focal_mm INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
 
     sqlite3_exec(m_db, "BEGIN;",                 nullptr, nullptr, nullptr);
     sqlite3_exec(m_db, "DELETE FROM tl_blocks;", nullptr, nullptr, nullptr);
@@ -248,13 +253,14 @@ void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
         const TLTrack& tr = tracks[si];
         sqlite3_stmt* st = nullptr;
         sqlite3_prepare_v2(m_db,
-            "INSERT INTO tl_tracks (sort_order, type, camera_id, label)"
-            " VALUES (?,?,?,?);",
+            "INSERT INTO tl_tracks (sort_order, type, camera_id, label, focal_mm)"
+            " VALUES (?,?,?,?,?);",
             -1, &st, nullptr);
         sqlite3_bind_int (st, 1, si);
         sqlite3_bind_text(st, 2, tr.type.c_str(),     -1, SQLITE_STATIC);
         sqlite3_bind_text(st, 3, tr.cameraId.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(st, 4, tr.label.c_str(),    -1, SQLITE_STATIC);
+        sqlite3_bind_int (st, 5, tr.focalMm);
         sqlite3_step(st);
         sqlite3_finalize(st);
         int64_t trackId = sqlite3_last_insert_rowid(m_db);
@@ -312,7 +318,7 @@ std::vector<TLTrack> Database::LoadTimeline() const {
 
     sqlite3_stmt* st = nullptr;
     int rc = sqlite3_prepare_v2(m_db,
-        "SELECT id, type, camera_id, label FROM tl_tracks ORDER BY sort_order;",
+        "SELECT id, type, camera_id, label, focal_mm FROM tl_tracks ORDER BY sort_order;",
         -1, &st, nullptr);
     if (rc != SQLITE_OK) return result;
 
@@ -322,6 +328,7 @@ std::vector<TLTrack> Database::LoadTimeline() const {
         tr.type     = col(st, 1);
         tr.cameraId = col(st, 2);
         tr.label    = col(st, 3);
+        tr.focalMm  = sqlite3_column_int(st, 4);
         result.push_back(std::move(tr));
     }
     sqlite3_finalize(st);
@@ -375,7 +382,8 @@ static constexpr const char* kCreateSnapshots = R"SQL(
         sort_order  INTEGER NOT NULL DEFAULT 0,
         type        TEXT    NOT NULL DEFAULT 'camera',
         camera_id   TEXT    NOT NULL DEFAULT '',
-        label       TEXT    NOT NULL DEFAULT ''
+        label       TEXT    NOT NULL DEFAULT '',
+        focal_mm    INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS tl_snap_blocks (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,6 +407,10 @@ static constexpr const char* kCreateSnapshots = R"SQL(
 void Database::CreateSnapshotTables() {
     assert(m_db != nullptr);  // DB must be open before creating tables
     Exec(kCreateSnapshots);
+    // Migration: add focal_mm to snapshots table if absent (error ignored if column already exists)
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_snap_tracks ADD COLUMN focal_mm INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
 }
 
 void Database::SaveSnapshot(const std::string& name,
@@ -453,14 +465,15 @@ void Database::SaveSnapshot(const std::string& name,
         const TLTrack& tr = tracks[si2];
         sqlite3_stmt* st = nullptr;
         sqlite3_prepare_v2(m_db,
-            "INSERT INTO tl_snap_tracks (snapshot_id,sort_order,type,camera_id,label)"
-            " VALUES (?,?,?,?,?);",
+            "INSERT INTO tl_snap_tracks (snapshot_id,sort_order,type,camera_id,label,focal_mm)"
+            " VALUES (?,?,?,?,?,?);",
             -1, &st, nullptr);
         sqlite3_bind_int64(st, 1, snapId);
         sqlite3_bind_int  (st, 2, si2);
         sqlite3_bind_text (st, 3, tr.type.c_str(),     -1, SQLITE_STATIC);
         sqlite3_bind_text (st, 4, tr.cameraId.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text (st, 5, tr.label.c_str(),    -1, SQLITE_STATIC);
+        sqlite3_bind_int  (st, 6, tr.focalMm);
         sqlite3_step(st); sqlite3_finalize(st);
         int64_t trackId = sqlite3_last_insert_rowid(m_db);
 
@@ -528,7 +541,7 @@ std::vector<TLTrack> Database::LoadSnapshot(int64_t id) const {
 
     sqlite3_stmt* st = nullptr;
     int rc = sqlite3_prepare_v2(m_db,
-        "SELECT id, type, camera_id, label FROM tl_snap_tracks"
+        "SELECT id, type, camera_id, label, focal_mm FROM tl_snap_tracks"
         " WHERE snapshot_id=? ORDER BY sort_order;",
         -1, &st, nullptr);
     if (rc != SQLITE_OK) return result;
@@ -539,6 +552,7 @@ std::vector<TLTrack> Database::LoadSnapshot(int64_t id) const {
         tr.type     = col(st, 1);
         tr.cameraId = col(st, 2);
         tr.label    = col(st, 3);
+        tr.focalMm  = sqlite3_column_int(st, 4);
         result.push_back(std::move(tr));
     }
     sqlite3_finalize(st);
@@ -880,9 +894,10 @@ void Database::SaveAudioFileDur(std::string_view lang,
     assert(!lang.empty() && !filename.empty());
     assert(durMs >= 0);
     sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(m_db,
-        "INSERT OR REPLACE INTO audio_files (lang, filename, dur_ms) VALUES (?,?,?);",
-        -1, &st, nullptr);
+    if (sqlite3_prepare_v2(m_db,
+            "INSERT OR REPLACE INTO audio_files (lang, filename, dur_ms) VALUES (?,?,?);",
+            -1, &st, nullptr) != SQLITE_OK)
+        return;   // rule 7: discard only on confirmed error (st is null here, do not bind)
     sqlite3_bind_text(st, 1, lang.data(),     static_cast<int>(lang.size()),     SQLITE_STATIC);
     sqlite3_bind_text(st, 2, filename.data(), static_cast<int>(filename.size()), SQLITE_STATIC);
     sqlite3_bind_int (st, 3, durMs);
@@ -924,15 +939,87 @@ std::vector<std::string> Database::LoadAudioCachedLangs() const {
 
 void Database::ClearAudioFileDurs(std::string_view lang) {
     assert(m_db != nullptr);
+    assert(lang.empty() || lang.size() <= 10);  // rule 5: lang tags are short codes ("PL","EN",…)
     if (lang.empty()) {
         sqlite3_exec(m_db, "DELETE FROM audio_files;", nullptr, nullptr, nullptr);
     } else {
         sqlite3_stmt* st = nullptr;
-        sqlite3_prepare_v2(m_db, "DELETE FROM audio_files WHERE lang=?;", -1, &st, nullptr);
+        if (sqlite3_prepare_v2(m_db, "DELETE FROM audio_files WHERE lang=?;",
+                               -1, &st, nullptr) != SQLITE_OK)
+            return;   // rule 7: st is null on error — must not bind
         sqlite3_bind_text(st, 1, lang.data(), static_cast<int>(lang.size()), SQLITE_STATIC);
         sqlite3_step(st);
         sqlite3_finalize(st);
     }
+}
+
+// ─── Camera configuration ─────────────────────────────────────────────────────
+
+void Database::CreateCamConfigTable() {
+    assert(m_db != nullptr);
+    Exec(R"SQL(
+        CREATE TABLE IF NOT EXISTS camera_config (
+            guid      TEXT PRIMARY KEY,
+            model     TEXT NOT NULL DEFAULT '',
+            focal_mm  INTEGER NOT NULL DEFAULT 0,
+            apply_p   INTEGER NOT NULL DEFAULT 1
+        );
+    )SQL");
+}
+
+void Database::SaveCamConfig(const std::string& guid, const std::string& model,
+                              int focalMm, bool applyP) {
+    assert(m_db != nullptr);
+    assert(!guid.empty());
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+            "INSERT OR REPLACE INTO camera_config (guid, model, focal_mm, apply_p)"
+            " VALUES (?,?,?,?);",
+            -1, &st, nullptr) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(st, 1, guid.c_str(),  -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, model.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int (st, 3, focalMm);
+    sqlite3_bind_int (st, 4, applyP ? 1 : 0);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+std::vector<CamConfig> Database::LoadCamConfigs() const {
+    assert(m_db != nullptr);
+    std::vector<CamConfig> result;
+    if (!m_db) return result;
+
+    sqlite3_stmt* chk = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='camera_config';",
+        -1, &chk, nullptr);
+    bool exists = (sqlite3_step(chk) == SQLITE_ROW);
+    sqlite3_finalize(chk);
+    if (!exists) return result;
+
+    auto col = [](sqlite3_stmt* s, int i) -> std::string {
+        const auto* p = sqlite3_column_text(s, i);
+        return p ? reinterpret_cast<const char*>(p) : "";
+    };
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT guid, model, focal_mm, apply_p FROM camera_config ORDER BY rowid;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        CamConfig cc;
+        cc.guid    = col(st, 0);
+        cc.model   = col(st, 1);
+        cc.focalMm = sqlite3_column_int(st, 2);
+        cc.applyP  = sqlite3_column_int(st, 3) != 0;
+        result.push_back(std::move(cc));
+    }
+    sqlite3_finalize(st);
+    assert(result.size() <= 64);  // sanity: won't have more than 64 cameras in a session
+    return result;
 }
 
 } // namespace TotalControl

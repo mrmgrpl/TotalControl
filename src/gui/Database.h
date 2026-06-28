@@ -13,6 +13,15 @@ struct sqlite3;
 
 namespace TotalControl {
 
+// ─── Camera configuration ─────────────────────────────────────────────────────
+
+struct CamConfig {
+    std::string guid;       // primary key — permanent hardware ID
+    std::string model;      // e.g. "ILCE-7RM4A" — recorded once on first detection
+    int         focalMm = 0;   // configured lens focal length (0 = unset → no frame drawn)
+    bool        applyP  = true; // true → rotate solar frame by P_rad; false → horizontal (0°)
+};
+
 // ─── Bracket calibration ─────────────────────────────────────────────────────
 
 struct BktCalibEntry {
@@ -90,6 +99,12 @@ public:
                                          const std::string& location) const;
     void                 SetEphMeta(const std::string& eclDate,
                                     const std::string& location);
+
+    // camera_config table (TotalControlConfig.db)
+    void                   CreateCamConfigTable();
+    void                   SaveCamConfig(const std::string& guid, const std::string& model,
+                                         int focalMm, bool applyP);
+    std::vector<CamConfig> LoadCamConfigs() const;
 
     // Audio file duration cache (TotalControlConfig.db)
     // lang: uppercase 2-char tag e.g. "PL", "EN"; filename: bare name.
