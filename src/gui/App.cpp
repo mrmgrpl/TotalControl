@@ -288,9 +288,9 @@ void App::TriggerIqpFetch() {
     auto* contactPtr = &m_contacts;
     auto* cfgDb      = &m_configDb;
 
-    m_iqpThread = std::thread([id, lat, lon, y, mo, d,
+    m_iqpThread = std::thread([id, lat, lon, altM, y, mo, d,
                                 statePtr, mutexPtr, contactPtr, cfgDb]() {
-        auto ct = FetchContactTimes(id, lat, lon, y, mo, d);
+        auto ct = FetchContactTimes(id, lat, lon, altM, y, mo, d);
         // Persist refreshed key so it survives next app restart
         std::string newKey = GetCurrentApiKey();
         if (!newKey.empty())
@@ -3838,6 +3838,15 @@ App::App() {
         std::string savedKey = m_configDb.GetSetting("iqp_api_key", "");
         if (!savedKey.empty()) SetApiKey(savedKey);
 
+        // Load dedicated BE REST API key (user-supplied, 40 hex chars, never in source)
+        std::string beKey = m_configDb.GetSetting("be_api_key", "");
+        if (!beKey.empty()) {
+            SetBeApiKey(beKey);
+            size_t copyLen = std::min(beKey.size(), sizeof(m_beApiKeyBuf) - 1);
+            std::memcpy(m_beApiKeyBuf, beKey.c_str(), copyLen);
+            m_beApiKeyBuf[copyLen] = '\0';
+        }
+
         // SUVI alignment calibration + toggle (persisted; orbital drift + user pref)
         // suvi_calib_ver < 2 → one-time migration to v2 measured defaults (2026-06-28)
         constexpr int kSuviCalibVer = 2;
@@ -4569,7 +4578,8 @@ void App::RenderContactTimesSection() {
     ContactTimes iqpCt;
     { std::lock_guard lk(m_iqpMutex); iqpCt = m_contacts; }
 
-    renderSection("IQP", iqpCt, iqpSt == 1,
+    const char* iqpLabel = (iqpCt.source == ContactSource::BesselApi) ? "BE API" : "IQP";
+    renderSection(iqpLabel, iqpCt, iqpSt == 1,
                   ImVec4{0.45f, 0.75f, 1.00f, 1.0f});   // blue
     ImGui::Spacing();
     renderSection("BE",  m_beResult, false,
@@ -5278,6 +5288,13 @@ void App::RenderMenuBar() {
         ImGui::EndMenu();
     }
 
+    // ── Options ───────────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("Options")) {
+        if (ImGui::MenuItem("API Keys..."))
+            m_showOptions = true;
+        ImGui::EndMenu();
+    }
+
     // ── About ─────────────────────────────────────────────────────────────
     if (ImGui::BeginMenu("About")) {
         if (ImGui::MenuItem("About TotalControl"))
@@ -5291,6 +5308,65 @@ void App::RenderMenuBar() {
         ImGui::MenuItem("TSE 2026-08-12  Burgos/Lerma", nullptr, false, false);
         ImGui::EndMenu();
     }
+}
+
+// ─── Options window ───────────────────────────────────────────────────────────
+
+void App::RenderOptionsWindow() {
+    assert(true); // invariant: always callable; m_showOptions guards early-out
+    if (!m_showOptions) return;
+
+    ImGui::SetNextWindowSize(ImVec2(460, 220), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+
+    if (!ImGui::Begin("Options##optwin", &m_showOptions, ImGuiWindowFlags_NoCollapse))
+    { ImGui::End(); return; }
+
+    static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
+    static const ImVec4 kGray {0.55f, 0.55f, 0.60f, 1.0f};
+    static const ImVec4 kGreen{0.30f, 0.80f, 0.35f, 1.0f};
+
+    ImGui::PushFont(m_fontMono);
+
+    // ── Besselian Elements REST API ────────────────────────────────────────────
+    ImGui::TextColored(kGold, "Besselian Elements REST API");
+    ImGui::TextColored(kGray, "Dedicated key (40 hex chars). Overrides the classic IQP scraping API.");
+    ImGui::TextColored(kGray, "Leave empty to use classic IQP (automatic key refresh from map page).");
+    ImGui::Spacing();
+
+    ImGuiInputTextFlags keyFlags = m_beKeyVisible
+        ? ImGuiInputTextFlags_None
+        : ImGuiInputTextFlags_Password;
+    ImGui::SetNextItemWidth(310.f);
+    bool edited = ImGui::InputText("##be_api_key", m_beApiKeyBuf,
+                                   sizeof(m_beApiKeyBuf), keyFlags);
+    ImGui::SameLine();
+    if (ImGui::Button(m_beKeyVisible ? "Hide" : "Show"))
+        m_beKeyVisible = !m_beKeyVisible;
+    ImGui::SameLine();
+    if (ImGui::Button("Apply")) {
+        std::string newKey = m_beApiKeyBuf;
+        SetBeApiKey(newKey);
+        if (m_configDb.IsOpen())
+            m_configDb.SetSetting("be_api_key", newKey.c_str());
+    }
+    (void)edited; // InputText result not needed here — Apply is explicit
+
+    // Live status: which API will be used on next Calculate Contacts
+    std::string activeKey = GetBeApiKey();
+    if (!activeKey.empty()) {
+        ImGui::TextColored(kGreen,
+            "  BE REST API active  (%s...)",
+            activeKey.substr(0, 8).c_str());
+    } else {
+        ImGui::TextColored(kGray,
+            "  Classic IQP API (maps.besselianelements.com)");
+    }
+
+    assert(true); // postcondition: all controls rendered
+    ImGui::PopFont();
+    ImGui::End();
 }
 
 // ─── About modal ──────────────────────────────────────────────────────────────
@@ -5456,8 +5532,9 @@ void App::OnFrame() {
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
-    // ── About + snapshot modals ───────────────────────────────────────────
+    // ── About + Options + snapshot modals ────────────────────────────────
     RenderAboutModal();
+    RenderOptionsWindow();
     if (m_configDb.IsOpen()) RenderSnapshotModal();
 
     const float colW      = 200.0f;   // Col1: Hardware
@@ -5550,7 +5627,9 @@ void App::OnFrame() {
                     ImGui::TextColored(kDim, "no eclipse");
                 } else if (ct.valid) {
                     // Source label shown once on C1 line
-                    const char* srcLabel = (ct.source == ContactSource::IQP) ? "IQP" : "BE";
+                    const char* srcLabel =
+                        (ct.source == ContactSource::BesselApi) ? "BE API" :
+                        (ct.source == ContactSource::IQP)       ? "IQP"    : "BE";
 
                     // Helper: format UTC ms → "HH:MM:SS"
                     auto fmtUtc = [](int64_t ms, char* buf, int len) {

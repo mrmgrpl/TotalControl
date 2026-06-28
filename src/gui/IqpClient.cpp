@@ -17,7 +17,8 @@ static constexpr const char* kApiKeyDefault =
     "be98861b670a78e46d64f54b4e1d11f37fcf6f5f65788604caf9cf275d0e89d9"
     "8c49c0fcc366e96c71b46b15051e9f4ea1f649180da4f4880bf11b460a4e82a1";
 
-static std::string   s_apiKey   = kApiKeyDefault;
+static std::string   s_apiKey   = kApiKeyDefault;  // classic IQP key (128 hex chars)
+static std::string   s_beApiKey;                    // dedicated BE REST key (40 hex chars)
 static std::mutex    s_keyMutex;
 static std::function<void(std::string_view)> s_logger;
 
@@ -174,7 +175,12 @@ static int64_t ToUtcMs(const std::string& timeStr, int year, int month, int day,
 
 // ─── WinHTTP GET ──────────────────────────────────────────────────────────────
 
-static std::string HttpsGet(const wchar_t* host, const std::string& path) {
+// extraHeaders: additional headers in "Name: value\r\n" format, or nullptr.
+// iqpReferer: when true, adds the classic IQP X-Requested-With/Referer headers.
+static std::string HttpsGet(const wchar_t* host, const std::string& path,
+                             const wchar_t* extraHeaders = nullptr,
+                             bool iqpReferer = false) {
+    assert(host && host[0] != L'\0');
     // URL paths are always ASCII — safe narrow→wide conversion
     std::wstring wpath(path.begin(), path.end());
 
@@ -202,10 +208,15 @@ static std::string HttpsGet(const wchar_t* host, const std::string& path) {
         WinHttpCloseHandle(hCon); WinHttpCloseHandle(hSes); return {};
     }
 
-    WinHttpAddRequestHeaders(hReq,
-        L"X-Requested-With: XMLHttpRequest\r\n"
-        L"Referer: https://maps.besselianelements.com/\r\n",
-        (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+    if (iqpReferer) {
+        WinHttpAddRequestHeaders(hReq,
+            L"X-Requested-With: XMLHttpRequest\r\n"
+            L"Referer: https://maps.besselianelements.com/\r\n",
+            (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+    }
+    if (extraHeaders) {
+        WinHttpAddRequestHeaders(hReq, extraHeaders, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+    }
 
     bool ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
@@ -239,7 +250,6 @@ static std::string HttpsGet(const wchar_t* host, const std::string& path) {
         IqpLog(std::format("IQP GET {} -> request failed ({})", path, GetLastError()));
     } else {
         IqpLog(std::format("IQP GET {} -> HTTP {} ({} bytes)", path, httpStatus, body.size()));
-        // Log first 600 chars of response for diagnostics
         if (!body.empty()) {
             std::string snippet = body.substr(0, std::min(body.size(), size_t{600}));
             IqpLog(std::format("IQP body[0:600]: {}", snippet));
@@ -247,6 +257,89 @@ static std::string HttpsGet(const wchar_t* host, const std::string& path) {
     }
 
     return body;
+}
+
+// ─── Dedicated BE REST API ─────────────────────────────────────────────────────
+
+// Parse ISO 8601 UTC string "YYYY-MM-DDTHH:MM:SS[.S*]Z" to UTC ms since epoch.
+// Returns -1 on failure.
+static int64_t ParseIso8601Ms(const std::string& json, const char* key) {
+    std::string s = JsonStr(json, key);
+    if (s.empty()) return -1;
+    int yr = 0, mo = 0, dy = 0, hh = 0, mm = 0;
+    float ss = 0.f;
+    if (sscanf_s(s.c_str(), "%d-%d-%dT%d:%d:%f", &yr, &mo, &dy, &hh, &mm, &ss) < 5) return -1;
+    using namespace std::chrono;
+    auto ymd = year_month_day{ year(yr), month(static_cast<unsigned>(mo)),
+                               day(static_cast<unsigned>(dy)) };
+    int64_t dateMs = duration_cast<milliseconds>(sys_days{ymd}.time_since_epoch()).count();
+    int64_t timeMs = (int64_t(hh) * 3600 + int64_t(mm) * 60) * 1000
+                   + static_cast<int64_t>(ss * 1000.f + 0.5f);
+    return dateMs + timeMs;
+}
+
+static ContactTimes FetchBesselApiTimes(const std::string& eclipseId,
+                                        double lat, double lon, int altM,
+                                        const std::string& apiKey) {
+    assert(!eclipseId.empty());
+    assert(!apiKey.empty());
+    ContactTimes result;
+
+    // Build path — ASCII only, safe narrow→wide in HttpsGet
+    std::string path = std::format(
+        "/v1/eclipse?eclipse={}&latitude={:.6f}&longitude={:.6f}&altitude={}",
+        eclipseId, lat, lon, altM);
+
+    // Build x-api-key header (key is ASCII hex — safe narrow→wide)
+    std::wstring hdr = L"x-api-key: " + std::wstring(apiKey.begin(), apiKey.end()) + L"\r\n";
+
+    IqpLog(std::format("BE-API fetch: {} lat={:.4f} lon={:.4f} alt={}m  key={}",
+                       eclipseId, lat, lon, altM, Truncate(apiKey)));
+
+    static constexpr wchar_t kBeHost[] =
+        L"tryjhlq5f5.execute-api.eu-west-1.amazonaws.com";
+
+    std::string body = HttpsGet(kBeHost, path, hdr.c_str(), false);
+    if (body.empty()) {
+        IqpLog("BE-API: empty response");
+        return result;
+    }
+
+    // Log full body (small JSON, usually < 500 bytes)
+    IqpLog(std::format("BE-API raw: {}", body));
+
+    // Check for API-level error fields
+    std::string errMsg = JsonStr(body, "message");
+    if (errMsg.empty()) errMsg = JsonStr(body, "error");
+    if (!errMsg.empty() && errMsg != "OK") {
+        IqpLog(std::format("BE-API error: \"{}\"", errMsg));
+        return result;
+    }
+
+    // Parse contact times as ISO 8601 UTC strings
+    result.c1Ms  = ParseIso8601Ms(body, "c1");
+    result.c2Ms  = ParseIso8601Ms(body, "c2");
+    result.c3Ms  = ParseIso8601Ms(body, "c3");
+    result.c4Ms  = ParseIso8601Ms(body, "c4");
+    result.maxMs = ParseIso8601Ms(body, "max");
+
+    // Duration and eclipse type (best-effort; field names may vary)
+    result.duration = JsonStr(body, "duration");
+    std::string typeStr = JsonStr(body, "type");
+    if (typeStr.empty()) typeStr = JsonStr(body, "eclipse_type");
+    if (!typeStr.empty()) {
+        // Normalise to uppercase to match existing display code
+        for (char& c : typeStr) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+        result.eclType = typeStr;
+    }
+
+    result.apiOk  = true;
+    result.valid  = result.c1Ms > 0;
+    result.source = ContactSource::BesselApi;
+
+    IqpLog(std::format("BE-API: done — valid={} C1={}ms C2={}ms duration=\"{}\"",
+                       result.valid, result.c1Ms, result.c2Ms, result.duration));
+    return result;
 }
 
 // ─── Key management ───────────────────────────────────────────────────────────
@@ -392,6 +485,16 @@ std::string GetCurrentApiKey() {
     return s_apiKey;
 }
 
+void SetBeApiKey(const std::string& key) {
+    std::lock_guard lk(s_keyMutex);
+    s_beApiKey = key;
+}
+
+std::string GetBeApiKey() {
+    std::lock_guard lk(s_keyMutex);
+    return s_beApiKey;
+}
+
 static std::string BuildPath(const std::string& eclipseId, double lat, double lon) {
     std::string key;
     { std::lock_guard lk(s_keyMutex); key = s_apiKey; }
@@ -401,14 +504,26 @@ static std::string BuildPath(const std::string& eclipseId, double lat, double lo
 }
 
 ContactTimes FetchContactTimes(const std::string& eclipseId,
-                               double lat, double lon,
+                               double lat, double lon, int altM,
                                int year, int month, int day) {
-    assert(!eclipseId.empty());              // caller must supply a valid eclipse ID
+    assert(!eclipseId.empty());
     assert(lat   >= -90.0  && lat  <= 90.0);
     assert(lon   >= -180.0 && lon  <= 180.0);
     assert(year  >= 1900   && year <= 2200);
     assert(month >= 1      && month <= 12);
     assert(day   >= 1      && day  <= 31);
+
+    // Dedicated BE REST API takes priority when key is set
+    {
+        std::string beKey;
+        { std::lock_guard lk(s_keyMutex); beKey = s_beApiKey; }
+        if (!beKey.empty()) {
+            auto ct = FetchBesselApiTimes(eclipseId, lat, lon, altM, beKey);
+            if (ct.apiOk) return ct;
+            IqpLog("BE-API failed — falling back to classic IQP");
+        }
+    }
+
     ContactTimes result;
 
     {
@@ -418,7 +533,8 @@ ContactTimes FetchContactTimes(const std::string& eclipseId,
     }
 
     std::string body = HttpsGet(L"maps.besselianelements.com",
-                                 BuildPath(eclipseId, lat, lon));
+                                 BuildPath(eclipseId, lat, lon),
+                                 nullptr, true);
     if (body.empty()) { IqpLog("IQP: empty response, aborting"); return result; }
 
     auto msg = JsonStr(body, "message");

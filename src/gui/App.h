@@ -86,6 +86,7 @@ private:
     void RenderTimelineBottom();
     void RenderMenuBar();
     void RenderAboutModal();
+    void RenderOptionsWindow();      // floating Options window (API keys, etc.)
     void RenderSequencerButtons();   // TEST RUN / STOP / RUN / STOP RUN in Col1
     void ExportTimelineJson();
 
@@ -96,7 +97,12 @@ private:
     void DeleteSelectedBlock();
     void DuplicateSelectedBlock();
     static void ApplyStyleDark();
-    bool m_showAbout = false;
+    bool m_showAbout    = false;
+    bool m_showOptions  = false;
+
+    // ── BE REST API key (40 hex chars, stored in Config.db, never in source) ────
+    char m_beApiKeyBuf[48] = {};   // InputText buffer; 40 chars + null
+    bool m_beKeyVisible    = false; // toggle password mask
 
     // ── Background status thread ──────────────────────────────────────────────
     void StartStatusThread();
