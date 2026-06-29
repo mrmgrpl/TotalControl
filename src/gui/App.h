@@ -209,7 +209,7 @@ private:
     std::thread        m_suviThread;
     std::atomic<bool>  m_suviFetching{false};
     std::atomic<int64_t> m_suviFetchedAtMs{0};  // set at completion, not start → interval from end of fetch
-    bool               m_suviEnabled     = true;  // show SUVI image (persisted to DB)
+    float              m_suviOpacity     = 1.0f;  // 0–1; < 0.05 = hidden (persisted to DB)
     bool               m_suviJustCleared = false; // set by TriggerSuviFetch, resets s_prevSrvN
 
     // ── JPL Horizons ephemeris ────────────────────────────────────────────────
@@ -346,8 +346,8 @@ private:
     // Frames arrive via named SHM (TotalControl_LV_<ci>), decoded JPEG→RGBA by
     // m_lvThread, uploaded to D3D11 by CreateLvTextures (render thread only),
     // rendered in RenderSolarView as alpha-blended quad matching camera FOV rect.
-    bool   m_lvEnabled[kMaxCamTracks] = {};  // per-camera toggle (persisted to DB)
-    float  m_lvOpacity                = 0.5f; // 0 = model only, 1 = LV only
+    bool   m_lvEnabled[kMaxCamTracks] = {};       // derived: true when m_lvOpacity[ci] >= 0.05
+    float  m_lvOpacity[kMaxCamTracks] = {};       // per-camera opacity 0–1 (persisted to DB)
 
     struct LvFrame { std::vector<uint8_t> rgba; int w = 0, h = 0; };
     LvFrame                         m_lvPending[kMaxCamTracks];

@@ -2477,65 +2477,6 @@ void App::RenderSolarView() {
     dl->AddCircleFilled({cx,cy}, sunR*1.2f, IM_COL32(255,245,210, 36));  // limb, near white
     dl->AddCircleFilled({cx,cy}, sunR*1.06f,IM_COL32(255,255,245, 50));  // immediate limb, pearl
 
-    // ── SUVI Fe171 animation — rotated so solar N aligns with N☉ axis ──────
-    // SUVI FD 1200×1200: solar disc radius ≈ 384 px → half-quad = sunR × m_suviHalfQ.
-    // Alpha = luminance → black space transparent; corona visible over grid/axes.
-    // When disabled or no frames available, a plain amber disc is shown silently.
-    if (m_suviEnabled) {
-        // Advance animation frame (render-thread only, no mutex needed)
-        {
-            m_suviAnimTimer += ImGui::GetIO().DeltaTime;
-            float frameSec = 1.0f / m_suviAnimFps;
-            if (m_suviAnimTimer >= frameSec) {
-                m_suviAnimTimer -= frameSec;
-                int n = (int)m_suviSrvs.size();
-                if (n > 0) m_suviCurFrame = (m_suviCurFrame + 1) % n;
-            }
-        }
-        int n = (int)m_suviSrvs.size();
-        if (n > 0 && m_suviCurFrame < n && m_suviSrvs[m_suviCurFrame]) {
-            // Log once on 0→N transition (frames arrive in batches so n==1 is rarely true).
-            static int s_prevSrvN = 0;
-            if (m_suviJustCleared) { s_prevSrvN = 0; m_suviJustCleared = false; }
-            if (s_prevSrvN == 0 && n > 0) {
-                LogLine(std::format(
-                    "SUVI: first frame visible  halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f} rot={:.2f}deg",
-                    m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx, m_solarP - m_solarQ));
-            }
-            s_prevSrvN = n;
-            float halfQ = sunR * m_suviHalfQ;
-            float sc    = sunR / 384.f;   // image-px → screen-px scale
-            float cosP  = cosf(P_rad), sinP = sinf(P_rad);
-            // image axes on screen: right=(cosP,sinP), down=(-sinP,cosP)
-            float adjCx = cx
-                + m_suviFooterPx    * sc * (-sinP)
-                + m_suviCorrRightPx * sc * ( cosP)
-                + m_suviCorrUpPx    * sc * ( sinP);
-            float adjCy = cy
-                + m_suviFooterPx    * sc * ( cosP)
-                + m_suviCorrRightPx * sc * ( sinP)
-                - m_suviCorrUpPx    * sc * ( cosP);
-            float rx = halfQ * cosP,  ry = halfQ * sinP;
-            float dxx = -halfQ * sinP, dyy = halfQ * cosP;
-            ImVec2 tl{ adjCx - rx - dxx, adjCy - ry - dyy };
-            ImVec2 tr{ adjCx + rx - dxx, adjCy + ry - dyy };
-            ImVec2 br{ adjCx + rx + dxx, adjCy + ry + dyy };
-            ImVec2 bl{ adjCx - rx + dxx, adjCy - ry + dyy };
-            dl->AddImageQuad(
-                static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_suviSrvs[m_suviCurFrame])),
-                tl, tr, br, bl);
-            dl->AddCircle({cx, cy}, sunR, IM_COL32(255, 0, 0, 200), 128, 2.f);
-        } else {
-            // No frames yet (loading or offline) — silent amber disc placeholder
-            dl->AddCircleFilled({cx, cy}, sunR, IM_COL32(250, 199, 117, 255));
-            dl->AddCircle      ({cx, cy}, sunR, IM_COL32(186, 117,  23, 255), 0, 1.f);
-        }
-    } else {
-        // SUVI disabled by user — plain amber disc, no animation
-        dl->AddCircleFilled({cx, cy}, sunR, IM_COL32(250, 199, 117, 255));
-        dl->AddCircle      ({cx, cy}, sunR, IM_COL32(186, 117,  23, 255), 0, 1.f);
-    }
-
     // ── Moon disc — totality: fully black when Moon covers Sun ───────────────
     {
         float dxM = moonX - cx, dyM = moonY - cy;
@@ -2547,21 +2488,34 @@ void App::RenderSolarView() {
         dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
     }
 
-    // ── Live View overlay (alpha-blended camera image over simulator) ────────────
+    // ── Live View overlays (shortest focal = bottom, longest = top) ──────────────
     // Upload any newly decoded LV frames to D3D11 (render-thread only).
-    // Rendered as rotated quad matching the camera's FOV rectangle in the simulator.
-    // Frame outlines redrawn on top of LV so borders stay visible at any opacity.
     if (m_lvNewFrames.load()) CreateLvTextures();
     {
         static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
-        const ImU32 lvAlpha = static_cast<ImU32>(m_lvOpacity * 255.f + 0.5f);
-        const ImU32 lvCol   = IM_COL32(255, 255, 255, lvAlpha);
-
+        // Build render list sorted by focal length ascending (short = first = bottom)
+        struct LvRenderEntry { int focalMm; int ci; };
+        LvRenderEntry lvOrder[kMaxCamTracks];
+        int lvCount = 0;
         for (int ci = 0; ci < kMaxCamTracks && ci < (int)m_camConfigs.size(); ++ci) {
             if (!m_lvEnabled[ci] || !m_lvSrv[ci]) continue;
+            if (m_camConfigs[ci].focalMm <= 0) continue;
+            lvOrder[lvCount++] = { m_camConfigs[ci].focalMm, ci };
+        }
+        // insertion sort (kMaxCamTracks ≤ 4, trivial)
+        for (int i = 1; i < lvCount; ++i) {
+            LvRenderEntry key = lvOrder[i];
+            int j = i - 1;
+            while (j >= 0 && lvOrder[j].focalMm > key.focalMm) {
+                lvOrder[j + 1] = lvOrder[j]; --j;
+            }
+            lvOrder[j + 1] = key;
+        }
+        for (int li = 0; li < lvCount; ++li) {
+            int ci = lvOrder[li].ci;
             const CamConfig& cc = m_camConfigs[ci];
-            if (cc.focalMm <= 0) continue;
-
+            const ImU32 lvCol = IM_COL32(255, 255, 255,
+                static_cast<ImU32>(m_lvOpacity[ci] * 255.f + 0.5f));
             float  f    = static_cast<float>(cc.focalMm);
             float  fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
             float  fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
@@ -2570,20 +2524,68 @@ void App::RenderSolarView() {
             float  hh   = fovH * scale * 0.5f;
             float  cr   = cosf(rot), sr = sinf(rot);
             ImVec2 fc   = FrameCenter(cc);
-
-            // Rotated corners around fc (same transform as DrawFrame lambda)
             ImVec2 tl{ fc.x + (-hw)*cr - (-hh)*sr, fc.y + (-hw)*sr + (-hh)*cr };
             ImVec2 tr{ fc.x + ( hw)*cr - (-hh)*sr, fc.y + ( hw)*sr + (-hh)*cr };
             ImVec2 br{ fc.x + ( hw)*cr - ( hh)*sr, fc.y + ( hw)*sr + ( hh)*cr };
             ImVec2 bl{ fc.x + (-hw)*cr - ( hh)*sr, fc.y + (-hw)*sr + ( hh)*cr };
-
             dl->AddImageQuad(
                 static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_lvSrv[ci])),
                 tl, tr, br, bl,
                 {0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}, lvCol);
-
-            // Redraw frame outline on top of LV image (white, semi-transparent)
             DrawFrame(fc.x, fc.y, fovW, fovH, rot, IM_COL32(255, 255, 255, 180), false);
+        }
+    }
+
+    // ── SUVI Fe171 animation — always on top of LV overlays ───────────────────
+    // SUVI FD 1200×1200: solar disc radius ≈ 384 px → half-quad = sunR × m_suviHalfQ.
+    // Amber disc shown when opacity < 5% or no frames available.
+    {
+        bool suviVisible = m_suviOpacity >= 0.05f;
+        // Advance animation frame (render-thread only, no mutex needed)
+        if (suviVisible) {
+            m_suviAnimTimer += ImGui::GetIO().DeltaTime;
+            float frameSec = 1.0f / m_suviAnimFps;
+            if (m_suviAnimTimer >= frameSec) {
+                m_suviAnimTimer -= frameSec;
+                int n = (int)m_suviSrvs.size();
+                if (n > 0) m_suviCurFrame = (m_suviCurFrame + 1) % n;
+            }
+        }
+        int n = (int)m_suviSrvs.size();
+        if (suviVisible && n > 0 && m_suviCurFrame < n && m_suviSrvs[m_suviCurFrame]) {
+            static int s_prevSrvN = 0;
+            if (m_suviJustCleared) { s_prevSrvN = 0; m_suviJustCleared = false; }
+            if (s_prevSrvN == 0 && n > 0)
+                LogLine(std::format(
+                    "SUVI: first frame visible  halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f} rot={:.2f}deg",
+                    m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx, m_solarP - m_solarQ));
+            s_prevSrvN = n;
+            float halfQ = sunR * m_suviHalfQ;
+            float sc    = sunR / 384.f;
+            float cosP  = cosf(P_rad), sinP = sinf(P_rad);
+            float adjCx = cx + m_suviFooterPx * sc * (-sinP)
+                             + m_suviCorrRightPx * sc * ( cosP)
+                             + m_suviCorrUpPx    * sc * ( sinP);
+            float adjCy = cy + m_suviFooterPx * sc * ( cosP)
+                             + m_suviCorrRightPx * sc * ( sinP)
+                             - m_suviCorrUpPx    * sc * ( cosP);
+            float rx = halfQ * cosP,  ry = halfQ * sinP;
+            float dxx = -halfQ * sinP, dyy = halfQ * cosP;
+            ImVec2 tl{ adjCx - rx - dxx, adjCy - ry - dyy };
+            ImVec2 tr{ adjCx + rx - dxx, adjCy + ry - dyy };
+            ImVec2 br{ adjCx + rx + dxx, adjCy + ry + dyy };
+            ImVec2 bl{ adjCx - rx + dxx, adjCy - ry + dyy };
+            ImU32 suviCol = IM_COL32(255, 255, 255,
+                static_cast<ImU32>(m_suviOpacity * 255.f + 0.5f));
+            dl->AddImageQuad(
+                static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_suviSrvs[m_suviCurFrame])),
+                tl, tr, br, bl,
+                {0.f,0.f},{1.f,0.f},{1.f,1.f},{0.f,1.f}, suviCol);
+            dl->AddCircle({cx, cy}, sunR, IM_COL32(255, 0, 0, 200), 128, 2.f);
+        } else {
+            // Amber disc when SUVI off or loading
+            dl->AddCircleFilled({cx, cy}, sunR, IM_COL32(250, 199, 117, 255));
+            dl->AddCircle      ({cx, cy}, sunR, IM_COL32(186, 117,  23, 255), 0, 1.f);
         }
     }
 
@@ -2734,86 +2736,87 @@ void App::RenderInspectorColumn() {
     ImGui::SeparatorText("ECLIPSE SIMULATOR CONFIG");
     ImGui::Spacing();
 
-    // ── Live View toggle (for currently selected camera track) ─────────────
-    {
-        // Find lvCi from selected timeline camera track
-        int lvCi = -1;
-        if (m_selTrack >= 0 && m_selTrack < (int)m_tracks.size()
-            && m_tracks[m_selTrack].IsCamera())
-        {
-            const std::string& camId = m_tracks[m_selTrack].cameraId;
-            for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci)
-                if (m_camConfigs[ci].model == camId) { lvCi = ci; break; }
-        }
-
-        ImGui::PushFont(m_fontMono);
-        if (lvCi >= 0) {
-            bool lvOn = m_lvEnabled[lvCi];
-            if (lvOn) {
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.10f,.30f,.10f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.15f,.42f,.15f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.08f,.22f,.08f,1.f));
-                if (ImGui::Button("LV: ON ##lvtog", ImVec2(-1, 0))) {
-                    m_lvEnabled[lvCi] = false;
-                    auto res = m_pipe.SendRequest(
-                        std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", lvCi));
-                    (void)res;
-                    if (m_lvSrv[lvCi]) { m_lvSrv[lvCi]->Release(); m_lvSrv[lvCi] = nullptr; }
-                    m_configDb.SetSettingInt(
-                        std::format("lv_enabled_{}", lvCi).c_str(), 0);
-                }
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.22f,.16f,.16f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.32f,.22f,.22f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.16f,.12f,.12f,1.f));
-                if (ImGui::Button("LV: OFF##lvtog", ImVec2(-1, 0))) {
-                    m_lvEnabled[lvCi] = true;
-                    auto res = m_pipe.SendRequest(
-                        std::format(R"({{"cmd":"lv_start","cam":"{}"}})", lvCi));
-                    (void)res;
-                    if (!m_lvThread.joinable()) StartLvThread();
-                    m_configDb.SetSettingInt(
-                        std::format("lv_enabled_{}", lvCi).c_str(), 1);
-                }
-            }
-            ImGui::PopStyleColor(3);
-            ImGui::Spacing();
-            int opPct = static_cast<int>(m_lvOpacity * 100.f + 0.5f);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderInt("##lvop_esc", &opPct, 0, 100, "Opacity %d%%")) {
-                m_lvOpacity = static_cast<float>(opPct) / 100.f;
-                m_configDb.SetSettingInt("lv_opacity_pct", opPct);
-            }
+    // ── Opacity sliders: SUVI + per-camera LV ─────────────────────────────
+    // Helper: push 4 style colors (FrameBg, FrameBgHovered, SliderGrab, SliderGrabActive)
+    // Green = on (opacity >= 5%), Red = off (opacity < 5%).
+    auto PushSliderColor = [](bool on) {
+        if (on) {
+            ImGui::PushStyleColor(ImGuiCol_FrameBg,          ImVec4(.08f,.24f,.08f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,   ImVec4(.12f,.34f,.12f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab,       ImVec4(.20f,.60f,.20f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(.28f,.78f,.28f,1.f));
         } else {
-            ImGui::TextColored(kDim, "LV: select camera track");
+            ImGui::PushStyleColor(ImGuiCol_FrameBg,          ImVec4(.20f,.08f,.08f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,   ImVec4(.30f,.12f,.12f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab,       ImVec4(.65f,.18f,.18f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(.80f,.22f,.22f,1.f));
         }
-        ImGui::PopFont();
+    };
+
+    // SUVI opacity slider
+    ImGui::PushFont(m_fontMono);
+    {
+        int suviPct = static_cast<int>(m_suviOpacity * 100.f + 0.5f);
+        PushSliderColor(suviPct >= 5);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderInt("##suvi_op", &suviPct, 0, 100, "SUVI  %d%%")) {
+            m_suviOpacity = suviPct / 100.f;
+            m_configDb.SetSettingInt("suvi_opacity_pct", suviPct);
+        }
+        ImGui::PopStyleColor(4);
     }
     ImGui::Spacing();
 
-    // ── SUVI toggle ────────────────────────────────────────────────────────
+    // Per-camera LV opacity sliders — sorted by focal length ascending
     {
-        ImGui::PushFont(m_fontMono);
-        if (m_suviEnabled) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.10f,.30f,.10f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.15f,.42f,.15f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.08f,.22f,.08f,1.f));
-            if (ImGui::Button("SUVI: ON ##stog", ImVec2(-1, 0))) {
-                m_suviEnabled = false;
-                m_configDb.SetSettingInt("suvi_enabled", 0);
-            }
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.22f,.16f,.16f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.32f,.22f,.22f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.16f,.12f,.12f,1.f));
-            if (ImGui::Button("SUVI: OFF##stog", ImVec2(-1, 0))) {
-                m_suviEnabled = true;
-                m_configDb.SetSettingInt("suvi_enabled", 1);
-            }
+        struct LvSlEnt { int focalMm; int ci; };
+        LvSlEnt ents[kMaxCamTracks]; int nEnts = 0;
+        for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci)
+            ents[nEnts++] = { m_camConfigs[ci].focalMm, ci };
+        for (int i = 1; i < nEnts; ++i) {
+            LvSlEnt key = ents[i]; int j = i - 1;
+            while (j >= 0 && ents[j].focalMm > key.focalMm) { ents[j+1] = ents[j]; --j; }
+            ents[j+1] = key;
         }
-        ImGui::PopStyleColor(3);
-        ImGui::PopFont();
+        for (int ei = 0; ei < nEnts; ++ei) {
+            int ci = ents[ei].ci;
+            const CamConfig& cc = m_camConfigs[ci];
+            std::string guid4 = cc.guid.size() >= 4
+                ? cc.guid.substr(cc.guid.size() - 4) : cc.guid;
+            // Format string shown inside slider bar: "model  #guid4  XX%"
+            std::string fmt = cc.model + "  #" + guid4 + "  %d%%";
+            int opPct = static_cast<int>(m_lvOpacity[ci] * 100.f + 0.5f);
+            bool nowOn = opPct >= 5;
+            PushSliderColor(nowOn);
+            ImGui::SetNextItemWidth(-1);
+            std::string slId = std::format("##lvop_{}", ci);
+            if (ImGui::SliderInt(slId.c_str(), &opPct, 0, 100, fmt.c_str())) {
+                m_lvOpacity[ci] = opPct / 100.f;
+                m_configDb.SetSettingInt(
+                    std::format("lv_opacity_pct_{}", ci).c_str(), opPct);
+                bool wantOn = opPct >= 5;
+                if (wantOn != m_lvEnabled[ci]) {
+                    m_lvEnabled[ci] = wantOn;
+                    if (wantOn) {
+                        auto res = m_pipe.SendRequest(
+                            std::format(R"({{"cmd":"lv_start","cam":"{}"}})", ci));
+                        (void)res;
+                        if (!m_lvThread.joinable()) StartLvThread();
+                    } else {
+                        auto res = m_pipe.SendRequest(
+                            std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", ci));
+                        (void)res;
+                        if (m_lvSrv[ci]) { m_lvSrv[ci]->Release(); m_lvSrv[ci] = nullptr; }
+                    }
+                }
+            }
+            ImGui::PopStyleColor(4);
+            ImGui::Spacing();
+        }
+        if (nEnts == 0)
+            ImGui::TextColored(kDim, "(no cameras in Camera Config)");
     }
+    ImGui::PopFont();
     ImGui::Spacing();
     ImGui::SetNextItemWidth(-1);
     bool suviChanged = false;
@@ -3943,7 +3946,7 @@ App::App() {
             try { m_suviCorrRightPx = std::stof(m_configDb.GetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str())); } catch (...) {}
             try { m_suviCorrUpPx    = std::stof(m_configDb.GetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str())); }    catch (...) {}
         }
-        m_suviEnabled = m_configDb.GetSettingInt("suvi_enabled", 1) != 0;
+        m_suviOpacity = m_configDb.GetSettingInt("suvi_opacity_pct", 100) / 100.f;
 
         LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",
                             m_homeTzIana, m_eclTzIana, m_obsLat, m_obsLon, m_obsAltM));
@@ -3998,12 +4001,12 @@ App::App() {
         m_camConfigs = m_configDb.LoadCamConfigs();
         m_showCamCfgWnd.assign(m_camConfigs.size(), false);
 
-        // Live view overlay settings
-        m_lvOpacity = static_cast<float>(
-            m_configDb.GetSettingInt("lv_opacity_pct", 50)) / 100.f;
-        for (int ci = 0; ci < kMaxCamTracks; ++ci)
-            m_lvEnabled[ci] = m_configDb.GetSettingInt(
-                std::format("lv_enabled_{}", ci).c_str(), 0) != 0;
+        // Live view overlay — per-camera opacity; enabled when >= 5%
+        for (int ci = 0; ci < kMaxCamTracks; ++ci) {
+            m_lvOpacity[ci] = m_configDb.GetSettingInt(
+                std::format("lv_opacity_pct_{}", ci).c_str(), 0) / 100.f;
+            m_lvEnabled[ci] = m_lvOpacity[ci] >= 0.05f;
+        }
         // Thread started lazily when user enables first camera in Inspector
 
         // Load saved timeline (overrides InitTracks defaults when data exists)
