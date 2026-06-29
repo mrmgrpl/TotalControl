@@ -2730,9 +2730,68 @@ void App::RenderInspectorColumn() {
     static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
     static const ImVec4 kDim  {0.28f, 0.28f, 0.32f, 1.0f};
 
-    // ── SUVI ALIGNMENT ────────────────────────────────────────────────────
-    ImGui::SeparatorText("SUVI ALIGNMENT");
+    // ── ECLIPSE SIMULATOR CONFIG ──────────────────────────────────────────
+    ImGui::SeparatorText("ECLIPSE SIMULATOR CONFIG");
     ImGui::Spacing();
+
+    // ── Live View toggle (for currently selected camera track) ─────────────
+    {
+        // Find lvCi from selected timeline camera track
+        int lvCi = -1;
+        if (m_selTrack >= 0 && m_selTrack < (int)m_tracks.size()
+            && m_tracks[m_selTrack].IsCamera())
+        {
+            const std::string& camId = m_tracks[m_selTrack].cameraId;
+            for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci)
+                if (m_camConfigs[ci].model == camId) { lvCi = ci; break; }
+        }
+
+        ImGui::PushFont(m_fontMono);
+        if (lvCi >= 0) {
+            bool lvOn = m_lvEnabled[lvCi];
+            if (lvOn) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.10f,.30f,.10f,1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.15f,.42f,.15f,1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.08f,.22f,.08f,1.f));
+                if (ImGui::Button("LV: ON ##lvtog", ImVec2(-1, 0))) {
+                    m_lvEnabled[lvCi] = false;
+                    auto res = m_pipe.SendRequest(
+                        std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", lvCi));
+                    (void)res;
+                    if (m_lvSrv[lvCi]) { m_lvSrv[lvCi]->Release(); m_lvSrv[lvCi] = nullptr; }
+                    m_configDb.SetSettingInt(
+                        std::format("lv_enabled_{}", lvCi).c_str(), 0);
+                }
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.22f,.16f,.16f,1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.32f,.22f,.22f,1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.16f,.12f,.12f,1.f));
+                if (ImGui::Button("LV: OFF##lvtog", ImVec2(-1, 0))) {
+                    m_lvEnabled[lvCi] = true;
+                    auto res = m_pipe.SendRequest(
+                        std::format(R"({{"cmd":"lv_start","cam":"{}"}})", lvCi));
+                    (void)res;
+                    if (!m_lvThread.joinable()) StartLvThread();
+                    m_configDb.SetSettingInt(
+                        std::format("lv_enabled_{}", lvCi).c_str(), 1);
+                }
+            }
+            ImGui::PopStyleColor(3);
+            ImGui::Spacing();
+            int opPct = static_cast<int>(m_lvOpacity * 100.f + 0.5f);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::SliderInt("##lvop_esc", &opPct, 0, 100, "Opacity %d%%")) {
+                m_lvOpacity = static_cast<float>(opPct) / 100.f;
+                m_configDb.SetSettingInt("lv_opacity_pct", opPct);
+            }
+        } else {
+            ImGui::TextColored(kDim, "LV: select camera track");
+        }
+        ImGui::PopFont();
+    }
+    ImGui::Spacing();
+
+    // ── SUVI toggle ────────────────────────────────────────────────────────
     {
         ImGui::PushFont(m_fontMono);
         if (m_suviEnabled) {
