@@ -5323,11 +5323,11 @@ void App::RenderOptionsWindow() {
 
     // ── IQP API Key ────────────────────────────────────────────────────────────
     ImGui::TextColored(kGold, "IQP API Key  (besselianelements.com)");
-    ImGui::TextColored(kGray, "Klucz (40 znakow hex) uzyskasz kontaktujac sie z zespolem:");
+    ImGui::TextColored(kGray, "40-char hex key -- contact the besselianelements.com team to obtain one:");
     ImGui::TextColored(kLink, "  https://www.besselianelements.com/");
-    ImGui::TextColored(kGray, "Bez klucza: czasy C1-C4 z lokalnego modelu Bessela (zielona kolumna).");
-    ImGui::TextColored(kGray, "Z kluczem:  czasy C1-C4 z IQP API automatycznie (niebieska kolumna).");
-    ImGui::TextColored(kGray, "Mozna tez wejsc na strone i recznie przepisac czasy do aplikacji.");
+    ImGui::TextColored(kGray, "No key:   C1-C4 times from local Besselian model (green column).");
+    ImGui::TextColored(kGray, "With key: C1-C4 times from IQP API automatically (blue column).");
+    ImGui::TextColored(kGray, "You can also visit the site and enter the times manually.");
     ImGui::Spacing();
 
     ImGuiInputTextFlags keyFlags = m_beKeyVisible
