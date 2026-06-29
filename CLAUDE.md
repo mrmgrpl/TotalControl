@@ -50,7 +50,7 @@ src/
     App.h / App.cpp          # all GUI logic: columns, timeline, camera polling, eclipse calc
     PipeClient.h/.cpp        # synchronous JSON-Lines pipe client (thread-safe)
     Database.h/.cpp          # SQLite3 wrapper (Open/Exec/GetSetting/SetSetting)
-    IqpClient.h/.cpp         # WinHTTP GET to maps.besselianelements.com + key-refresh
+    IqpClient.h/.cpp         # WinHTTP GET to dedicated BE REST API (x-api-key); fallback → local BesselCalc
     BesselCalc.h/.cpp        # C1/C2/Max/C3/C4 from NASA Besselian elements
     TzEntry.h / EclipseEntry.h   # data structs for DB rows
   visualization/             # stubs: Renderer3D, Overlay2D, CameraPreview
@@ -281,6 +281,10 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **TotalControlGUI TLTrack focalMm** | **DONE 2026-06-28** |
 | **TotalControlGUI Camera Config menu** | **DONE 2026-06-28** |
 | **TotalControlGUI Live View overlay** | **DONE 2026-06-29** |
+| **TotalControlGUI Corona gradient** | **DONE 2026-06-29** |
+| **TotalControlGUI About modal (sources)** | **DONE 2026-06-29** |
+| **TotalControlGUI Options menu + IQP API key** | **DONE 2026-06-29** |
+| **IqpClient — stary scraping usunięty** | **DONE 2026-06-29** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -527,14 +531,78 @@ Use local `bool wndOpen = m_showCamCfgWnd[ci]; ImGui::Begin(..., &wndOpen); m_sh
 - LV aspect ratio when camera uses focus magnifier differs from sensor (camera crops) — `AddImageQuad` stretches to frame rect; operator sees zoomed view stretched to full frame (acceptable for focus check)
 - CommandHandler: `lv_start`/`lv_stop` use the outer-scope `cam` pointer (already routed at line 592) — do NOT redeclare `cam` inside these branches (C4456 shadow warning)
 
-## Known pitfalls in IqpClient (maps.besselianelements.com API)
+### TotalControlGUI — Corona gradient (complete 2026-06-29)
 
-- API returns pretty-printed JSON with spaces after colons: `"message1": "..."` — `JsonStr` must skip whitespace before the opening `"`
-- Success response has **no** `"message"` field (empty from JsonStr) **or** `"message":"OK"` at the end — treat both as success
-- `"message":"Limit Error"` = rate-limit (too many requests) — do NOT retry or refresh key
-- `"message":"Wrong Key"` (contains "Key"/"key") = expired key — refresh from map page JS + retry once
-- Key auto-refresh: fetch `/map/<eclipseId>/`, search inline scripts then JS files for standalone 128-hex string; fall back to `/map/TSE20260812/`
+8 `AddCircleFilled` circles, all rendered BEFORE SUVI layer in `RenderSolarView()`:
+```cpp
+dl->AddCircleFilled({cx,cy}, sunR*9.0f,  IM_COL32(220,140, 50,  2));
+dl->AddCircleFilled({cx,cy}, sunR*6.5f,  IM_COL32(235,160, 60,  3));
+dl->AddCircleFilled({cx,cy}, sunR*4.5f,  IM_COL32(245,175, 75,  6));
+dl->AddCircleFilled({cx,cy}, sunR*3.0f,  IM_COL32(250,190, 90, 11));
+dl->AddCircleFilled({cx,cy}, sunR*2.1f,  IM_COL32(252,208,115, 18));
+dl->AddCircleFilled({cx,cy}, sunR*1.5f,  IM_COL32(254,225,155, 26));
+dl->AddCircleFilled({cx,cy}, sunR*1.2f,  IM_COL32(255,245,210, 36));
+dl->AddCircleFilled({cx,cy}, sunR*1.06f, IM_COL32(255,255,245, 50));
+```
+Pearl-white at limb (`sunR*1.06`) → deep amber outer corona (`sunR*9`). Replaces old 3-circle flat amber.
+
+### TotalControlGUI — About modal (complete 2026-06-29)
+
+`RenderAboutModal()` — `BeginChild` scroll area 580×480px, 4 sections:
+- **Application** — name, version, author, goal
+- **Libraries & SDKs** — ImGui, CrSDK, SQLite, WinHTTP, Direct3D 11, WIC
+- **Eclipse & Solar Data** — NASA JPL Horizons, NASA SDO, NOAA GOES-19 SUVI, besselianelements.com IQP, NASA Espenak
+- **Acknowledgements** — individual library/data authors
+
+`S::Link` local struct renders blue `TextColored` with URL in gray beneath. Non-clickable (ImGui limitation), user copies manually.
+
+### TotalControlGUI — Options menu + IQP API key (complete 2026-06-29)
+
+`RenderOptionsWindow()` — floating window, opened via **Menu bar → Options**:
+- Password-masked `InputText` for IQP API key (40-char hex)
+- Show/Hide toggle button
+- Apply button: `SetBeApiKey(newKey)` + `m_configDb.SetSetting("be_api_key", newKey.c_str())`
+- Instructions: contact besselianelements.com for key; without key → local BE model; with key → IQP API
+- `m_showOptions` flag, `m_beApiKeyBuf[48]`, `m_beKeyVisible` in `App.h`
+
+## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
+
+IqpClient previously scraped `maps.besselianelements.com`. This has been REPLACED by a dedicated
+REST API endpoint provided by the besselianelements.com team (2026-06-29).
+
+### Dedicated REST API (current)
+
+- **Endpoint**: `https://tryjhlq5f5.execute-api.eu-west-1.amazonaws.com/v1/eclipse`
+- **Auth**: `x-api-key: <40-char-hex>` header — key stored ONLY in `TotalControlConfig.db` key `be_api_key`; NEVER in source code
+- **No key** → `FetchContactTimes` returns `{}` immediately; App uses local `CalcBesselian` model
+- **Response format** (confirmed from log 2026-06-29):
+  ```json
+  {
+    "eclipse_type": "TOTAL ECLIPSE",
+    "duration": "1m 44.2s",
+    "eclipse_events": [
+      {"event_type":"c1",  "utc_date":"2026-08-12", "utc_time":"17:33:54"},
+      {"event_type":"c2",  "utc_date":"2026-08-12", "utc_time":"18:28:53.700000"},
+      {"event_type":"max", "utc_date":"2026-08-12", "utc_time":"18:29:46"},
+      {"event_type":"c3",  "utc_date":"2026-08-12", "utc_time":"18:30:37.900000"},
+      {"event_type":"c4",  "utc_date":"2026-08-12", "utc_time":"19:22:12"}
+    ]
+  }
+  ```
+  **PITFALL**: Format is NOT flat `"c1":"ISO8601"` — times are in nested `eclipse_events` array,
+  `utc_date` and `utc_time` are SEPARATE fields (not ISO 8601 combined). Seconds have decimal.
+- `JsonStr` requires `"key":` (no space before colon) — API response has `: ` after colon which is
+  handled because `JsonStr` skips whitespace AFTER the colon
+- Error response: `{"message": "Wrong Key"}` or `{"message": "Limit Error"}`
 - `SetIqpLogger(fn)` — set once in App ctor; logs to TotalControlGUI.log from background thread
+- Log lines: `IQP-API fetch:`, `HTTP GET /v1/eclipse... -> 200 (N bytes)`, `body[0:600]:`, `IQP-API raw:`, `IQP-API: done — valid=...`
+
+### Options window (App)
+
+- **Menu bar → Options** → floating window with IQP API key field
+- `m_beApiKeyBuf[48]` — InputText password-masked + Show/Hide toggle + Apply button
+- Apply: `SetBeApiKey(newKey)` + `m_configDb.SetSetting("be_api_key", newKey.c_str())`
+- OnInit: loads `be_api_key` from DB and calls `SetBeApiKey()` + copies to `m_beApiKeyBuf`
 
 ## Known pitfalls in the sequence JSON parser (SequencerEngine.cpp)
 
