@@ -3194,14 +3194,17 @@ void App::RenderTimelineBottom() {
     ImVec2 winPos  = ImGui::GetWindowPos();
     float  winW    = ImGui::GetWindowWidth();
     float  cntW    = winW - kLabelW;   // content width (right of labels)
-    m_tlScreenTopY = winPos.y;         // remember for drag-out-to-delete
+    m_tlScreenTopY = winPos.y;         // drag-above-here = delete; covers separator row
+
+    ImGui::SeparatorText("TIMELINE");
+    float y = ImGui::GetCursorScreenPos().y;   // baseline BELOW the separator
 
     ContactTimes ct;
     { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
     if (!ct.valid) ct = m_beResult;
 
     if (!ct.valid) {
-        ImGui::SetCursorPos({kLabelW + 8.f, 8.f});
+        ImGui::SetCursorScreenPos({winPos.x + kLabelW + 8.f, y + 8.f});
         ImGui::PushFont(m_fontMono);
         ImGui::TextColored({0.28f,0.28f,0.32f,1.f}, "Calculate contacts to show timeline");
         ImGui::PopFont();
@@ -3217,7 +3220,7 @@ void App::RenderTimelineBottom() {
     if (vDur <= 0) return;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    float y = winPos.y;
+    // y already set above (cursor pos after SeparatorText "TIMELINE")
 
     auto toPx = [&](int64_t ms) -> float {
         return winPos.x + kLabelW + float(ms - m_tlViewStart) / float(vDur) * cntW;
@@ -5661,13 +5664,21 @@ void App::OnFrame() {
     RenderOptionsWindow();
     if (m_configDb.IsOpen()) RenderSnapshotModal();
 
-    const float colW      = 200.0f;   // Col1: Hardware
-    const float colW2     = 400.0f;   // Col2: Eclipse
-    const float kInspW    = 200.0f;   // Inspector + Palette
-    const float kTimelineH = 380.0f;  // Bottom timeline height
-    const float totalH    = io.DisplaySize.y - menuH;
-    const float totalW    = io.DisplaySize.x;
-    const float topH      = totalH - kTimelineH;
+    const float colW   = 200.0f;   // Col1: Hardware
+    const float colW2  = 400.0f;   // Col2: Eclipse
+    const float kInspW = 200.0f;   // Inspector + Palette
+    const float totalH = io.DisplaySize.y - menuH;
+    const float totalW = io.DisplaySize.x;
+
+    // Timeline height: separator header + ruler + clamp(tracks, 1, 4) rows + padding
+    static constexpr float kTlHdrH   = 26.f;
+    static constexpr float kTlRulerH = 85.f;
+    static constexpr float kTlTrackH = 28.f;
+    static constexpr float kTlPadH   = 10.f;
+    int   nTl        = std::clamp((int)m_tracks.size(), 1, 4);
+    float kTimelineH = kTlHdrH + kTlRulerH + float(nTl) * kTlTrackH + kTlPadH;
+
+    const float topH = totalH - kTimelineH;
     const float statusW   = totalW - colW - colW2 - kInspW;
 
     bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
