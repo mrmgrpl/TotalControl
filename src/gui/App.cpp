@@ -2774,6 +2774,45 @@ void App::RenderInspectorColumn() {
     }
     ImGui::Spacing();
 
+    // ── Action block palette ───────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("ACTION LIBRARY");
+    ImGui::Spacing();
+
+    struct PE { BlockType type; const char* name; ImU32 col; };
+    PE pal[] = {
+        {BlockType::Single,  "Single",  IM_COL32( 40,160, 70,255)},
+        {BlockType::Burst,   "Burst",   IM_COL32( 50,120,200,255)},
+        {BlockType::Bracket, "Bracket", IM_COL32(200,130, 30,255)},
+        {BlockType::Audio,   "Audio",   IM_COL32(140, 80,200,255)},
+    };
+
+    for (auto& pe : pal) {
+        ImGui::PushID((int)pe.type);
+        float    pw  = ImGui::GetContentRegionAvail().x;
+        ImVec2   pos = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##pb", {pw, 34.0f});
+        bool     hov = ImGui::IsItemHovered();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(pos, {pos.x+pw, pos.y+34.f},
+                          hov ? IM_COL32(45,45,58,255) : IM_COL32(20,20,28,255), 4.f);
+        dl->AddRectFilled({pos.x+5, pos.y+8}, {pos.x+17, pos.y+26}, pe.col, 2.f);
+        dl->AddText({pos.x+22, pos.y+9}, IM_COL32(200,200,215,255), pe.name);
+        if (hov) dl->AddRect(pos, {pos.x+pw, pos.y+34.f}, pe.col, 4.f, 0, 1.f);
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            const char* pid = (pe.type == BlockType::Audio) ? "TL_AUD_BLOCK" : "TL_CAM_BLOCK";
+            ImGui::SetDragDropPayload(pid, &pe.type, sizeof(BlockType));
+            ImGui::PushFont(m_fontMono);
+            ImVec4 cv{float(pe.col&0xff)/255.f, float((pe.col>>8)&0xff)/255.f,
+                      float((pe.col>>16)&0xff)/255.f, 1.f};
+            ImGui::TextColored(cv, "%s", pe.name);
+            ImGui::PopFont();
+            ImGui::EndDragDropSource();
+        }
+        ImGui::Spacing();
+        ImGui::PopID();
+    }
+
     // ── BLOCK INSPECTOR ────────────────────────────────────────────────────
     ImGui::SeparatorText("BLOCK INSPECTOR");
 
@@ -3062,45 +3101,6 @@ void App::RenderInspectorColumn() {
 
         ImGui::PopStyleVar();
         ImGui::PopFont();
-    }
-
-    // ── Action block palette ───────────────────────────────────────────────
-    ImGui::Spacing();
-    ImGui::SeparatorText("ACTION LIBRARY");
-    ImGui::Spacing();
-
-    struct PE { BlockType type; const char* name; ImU32 col; };
-    PE pal[] = {
-        {BlockType::Single,  "Single",  IM_COL32( 40,160, 70,255)},
-        {BlockType::Burst,   "Burst",   IM_COL32( 50,120,200,255)},
-        {BlockType::Bracket, "Bracket", IM_COL32(200,130, 30,255)},
-        {BlockType::Audio,   "Audio",   IM_COL32(140, 80,200,255)},
-    };
-
-    for (auto& pe : pal) {
-        ImGui::PushID((int)pe.type);
-        float    pw  = ImGui::GetContentRegionAvail().x;
-        ImVec2   pos = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##pb", {pw, 34.0f});
-        bool     hov = ImGui::IsItemHovered();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(pos, {pos.x+pw, pos.y+34.f},
-                          hov ? IM_COL32(45,45,58,255) : IM_COL32(20,20,28,255), 4.f);
-        dl->AddRectFilled({pos.x+5, pos.y+8}, {pos.x+17, pos.y+26}, pe.col, 2.f);
-        dl->AddText({pos.x+22, pos.y+9}, IM_COL32(200,200,215,255), pe.name);
-        if (hov) dl->AddRect(pos, {pos.x+pw, pos.y+34.f}, pe.col, 4.f, 0, 1.f);
-        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-            const char* pid = (pe.type == BlockType::Audio) ? "TL_AUD_BLOCK" : "TL_CAM_BLOCK";
-            ImGui::SetDragDropPayload(pid, &pe.type, sizeof(BlockType));
-            ImGui::PushFont(m_fontMono);
-            ImVec4 cv{float(pe.col&0xff)/255.f, float((pe.col>>8)&0xff)/255.f,
-                      float((pe.col>>16)&0xff)/255.f, 1.f};
-            ImGui::TextColored(cv, "%s", pe.name);
-            ImGui::PopFont();
-            ImGui::EndDragDropSource();
-        }
-        ImGui::Spacing();
-        ImGui::PopID();
     }
 
 
