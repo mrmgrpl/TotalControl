@@ -285,13 +285,18 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **TotalControlGUI About modal (sources)** | **DONE 2026-06-29** |
 | **TotalControlGUI Options menu + IQP API key** | **DONE 2026-06-29** |
 | **IqpClient — stary scraping usunięty** | **DONE 2026-06-29** |
+| **Camera Track Mode (Sun/Moon/Horizon)** | **DONE 2026-06-29** |
+| **Card remaining shots false alarm fix** | **DONE 2026-06-29** |
+| **Card capacity display (shots/max/%)** | **DONE 2026-06-29** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
 **Column 1 — Hardware (200px):**
 - **TIME**: UTC HH:MM:SS.mmm + Home TZ + Local/Eclipse TZ (598 IANA zones, DST); settings in SQLite; GE/C1–C4 countdown
 - **CONNECTION**: ●/○ status + Connect cameras / Test picture / Disconnect cameras
-- **CAMERA STATUS**: multi-camera polling ~2s; model, battery bar+%, Mode/SS/ISO/f/Focus/Drive, C1/C2 shot count, `Shot Nms` latency
+- **CAMERA STATUS**: multi-camera polling ~2s; model, battery bar+%, Mode/SS/ISO/f/Focus/Drive, C1/C2 card `rem/max (%)`, `Shot Nms` latency
+  - `CamStatus::slot1MaxRem / slot2MaxRem` — max remaining seen this session; carried forward between polls like `lastShotMs`; resets on app restart
+  - Format: `"994/1024  97%"` when max known; `"994 shots"` otherwise; `"reading..."` when remaining==0 && status ok (SDK async startup)
 
 **Column 2 — Eclipse (400px):**
 - **ECLIPSE**: combo 11 898 eclipses (ImGuiListClipper); type+duration; GE lat/lon; observer Lat/Lon DMS + Alt (m)
