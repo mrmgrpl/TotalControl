@@ -3259,7 +3259,11 @@ void App::RenderTimelineBottom() {
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.12f,.14f,.20f,1.f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.22f,.24f,.34f,1.f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.30f,.28f,.12f,1.f));
-        if (ImGui::Button("Fit timeline##tz", ImVec2(kLabelW - 8.f, kPhaseH - 2.f))) {
+        {   // centre label vertically: padV = (btnH - textH) / 2
+            float btnH = kPhaseH - 2.f;
+            float padV = std::max(0.f, (btnH - ImGui::GetTextLineHeight()) * 0.5f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.f, padV));
+        if (ImGui::Button("Fit timeline##tz", ImVec2(kLabelW - 8.f, btnH))) {
             int64_t minMs = INT64_MAX, maxMs = INT64_MIN;
             for (const auto& tr : m_tracks)
                 for (const auto& b : tr.blocks)
@@ -3273,6 +3277,8 @@ void App::RenderTimelineBottom() {
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Fit all blocks in view (+/- 5 min margin)");
+        ImGui::PopStyleVar();   // FramePadding
+        }
         ImGui::PopStyleColor(3);
     }
 
