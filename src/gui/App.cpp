@@ -2994,13 +2994,15 @@ void App::RenderInspectorColumn() {
             ImGui::SetNextItemWidth(-1);
             float ds = b.burstDurMs / 1000.f;
             if (ImGui::InputFloat("##bdur", &ds, 0.f, 0.f, "%.1f")) {
-                b.burstDurMs = int32_t(ds * 1000.f);
+                if (std::isfinite(ds) && ds >= 0.f)
+                    b.burstDurMs = int32_t(std::min(ds, 3600.f) * 1000.f);
                 m_tlDirty = true;
             }
 
             // Informational: estimated frame count
             float fps  = kModes[modeIdx].fps;
-            int   nFrm = std::max(1, (int)(fps * ds + 0.5f));
+            float dsSafe = std::isfinite(ds) ? std::max(0.f, ds) : 0.f;
+            int   nFrm = std::max(1, (int)(fps * dsSafe + 0.5f));
             ImGui::TextColored(kDim, "~%d frames @ %.0f fps", nFrm, fps);
         }
 
