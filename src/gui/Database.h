@@ -15,11 +15,16 @@ namespace TotalControl {
 
 // ─── Camera configuration ─────────────────────────────────────────────────────
 
+enum class CamTrackMode { Sun = 0, Moon = 1, Horizon = 2 };
+
 struct CamConfig {
-    std::string guid;       // primary key — permanent hardware ID
-    std::string model;      // e.g. "ILCE-7RM4A" — recorded once on first detection
-    int         focalMm = 0;   // configured lens focal length (0 = unset → no frame drawn)
-    bool        applyP  = true; // true → rotate solar frame by P_rad; false → horizontal (0°)
+    std::string  guid;               // primary key — permanent hardware ID
+    std::string  model;              // e.g. "ILCE-7RM4A" — recorded once on first detection
+    int          focalMm      = 0;   // configured lens focal length (0 = unset → no frame drawn)
+    bool         applyP       = true; // true → rotate solar frame by P_rad; false → horizontal
+    CamTrackMode trackMode    = CamTrackMode::Sun;
+    double       horizonAltDeg = 0.0;   // Alt when trackMode == Horizon
+    double       horizonAzDeg  = 180.0; // Az  when trackMode == Horizon
 };
 
 // ─── Bracket calibration ─────────────────────────────────────────────────────
@@ -103,7 +108,10 @@ public:
     // camera_config table (TotalControlConfig.db)
     void                   CreateCamConfigTable();
     void                   SaveCamConfig(const std::string& guid, const std::string& model,
-                                         int focalMm, bool applyP);
+                                         int focalMm, bool applyP,
+                                         CamTrackMode trackMode = CamTrackMode::Sun,
+                                         double horizonAltDeg = 0.0,
+                                         double horizonAzDeg  = 180.0);
     std::vector<CamConfig> LoadCamConfigs() const;
 
     // Audio file duration cache (TotalControlConfig.db)

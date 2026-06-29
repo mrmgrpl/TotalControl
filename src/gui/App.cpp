@@ -2112,8 +2112,10 @@ void App::RenderSolarView() {
         double solarP0 = ComputeP0(sunEph.ra_deg, sunEph.dec_deg);
         double q       = ComputeQ (sunEph.ra_deg, sunEph.dec_deg,
                                    m_obsLat, m_obsLon, simMs);
-        m_solarP = static_cast<float>(solarP0);   // P₀ from celestial North (display)
-        m_solarQ = static_cast<float>(q);          // parallactic angle
+        m_solarP    = static_cast<float>(solarP0);
+        m_solarQ    = static_cast<float>(q);
+        m_sunAltDeg = sunEph.alt_deg;
+        m_sunAzDeg  = sunEph.az_deg;
         double moonV0 = ComputeMoonV(moonEph.ra_deg, moonEph.dec_deg);
         moonVrad      = static_cast<float>((moonV0 - q) * kPi / 180.0);
         hasMoonV      = true;
@@ -2306,10 +2308,10 @@ void App::RenderSolarView() {
                     IM_COL32(59,139,212,200), plbl);
     }
 
-    // ── Camera frame helper (rotated rectangle) ───────────────────────────────
-    // rot_rad: rotation of frame around disc centre (0 = horizontal)
-    auto DrawFrame = [&](float fovW_deg, float fovH_deg, float rot_rad,
-                          ImU32 col, bool dashed) {
+    // ── Camera frame helper (rotated rectangle around arbitrary centre) ──────────
+    // fcx, fcy: screen-space centre of frame; rot_rad: 0 = horizontal
+    auto DrawFrame = [&](float fcx, float fcy, float fovW_deg, float fovH_deg,
+                          float rot_rad, ImU32 col, bool dashed) {
         float hw = fovW_deg * scale * 0.5f;
         float hh = fovH_deg * scale * 0.5f;
         float cr = cosf(rot_rad), sr = sinf(rot_rad);
@@ -2317,8 +2319,8 @@ void App::RenderSolarView() {
         const float ly[4] = {-hh,-hh, hh, hh};
         ImVec2 pts[4];
         for (int i = 0; i < 4; ++i)
-            pts[i] = {cx + lx[i]*cr - ly[i]*sr,
-                      cy + lx[i]*sr + ly[i]*cr};
+            pts[i] = {fcx + lx[i]*cr - ly[i]*sr,
+                      fcy + lx[i]*sr + ly[i]*cr};
         if (dashed) {
             for (int i = 0; i < 4; ++i) {
                 ImVec2 a = pts[i], b = pts[(i+1)%4];
@@ -2336,7 +2338,78 @@ void App::RenderSolarView() {
         }
     };
 
-    // Camera frames — driven by m_camConfigs (focal length + applyP per camera)
+    // Inverse projection: screen pos → (az, alt) degrees
+    auto unprojectAbs = [&](float sx, float sy) -> std::pair<double,double> {
+        assert(cosAltSun > 1e-4f);
+        double az  = centerAz  + (sx - cx) / (cosAltSun * scale);
+        double alt = centerAlt - (sy - cy) / scale;
+        return {az, alt};
+    };
+
+    // Camera frame centre from track mode
+    auto FrameCenter = [&](const CamConfig& cc) -> ImVec2 {
+        assert(cc.focalMm > 0);
+        switch (cc.trackMode) {
+        case CamTrackMode::Moon:
+            return {moonX, moonY};
+        case CamTrackMode::Horizon:
+            return projectAbs(cc.horizonAzDeg, cc.horizonAltDeg);
+        case CamTrackMode::Sun:
+        default:
+            return {cx, cy};
+        }
+    };
+
+    // ── Horizon-mode drag: detect mouse-down inside frame, update Alt/Az ────────
+    {
+        ImVec2 mpos = ImGui::GetMousePos();
+        bool  mbDown    = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        bool  mbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        bool  mbRel     = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+        static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
+
+        // Start drag: check if click lands inside a Horizon-mode frame
+        if (mbClicked && m_dragHorizonCamIdx < 0) {
+            assert(m_camConfigs.size() <= 64);
+            for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
+                CamConfig& cc = m_camConfigs[ci];
+                if (cc.focalMm <= 0 || cc.trackMode != CamTrackMode::Horizon) continue;
+                float f    = static_cast<float>(cc.focalMm);
+                float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
+                float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
+                float hw   = fovW * scale * 0.5f;
+                float hh   = fovH * scale * 0.5f;
+                ImVec2 fc  = FrameCenter(cc);
+                // Axis-aligned hit test (conservative — ignores rotation for simplicity)
+                if (mpos.x >= fc.x - hw && mpos.x <= fc.x + hw
+                &&  mpos.y >= fc.y - hh && mpos.y <= fc.y + hh) {
+                    m_dragHorizonCamIdx = ci;
+                    break;
+                }
+            }
+        }
+
+        // Continue drag
+        if (mbDown && m_dragHorizonCamIdx >= 0
+            && m_dragHorizonCamIdx < (int)m_camConfigs.size()) {
+            CamConfig& cc = m_camConfigs[m_dragHorizonCamIdx];
+            auto [az, alt] = unprojectAbs(mpos.x, mpos.y);
+            cc.horizonAzDeg  = az;
+            cc.horizonAltDeg = std::clamp(alt, -10.0, 90.0);
+        }
+
+        // End drag: save to DB
+        if (mbRel && m_dragHorizonCamIdx >= 0) {
+            if (m_dragHorizonCamIdx < (int)m_camConfigs.size()) {
+                CamConfig& cc = m_camConfigs[m_dragHorizonCamIdx];
+                m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP,
+                                         cc.trackMode, cc.horizonAltDeg, cc.horizonAzDeg);
+            }
+            m_dragHorizonCamIdx = -1;
+        }
+    }
+
+    // Camera frames — driven by m_camConfigs (focal length + applyP + trackMode)
     // Sony full-frame sensor: 35.9 × 24.0 mm
     {
         static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
@@ -2350,11 +2423,12 @@ void App::RenderSolarView() {
         for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
             const CamConfig& cc = m_camConfigs[ci];
             if (cc.focalMm <= 0) continue;
-            float f    = static_cast<float>(cc.focalMm);
-            float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
-            float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
-            float rot  = cc.applyP ? P_rad : 0.f;
-            DrawFrame(fovW, fovH, rot, kFrameColors[ci % 4], ci == 0 /*dashed*/);
+            float  f    = static_cast<float>(cc.focalMm);
+            float  fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
+            float  fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
+            float  rot  = cc.applyP ? P_rad : 0.f;
+            ImVec2 fc   = FrameCenter(cc);
+            DrawFrame(fc.x, fc.y, fovW, fovH, rot, kFrameColors[ci % 4], ci == 0 /*dashed*/);
         }
     }
 
@@ -2479,19 +2553,20 @@ void App::RenderSolarView() {
             const CamConfig& cc = m_camConfigs[ci];
             if (cc.focalMm <= 0) continue;
 
-            float f    = static_cast<float>(cc.focalMm);
-            float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
-            float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
-            float rot  = cc.applyP ? P_rad : 0.f;
-            float hw   = fovW * scale * 0.5f;
-            float hh   = fovH * scale * 0.5f;
-            float cr   = cosf(rot), sr = sinf(rot);
+            float  f    = static_cast<float>(cc.focalMm);
+            float  fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
+            float  fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
+            float  rot  = cc.applyP ? P_rad : 0.f;
+            float  hw   = fovW * scale * 0.5f;
+            float  hh   = fovH * scale * 0.5f;
+            float  cr   = cosf(rot), sr = sinf(rot);
+            ImVec2 fc   = FrameCenter(cc);
 
-            // Rotated corners (same transform as DrawFrame lambda)
-            ImVec2 tl{ cx + (-hw)*cr - (-hh)*sr, cy + (-hw)*sr + (-hh)*cr };
-            ImVec2 tr{ cx + ( hw)*cr - (-hh)*sr, cy + ( hw)*sr + (-hh)*cr };
-            ImVec2 br{ cx + ( hw)*cr - ( hh)*sr, cy + ( hw)*sr + ( hh)*cr };
-            ImVec2 bl{ cx + (-hw)*cr - ( hh)*sr, cy + (-hw)*sr + ( hh)*cr };
+            // Rotated corners around fc (same transform as DrawFrame lambda)
+            ImVec2 tl{ fc.x + (-hw)*cr - (-hh)*sr, fc.y + (-hw)*sr + (-hh)*cr };
+            ImVec2 tr{ fc.x + ( hw)*cr - (-hh)*sr, fc.y + ( hw)*sr + (-hh)*cr };
+            ImVec2 br{ fc.x + ( hw)*cr - ( hh)*sr, fc.y + ( hw)*sr + ( hh)*cr };
+            ImVec2 bl{ fc.x + (-hw)*cr - ( hh)*sr, fc.y + (-hw)*sr + ( hh)*cr };
 
             dl->AddImageQuad(
                 static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_lvSrv[ci])),
@@ -2499,7 +2574,7 @@ void App::RenderSolarView() {
                 {0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}, lvCol);
 
             // Redraw frame outline on top of LV image (white, semi-transparent)
-            DrawFrame(fovW, fovH, rot, IM_COL32(255, 255, 255, 180), false);
+            DrawFrame(fc.x, fc.y, fovW, fovH, rot, IM_COL32(255, 255, 255, 180), false);
         }
     }
 
@@ -2590,15 +2665,17 @@ void App::RenderSolarView() {
             float f    = static_cast<float>(cc.focalMm);
             float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
             float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
-            char lbl[72];
+            const char* trackTag = (cc.trackMode == CamTrackMode::Moon)    ? " Moon"
+                                 : (cc.trackMode == CamTrackMode::Horizon) ? " Horiz" : "";
+            char lbl[80];
             if (cc.applyP)
                 snprintf(lbl, sizeof(lbl),
-                    "%s  %dmm  %.1f\xc2\xb0\xc3\x97%.1f\xc2\xb0  (P=%.0f\xc2\xb0)",
-                    cc.model.c_str(), cc.focalMm, fovW, fovH, rot);
+                    "%s  %dmm  %.1f\xc2\xb0\xc3\x97%.1f\xc2\xb0  (P=%.0f\xc2\xb0)%s",
+                    cc.model.c_str(), cc.focalMm, fovW, fovH, rot, trackTag);
             else
                 snprintf(lbl, sizeof(lbl),
-                    "%s  %dmm  %.1f\xc2\xb0\xc3\x97%.1f\xc2\xb0  (0\xc2\xb0)",
-                    cc.model.c_str(), cc.focalMm, fovW, fovH);
+                    "%s  %dmm  %.1f\xc2\xb0\xc3\x97%.1f\xc2\xb0  (0\xc2\xb0)%s",
+                    cc.model.c_str(), cc.focalMm, fovW, fovH, trackTag);
             dl->AddText({ox + 4.f, lineY}, kFrameColors[ci % 4], lbl);
             lineY += ImGui::GetTextLineHeight() + 2.f;
         }
@@ -5085,19 +5162,50 @@ void App::RenderCamConfigWindows() {
         // ── Configuration ───────────────────────────────────────────────────
         ImGui::SeparatorText("Configuration");
 
-        ImGui::TextColored(kGray, "Ogniskowa"); ImGui::SameLine(90.f);
+        ImGui::TextColored(kGray, "Focal Len"); ImGui::SameLine(90.f);
         ImGui::SetNextItemWidth(80.f);
         if (ImGui::InputInt("##focal_cfg", &cc.focalMm, 0, 0)) {
             if (cc.focalMm < 0) cc.focalMm = 0;
-            m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP);
+            m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP,
+                                     cc.trackMode, cc.horizonAltDeg, cc.horizonAzDeg);
         }
         ImGui::SameLine(); ImGui::TextColored(kGray, "mm");
 
         ImGui::TextColored(kGray, "Apply P");  ImGui::SameLine(90.f);
         if (ImGui::Checkbox("##applyP_cfg", &cc.applyP))
-            m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP);
+            m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP,
+                                     cc.trackMode, cc.horizonAltDeg, cc.horizonAzDeg);
         ImGui::SameLine();
-        ImGui::TextColored(kDim, cc.applyP ? "obrot P (korona)" : "poziomo (krajobraz)");
+        ImGui::TextColored(kDim, cc.applyP ? "corona (P rotation)" : "horizontal (landscape)");
+
+        // ── Track mode ──────────────────────────────────────────────────────
+        ImGui::Spacing();
+        ImGui::TextColored(kGray, "Track");    ImGui::SameLine(90.f);
+        {
+            bool changed = false;
+            int  tm      = static_cast<int>(cc.trackMode);
+            changed |= ImGui::RadioButton("Sun##tm",     &tm, 0); ImGui::SameLine();
+            changed |= ImGui::RadioButton("Moon##tm",    &tm, 1); ImGui::SameLine();
+            changed |= ImGui::RadioButton("Horizon##tm", &tm, 2);
+            if (changed) {
+                CamTrackMode newMode = static_cast<CamTrackMode>(tm);
+                // Switching TO Horizon: seed from last known Sun position so
+                // the frame starts on-target and operator can drag from there.
+                if (newMode == CamTrackMode::Horizon
+                    && cc.trackMode != CamTrackMode::Horizon) {
+                    cc.horizonAltDeg = m_sunAltDeg;
+                    cc.horizonAzDeg  = m_sunAzDeg;
+                }
+                cc.trackMode = newMode;
+                m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP,
+                                         cc.trackMode, cc.horizonAltDeg, cc.horizonAzDeg);
+            }
+        }
+        if (cc.trackMode == CamTrackMode::Horizon) {
+            ImGui::TextColored(kGray, "  Alt/Az"); ImGui::SameLine(90.f);
+            ImGui::TextColored(kDim, "%.1f deg / %.1f deg  (drag frame on simulator)",
+                               cc.horizonAltDeg, cc.horizonAzDeg);
+        }
 
         ImGui::PopStyleVar();
         ImGui::PopFont();

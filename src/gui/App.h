@@ -174,6 +174,8 @@ private:
     float m_solarP    = 15.2f;  // P₀: solar N pole PA from celestial north (deg) — for display
     float m_solarQ    =  0.f;   // q: parallactic angle; drawing uses (P₀-q)
     float m_solarZoom =  1.f;   // current zoom factor (mouse wheel; 0.2–20)
+    double m_sunAltDeg  = 8.0;   // current Sun altitude (deg) — updated each frame in RenderSolarView
+    double m_sunAzDeg   = 285.0; // current Sun azimuth  (deg) — updated each frame in RenderSolarView
 
     // ── GOES-19 SUVI Fe171 animation ─────────────────────────────────────────
     // 300 frames from cdn.star.nesdis.noaa.gov; cadence 4 min; alpha=luminance.
@@ -335,7 +337,8 @@ private:
 
     // ── Camera config ─────────────────────────────────────────────────────────
     std::vector<CamConfig> m_camConfigs;
-    std::vector<bool>      m_showCamCfgWnd;  // one flag per m_camConfigs entry
+    std::vector<bool>      m_showCamCfgWnd;    // one flag per m_camConfigs entry
+    int                    m_dragHorizonCamIdx = -1; // index of camera being dragged in Horizon mode
 
     // ── Live View overlay on solar simulator ──────────────────────────────────
     // Frames arrive via named SHM (TotalControl_LV_<ci>), decoded JPEG→RGBA by

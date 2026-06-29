@@ -959,28 +959,41 @@ void Database::CreateCamConfigTable() {
     assert(m_db != nullptr);
     Exec(R"SQL(
         CREATE TABLE IF NOT EXISTS camera_config (
-            guid      TEXT PRIMARY KEY,
-            model     TEXT NOT NULL DEFAULT '',
-            focal_mm  INTEGER NOT NULL DEFAULT 0,
-            apply_p   INTEGER NOT NULL DEFAULT 1
+            guid             TEXT PRIMARY KEY,
+            model            TEXT NOT NULL DEFAULT '',
+            focal_mm         INTEGER NOT NULL DEFAULT 0,
+            apply_p          INTEGER NOT NULL DEFAULT 1,
+            track_mode       INTEGER NOT NULL DEFAULT 0,
+            horizon_alt_deg  REAL    NOT NULL DEFAULT 0.0,
+            horizon_az_deg   REAL    NOT NULL DEFAULT 180.0
         );
     )SQL");
+    // Idempotent migrations for databases created before these columns existed.
+    (void)Exec("ALTER TABLE camera_config ADD COLUMN track_mode      INTEGER NOT NULL DEFAULT 0;");
+    (void)Exec("ALTER TABLE camera_config ADD COLUMN horizon_alt_deg REAL    NOT NULL DEFAULT 0.0;");
+    (void)Exec("ALTER TABLE camera_config ADD COLUMN horizon_az_deg  REAL    NOT NULL DEFAULT 180.0;");
 }
 
 void Database::SaveCamConfig(const std::string& guid, const std::string& model,
-                              int focalMm, bool applyP) {
+                              int focalMm, bool applyP,
+                              CamTrackMode trackMode,
+                              double horizonAltDeg, double horizonAzDeg) {
     assert(m_db != nullptr);
     assert(!guid.empty());
     sqlite3_stmt* st = nullptr;
     if (sqlite3_prepare_v2(m_db,
-            "INSERT OR REPLACE INTO camera_config (guid, model, focal_mm, apply_p)"
-            " VALUES (?,?,?,?);",
+            "INSERT OR REPLACE INTO camera_config"
+            " (guid, model, focal_mm, apply_p, track_mode, horizon_alt_deg, horizon_az_deg)"
+            " VALUES (?,?,?,?,?,?,?);",
             -1, &st, nullptr) != SQLITE_OK)
         return;
-    sqlite3_bind_text(st, 1, guid.c_str(),  -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 2, model.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_int (st, 3, focalMm);
-    sqlite3_bind_int (st, 4, applyP ? 1 : 0);
+    sqlite3_bind_text  (st, 1, guid.c_str(),  -1, SQLITE_STATIC);
+    sqlite3_bind_text  (st, 2, model.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int   (st, 3, focalMm);
+    sqlite3_bind_int   (st, 4, applyP ? 1 : 0);
+    sqlite3_bind_int   (st, 5, static_cast<int>(trackMode));
+    sqlite3_bind_double(st, 6, horizonAltDeg);
+    sqlite3_bind_double(st, 7, horizonAzDeg);
     sqlite3_step(st);
     sqlite3_finalize(st);
 }
@@ -1005,16 +1018,20 @@ std::vector<CamConfig> Database::LoadCamConfigs() const {
 
     sqlite3_stmt* st = nullptr;
     int rc = sqlite3_prepare_v2(m_db,
-        "SELECT guid, model, focal_mm, apply_p FROM camera_config ORDER BY rowid;",
+        "SELECT guid, model, focal_mm, apply_p, track_mode, horizon_alt_deg, horizon_az_deg"
+        " FROM camera_config ORDER BY rowid;",
         -1, &st, nullptr);
     if (rc != SQLITE_OK) return result;
 
     while (sqlite3_step(st) == SQLITE_ROW) {
         CamConfig cc;
-        cc.guid    = col(st, 0);
-        cc.model   = col(st, 1);
-        cc.focalMm = sqlite3_column_int(st, 2);
-        cc.applyP  = sqlite3_column_int(st, 3) != 0;
+        cc.guid           = col(st, 0);
+        cc.model          = col(st, 1);
+        cc.focalMm        = sqlite3_column_int   (st, 2);
+        cc.applyP         = sqlite3_column_int   (st, 3) != 0;
+        cc.trackMode      = static_cast<CamTrackMode>(sqlite3_column_int(st, 4));
+        cc.horizonAltDeg  = sqlite3_column_double(st, 5);
+        cc.horizonAzDeg   = sqlite3_column_double(st, 6);
         result.push_back(std::move(cc));
     }
     sqlite3_finalize(st);
