@@ -3066,7 +3066,7 @@ void App::RenderInspectorColumn() {
 
     // ── Action block palette ───────────────────────────────────────────────
     ImGui::Spacing();
-    ImGui::SeparatorText("ACTION BLOCK");
+    ImGui::SeparatorText("ACTION LIBRARY");
     ImGui::Spacing();
 
     struct PE { BlockType type; const char* name; ImU32 col; };
@@ -3118,15 +3118,6 @@ void App::RenderInspectorColumn() {
         ImGui::PopFont();
     }
 
-    // ── DEV ────────────────────────────────────────────────────────────────
-    ImGui::Spacing();
-    ImGui::PushFont(m_fontMono);
-    ImGui::TextColored(kGray, "dev:");
-    ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::Checkbox("Style##se", &m_showStyleEditor);
-    ImGui::SameLine();
-    ImGui::Checkbox("Demo##dw",  &m_showDemoWindow);
 }
 
 // ─── Timeline (bottom, full width) ────────────────────────────────────────────
@@ -6085,13 +6076,6 @@ void App::OnFrame() {
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
-    if (m_showStyleEditor) {
-        ImGui::Begin("Style Editor", &m_showStyleEditor);
-        ImGui::ShowStyleEditor();
-        ImGui::End();
-    }
-    if (m_showDemoWindow)
-        ImGui::ShowDemoWindow(&m_showDemoWindow);
 
     ImGui::End();
 
