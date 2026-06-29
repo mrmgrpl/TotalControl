@@ -3087,74 +3087,6 @@ void App::RenderInspectorColumn() {
         ImGui::PopFont();
     }
 
-    // ── Track config ───────────────────────────────────────────────────────
-    ImGui::Spacing();
-    ImGui::SeparatorText("TRACK CONFIG");
-    ImGui::Spacing();
-    if (!hasTrack) {
-        ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(kDim, "Select a track");
-        ImGui::PopFont();
-    } else {
-        TLTrack& tcTr = m_tracks[m_selTrack];
-        ImGui::PushFont(m_fontMono);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-        if (tcTr.IsCamera()) {
-            // Focal length
-            ImGui::TextColored(kGray, "Focal length"); ImGui::SameLine(90);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputInt("##focal_mm_tc", &tcTr.focalMm, 10, 50)) {
-                if (tcTr.focalMm < 0) tcTr.focalMm = 0;
-                m_tlDirty = true;
-            }
-            ImGui::Spacing();
-
-            // Live View — find cam config index by model name
-            int lvCiInsp = -1;
-            if (!tcTr.cameraId.empty()) {
-                for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci)
-                    if (m_camConfigs[ci].model == tcTr.cameraId) { lvCiInsp = ci; break; }
-            }
-            if (lvCiInsp >= 0) {
-                ImGui::TextColored(kGray, "Live View"); ImGui::SameLine(90);
-                bool prevLvInsp = m_lvEnabled[lvCiInsp];
-                if (ImGui::Checkbox("##lvcb_tc", &m_lvEnabled[lvCiInsp])
-                    && m_lvEnabled[lvCiInsp] != prevLvInsp)
-                {
-                    if (m_lvEnabled[lvCiInsp]) {
-                        auto res = m_pipe.SendRequest(
-                            std::format(R"({{"cmd":"lv_start","cam":"{}"}})", lvCiInsp));
-                        (void)res;
-                        if (!m_lvThread.joinable()) StartLvThread();
-                        m_configDb.SetSettingInt(
-                            std::format("lv_enabled_{}", lvCiInsp).c_str(), 1);
-                    } else {
-                        auto res = m_pipe.SendRequest(
-                            std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", lvCiInsp));
-                        (void)res;
-                        if (m_lvSrv[lvCiInsp]) {
-                            m_lvSrv[lvCiInsp]->Release(); m_lvSrv[lvCiInsp] = nullptr;
-                        }
-                        m_configDb.SetSettingInt(
-                            std::format("lv_enabled_{}", lvCiInsp).c_str(), 0);
-                    }
-                }
-                if (m_lvEnabled[lvCiInsp]) {
-                    ImGui::Spacing();
-                    ImGui::TextColored(kGray, "LV Opacity"); ImGui::SameLine(90);
-                    int opPct = static_cast<int>(m_lvOpacity * 100.f + 0.5f);
-                    ImGui::SetNextItemWidth(-1);
-                    if (ImGui::SliderInt("##lvop_tc", &opPct, 0, 100, "%d%%")) {
-                        m_lvOpacity = static_cast<float>(opPct) / 100.f;
-                        m_configDb.SetSettingInt("lv_opacity_pct", opPct);
-                    }
-                }
-            }
-        }
-        ImGui::PopStyleVar();
-        ImGui::PopFont();
-    }
-
     // ── Last command result ────────────────────────────────────────────────
     if (!m_lastResult.empty()) {
         ImGui::Spacing();
@@ -3657,45 +3589,31 @@ void App::RenderTimelineBottom() {
         float ty     = tracksY + ti * kTrackH;
         float tyFill = ty + kTrackH - 2.f;   // bottom of visible content (2px gap below)
 
-        // Label column
-        bool isPresetTarget = (!tr.IsAudio() && ti == m_presetTargetTrack);
-        ImU32 labelBg = isPresetTarget ? IM_COL32(28, 22, 6, 255) : IM_COL32(14, 14, 22, 255);
+        // Label column — highlighted when track is selected
+        bool isSelTrack = (ti == m_selTrack);
+        ImU32 labelBg = isSelTrack ? IM_COL32(28, 40, 62, 255) : IM_COL32(14, 14, 22, 255);
         dl->AddRectFilled({winPos.x, ty}, {winPos.x + kLabelW - 2.f, tyFill}, labelBg);
         ImU32 lc = tr.IsAudio() ? IM_COL32(150,100,210,255) : IM_COL32(120,148,172,255);
         bool hasFocal = tr.IsCamera() && tr.focalMm > 0;
         float labelY  = hasFocal ? ty + 2.f : ty + 7.f;
         std::string dynLbl = TrackLabel(tr);
 
-        dl->AddText({winPos.x + 20.f, labelY}, lc, dynLbl.c_str());
+        dl->AddText({winPos.x + 8.f, labelY}, lc, dynLbl.c_str());
         if (hasFocal) {
             char focalBuf[16];
             snprintf(focalBuf, sizeof(focalBuf), "%d mm", tr.focalMm);
-            dl->AddText({winPos.x + 20.f, ty + 15.f}, IM_COL32(100, 180, 120, 220), focalBuf);
+            dl->AddText({winPos.x + 8.f, ty + 15.f}, IM_COL32(100, 180, 120, 220), focalBuf);
         }
-        // Preset-target marker: amber filled triangle on the left edge (camera tracks only).
-        // Drawn with AddTriangleFilled so it works regardless of font glyph availability.
-        if (isPresetTarget) {
-            constexpr float kTx = 4.f, kTw = 10.f, kTh = 9.f;
-            float tcx = winPos.x + kTx + kTw * 0.5f;
-            float tty = ty + (kTrackH - kTh) * 0.5f;
-            dl->AddTriangleFilled({tcx - kTw * 0.5f, tty + kTh},
-                                  {tcx + kTw * 0.5f, tty + kTh},
-                                  {tcx,               tty},
-                                  IM_COL32(255, 185, 0, 240));
-            // Amber left border stripe
-            dl->AddRectFilled({winPos.x, ty}, {winPos.x + 2.5f, tyFill},
-                              IM_COL32(255, 165, 0, 200));
-        }
-        // Left-click on track label → set as photo-preset target (camera tracks only).
-        // Tooltip explains the gesture.
-        if (!tr.IsAudio()) {
+        // Left-click on track label → select track (highlights label background)
+        {
             ImVec2 mp = ImGui::GetMousePos();
             bool hovered = (mp.x >= winPos.x && mp.x < winPos.x + kLabelW - 2.f
                             && mp.y >= ty && mp.y < tyFill);
-            if (hovered && ImGui::IsMouseClicked(0))
-                m_presetTargetTrack = ti;
-            if (hovered && !isPresetTarget)
-                ImGui::SetTooltip("Click to set as photo preset target");
+            if (hovered && ImGui::IsMouseClicked(0)) {
+                m_selTrack = ti;
+                m_selBlock = -1;
+                if (!tr.IsAudio()) m_presetTargetTrack = ti;
+            }
         }
 
         // Track content bg
