@@ -2477,17 +2477,6 @@ void App::RenderSolarView() {
     dl->AddCircleFilled({cx,cy}, sunR*1.2f, IM_COL32(255,245,210, 36));  // limb, near white
     dl->AddCircleFilled({cx,cy}, sunR*1.06f,IM_COL32(255,255,245, 50));  // immediate limb, pearl
 
-    // ── Moon disc — totality: fully black when Moon covers Sun ───────────────
-    {
-        float dxM = moonX - cx, dyM = moonY - cy;
-        float dist = sqrtf(dxM * dxM + dyM * dyM);
-        bool  isTotality = (dist + sunR < moonR);  // Moon fully occults Sun
-        ImU32 moonFill   = isTotality ? IM_COL32(0, 0, 0, 255)
-                                      : IM_COL32(55, 55, 52, 255);
-        dl->AddCircleFilled({moonX, moonY}, moonR, moonFill);
-        dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
-    }
-
     // ── Live View overlays (shortest focal = bottom, longest = top) ──────────────
     // Upload any newly decoded LV frames to D3D11 (render-thread only).
     if (m_lvNewFrames.load()) CreateLvTextures();
@@ -2587,6 +2576,17 @@ void App::RenderSolarView() {
             dl->AddCircleFilled({cx, cy}, sunR, IM_COL32(250, 199, 117, 255));
             dl->AddCircle      ({cx, cy}, sunR, IM_COL32(186, 117,  23, 255), 0, 1.f);
         }
+    }
+
+    // ── Moon disc — on top of SUVI and LV (Księżyc zakrywa Słońce) ───────────
+    {
+        float dxM = moonX - cx, dyM = moonY - cy;
+        float dist = sqrtf(dxM * dxM + dyM * dyM);
+        bool  isTotality = (dist + sunR < moonR);
+        ImU32 moonFill   = isTotality ? IM_COL32(0, 0, 0, 255)
+                                      : IM_COL32(55, 55, 52, 255);
+        dl->AddCircleFilled({moonX, moonY}, moonR, moonFill);
+        dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
     }
 
     // ── Solar rotation axis N☉ ────────────────────────────────────────────────
