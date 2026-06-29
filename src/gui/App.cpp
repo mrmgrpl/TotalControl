@@ -2730,7 +2730,52 @@ void App::RenderInspectorColumn() {
     static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
     static const ImVec4 kDim  {0.28f, 0.28f, 0.32f, 1.0f};
 
-    ImGui::SeparatorText("INSPECTOR");
+    // ── SUVI ALIGNMENT ────────────────────────────────────────────────────
+    ImGui::SeparatorText("SUVI ALIGNMENT");
+    ImGui::Spacing();
+    {
+        ImGui::PushFont(m_fontMono);
+        if (m_suviEnabled) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.10f,.30f,.10f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.15f,.42f,.15f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.08f,.22f,.08f,1.f));
+            if (ImGui::Button("SUVI: ON ##stog", ImVec2(-1, 0))) {
+                m_suviEnabled = false;
+                m_configDb.SetSettingInt("suvi_enabled", 0);
+            }
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.22f,.16f,.16f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.32f,.22f,.22f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.16f,.12f,.12f,1.f));
+            if (ImGui::Button("SUVI: OFF##stog", ImVec2(-1, 0))) {
+                m_suviEnabled = true;
+                m_configDb.SetSettingInt("suvi_enabled", 1);
+            }
+        }
+        ImGui::PopStyleColor(3);
+        ImGui::PopFont();
+    }
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(-1);
+    bool suviChanged = false;
+    ImGui::PushFont(m_fontMono);
+    if (ImGui::InputFloat("Skala dysku",   &m_suviHalfQ,       0.005f, 0.02f, "%.4f")) suviChanged = true;
+    if (ImGui::InputFloat("Offset stopki", &m_suviFooterPx,    1.0f,   5.0f,  "%.1f")) suviChanged = true;
+    if (ImGui::InputFloat("Korekta prawo", &m_suviCorrRightPx, 1.0f,   5.0f,  "%.1f")) suviChanged = true;
+    if (ImGui::InputFloat("Korekta gora",  &m_suviCorrUpPx,    1.0f,   5.0f,  "%.1f")) suviChanged = true;
+    ImGui::PopFont();
+    if (suviChanged) {
+        m_configDb.SetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str());
+        m_configDb.SetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str());
+        m_configDb.SetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str());
+        m_configDb.SetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str());
+        LogLine(std::format("SUVI align: halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f}",
+                            m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx));
+    }
+    ImGui::Spacing();
+
+    // ── BLOCK INSPECTOR ────────────────────────────────────────────────────
+    ImGui::SeparatorText("BLOCK INSPECTOR");
 
     bool hasTrack = m_selTrack >= 0 && m_selTrack < (int)m_tracks.size();
     bool hasSel   = hasTrack
@@ -3019,9 +3064,9 @@ void App::RenderInspectorColumn() {
         ImGui::PopFont();
     }
 
-    // ── Palette ────────────────────────────────────────────────────────────
+    // ── Action block palette ───────────────────────────────────────────────
     ImGui::Spacing();
-    ImGui::SeparatorText("PALETTE");
+    ImGui::SeparatorText("ACTION BLOCK");
     ImGui::Spacing();
 
     struct PE { BlockType type; const char* name; ImU32 col; };
@@ -3058,105 +3103,7 @@ void App::RenderInspectorColumn() {
         ImGui::PopID();
     }
 
-    // ── SUVI alignment calibration ────────────────────────────────────────
-    ImGui::Spacing();
-    ImGui::SeparatorText("SUVI ALIGNMENT");
-    ImGui::Spacing();
-    // Toggle: SUVI ON / OFF
-    {
-        ImGui::PushFont(m_fontMono);
-        if (m_suviEnabled) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.10f,.30f,.10f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.15f,.42f,.15f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.08f,.22f,.08f,1.f));
-            if (ImGui::Button("SUVI: ON ##stog", ImVec2(-1, 0))) {
-                m_suviEnabled = false;
-                m_configDb.SetSettingInt("suvi_enabled", 0);
-            }
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.22f,.16f,.16f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.32f,.22f,.22f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.16f,.12f,.12f,1.f));
-            if (ImGui::Button("SUVI: OFF##stog", ImVec2(-1, 0))) {
-                m_suviEnabled = true;
-                m_configDb.SetSettingInt("suvi_enabled", 1);
-            }
-        }
-        ImGui::PopStyleColor(3);
-        ImGui::PopFont();
-    }
-    ImGui::Spacing();
-    ImGui::SetNextItemWidth(-1);
-    bool suviChanged = false;
-    ImGui::PushFont(m_fontMono);
-    if (ImGui::InputFloat("Skala dysku",   &m_suviHalfQ,       0.005f, 0.02f, "%.4f")) suviChanged = true;
-    if (ImGui::InputFloat("Offset stopki", &m_suviFooterPx,    1.0f,   5.0f,  "%.1f")) suviChanged = true;
-    if (ImGui::InputFloat("Korekta prawo", &m_suviCorrRightPx, 1.0f,   5.0f,  "%.1f")) suviChanged = true;
-    if (ImGui::InputFloat("Korekta gora",  &m_suviCorrUpPx,    1.0f,   5.0f,  "%.1f")) suviChanged = true;
-    ImGui::PopFont();
-    if (suviChanged) {
-        m_configDb.SetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str());
-        m_configDb.SetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str());
-        m_configDb.SetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str());
-        m_configDb.SetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str());
-        LogLine(std::format("SUVI align: halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f}",
-                            m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx));
-    }
-    ImGui::Spacing();
 
-    // ── Live View overlay controls ─────────────────────────────────────────
-    ImGui::Spacing();
-    ImGui::SeparatorText("LIVE VIEW");
-    ImGui::Spacing();
-    {
-        bool anyEnabled = false;
-        assert(m_camConfigs.size() <= 64);
-        for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci) {
-            const CamConfig& cc = m_camConfigs[ci];
-            bool online = false;
-            {
-                std::lock_guard lk(m_camerasMutex);
-                for (const auto& cs : m_cameras)
-                    if (cs.guid == cc.guid && cs.valid) { online = true; break; }
-            }
-            bool prev = m_lvEnabled[ci];
-            ImGui::PushFont(m_fontMono);
-            std::string lbl = std::format("{}{}##lv{}",
-                online ? "\xe2\x97\x8f" : "\xe2\x97\x8b", cc.model, ci);
-            if (ImGui::Checkbox(lbl.c_str(), &m_lvEnabled[ci])) {
-                if (m_lvEnabled[ci]) {
-                    auto res = m_pipe.SendRequest(
-                        std::format(R"({{"cmd":"lv_start","cam":"{}"}})", ci));
-                    (void)res;
-                    if (!m_lvThread.joinable()) StartLvThread();
-                    m_configDb.SetSettingInt(
-                        std::format("lv_enabled_{}", ci).c_str(), 1);
-                } else {
-                    auto res = m_pipe.SendRequest(
-                        std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", ci));
-                    (void)res;
-                    if (m_lvSrv[ci]) { m_lvSrv[ci]->Release(); m_lvSrv[ci] = nullptr; }
-                    m_configDb.SetSettingInt(
-                        std::format("lv_enabled_{}", ci).c_str(), 0);
-                }
-            }
-            ImGui::PopFont();
-            if (m_lvEnabled[ci]) anyEnabled = true;
-            (void)prev;
-        }
-        ImGui::Spacing();
-        // Opacity slider: 0 = model only, 100 = LV only
-        int opPct = static_cast<int>(m_lvOpacity * 100.f + 0.5f);
-        ImGui::PushFont(m_fontMono);
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::SliderInt("##lv_op", &opPct, 0, 100, "LV %d%%")) {
-            m_lvOpacity = static_cast<float>(opPct) / 100.f;
-            m_configDb.SetSettingInt("lv_opacity_pct", opPct);
-        }
-        ImGui::PopFont();
-        (void)anyEnabled;
-    }
-    ImGui::Spacing();
 
     // ── Last command result ────────────────────────────────────────────────
     if (!m_lastResult.empty()) {
@@ -3677,7 +3624,65 @@ void App::RenderTimelineBottom() {
         bool hasFocal = tr.IsCamera() && tr.focalMm > 0;
         float labelY  = hasFocal ? ty + 2.f : ty + 7.f;
         std::string dynLbl = TrackLabel(tr);
-        dl->AddText({winPos.x + 20.f, labelY}, lc, dynLbl.c_str());  // shifted right for triangle marker
+
+        // ── LV checkbox + opacity slider (camera tracks only) ─────────────
+        // Find camera config index for this track (match by model name)
+        int lvCi = -1;
+        if (tr.IsCamera() && !tr.cameraId.empty()) {
+            for (int ci2 = 0; ci2 < (int)m_camConfigs.size() && ci2 < kMaxCamTracks; ++ci2) {
+                if (m_camConfigs[ci2].model == tr.cameraId) { lvCi = ci2; break; }
+            }
+        }
+        if (lvCi >= 0) {
+            // Checkbox: [ ] before camera name
+            static constexpr float kCbSz = 12.f;
+            float cbX = winPos.x + 2.f;
+            float cbY = ty + (kTrackH - kCbSz) * 0.5f;
+            ImGui::SetCursorScreenPos({cbX, cbY});
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
+            std::string cbId = std::format("##lvcb_{}", ti);
+            bool prevLv = m_lvEnabled[lvCi];
+            if (ImGui::Checkbox(cbId.c_str(), &m_lvEnabled[lvCi]) && m_lvEnabled[lvCi] != prevLv) {
+                if (m_lvEnabled[lvCi]) {
+                    auto res = m_pipe.SendRequest(
+                        std::format(R"({{"cmd":"lv_start","cam":"{}"}})", lvCi));
+                    (void)res;
+                    if (!m_lvThread.joinable()) StartLvThread();
+                    m_configDb.SetSettingInt(
+                        std::format("lv_enabled_{}", lvCi).c_str(), 1);
+                } else {
+                    auto res = m_pipe.SendRequest(
+                        std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", lvCi));
+                    (void)res;
+                    if (m_lvSrv[lvCi]) { m_lvSrv[lvCi]->Release(); m_lvSrv[lvCi] = nullptr; }
+                    m_configDb.SetSettingInt(
+                        std::format("lv_enabled_{}", lvCi).c_str(), 0);
+                }
+            }
+            ImGui::PopStyleVar();
+
+            if (m_lvEnabled[lvCi]) {
+                // Opacity slider fills remaining label width, overlaid with "LV XX%"
+                float slX = cbX + kCbSz + 2.f;
+                float slW = winPos.x + kLabelW - 4.f - slX;
+                ImGui::SetCursorScreenPos({slX, ty + 1.f});
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.f, 1.f));
+                ImGui::SetNextItemWidth(slW);
+                int opPct = static_cast<int>(m_lvOpacity * 100.f + 0.5f);
+                std::string slId = std::format("##lvop_{}", ti);
+                if (ImGui::SliderInt(slId.c_str(), &opPct, 0, 100, "LV %d%%")) {
+                    m_lvOpacity = static_cast<float>(opPct) / 100.f;
+                    m_configDb.SetSettingInt("lv_opacity_pct", opPct);
+                }
+                ImGui::PopStyleVar();
+            } else {
+                // LV off — draw camera name shifted past checkbox
+                dl->AddText({winPos.x + 16.f, labelY}, lc, dynLbl.c_str());
+            }
+        } else {
+            // Audio track or no LV config — name in normal position
+            dl->AddText({winPos.x + 20.f, labelY}, lc, dynLbl.c_str());
+        }
         if (hasFocal) {
             char focalBuf[16];
             snprintf(focalBuf, sizeof(focalBuf), "%d mm", tr.focalMm);
@@ -5698,7 +5703,7 @@ void App::OnFrame() {
 
     const float colW   = 200.0f;   // Col1: Hardware
     const float colW2  = 400.0f;   // Col2: Eclipse
-    const float kInspW = 200.0f;   // Inspector + Palette
+    const float kInspW = 260.0f;   // Inspector + Palette
     const float totalH = io.DisplaySize.y - menuH;
     const float totalW = io.DisplaySize.x;
 
