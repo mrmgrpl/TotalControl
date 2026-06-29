@@ -2820,22 +2820,6 @@ void App::RenderInspectorColumn() {
     bool hasSel   = hasTrack
                && m_selBlock >= 0 && m_selBlock < (int)m_tracks[m_selTrack].blocks.size();
 
-    // Track-level: focal length — shown for any selected camera track
-    if (hasTrack && m_tracks[m_selTrack].IsCamera()) {
-        TLTrack& tr = m_tracks[m_selTrack];
-        ImGui::PushFont(m_fontMono);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-        ImGui::TextColored(kGray, "Ogniskowa"); ImGui::SameLine(80);
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::InputInt("##focal_mm", &tr.focalMm, 10, 50)) {
-            if (tr.focalMm < 0) tr.focalMm = 0;
-            m_tlDirty = true;
-        }
-        ImGui::PopStyleVar();
-        ImGui::PopFont();
-        ImGui::Spacing();
-    }
-
     if (!hasSel) {
         ImGui::PushFont(m_fontMono);
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 6));
@@ -3103,7 +3087,73 @@ void App::RenderInspectorColumn() {
         ImGui::PopFont();
     }
 
+    // ── Track config ───────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("TRACK CONFIG");
+    ImGui::Spacing();
+    if (!hasTrack) {
+        ImGui::PushFont(m_fontMono);
+        ImGui::TextColored(kDim, "Select a track");
+        ImGui::PopFont();
+    } else {
+        TLTrack& tcTr = m_tracks[m_selTrack];
+        ImGui::PushFont(m_fontMono);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+        if (tcTr.IsCamera()) {
+            // Focal length
+            ImGui::TextColored(kGray, "Focal length"); ImGui::SameLine(90);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::InputInt("##focal_mm_tc", &tcTr.focalMm, 10, 50)) {
+                if (tcTr.focalMm < 0) tcTr.focalMm = 0;
+                m_tlDirty = true;
+            }
+            ImGui::Spacing();
 
+            // Live View — find cam config index by model name
+            int lvCiInsp = -1;
+            if (!tcTr.cameraId.empty()) {
+                for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci)
+                    if (m_camConfigs[ci].model == tcTr.cameraId) { lvCiInsp = ci; break; }
+            }
+            if (lvCiInsp >= 0) {
+                ImGui::TextColored(kGray, "Live View"); ImGui::SameLine(90);
+                bool prevLvInsp = m_lvEnabled[lvCiInsp];
+                if (ImGui::Checkbox("##lvcb_tc", &m_lvEnabled[lvCiInsp])
+                    && m_lvEnabled[lvCiInsp] != prevLvInsp)
+                {
+                    if (m_lvEnabled[lvCiInsp]) {
+                        auto res = m_pipe.SendRequest(
+                            std::format(R"({{"cmd":"lv_start","cam":"{}"}})", lvCiInsp));
+                        (void)res;
+                        if (!m_lvThread.joinable()) StartLvThread();
+                        m_configDb.SetSettingInt(
+                            std::format("lv_enabled_{}", lvCiInsp).c_str(), 1);
+                    } else {
+                        auto res = m_pipe.SendRequest(
+                            std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", lvCiInsp));
+                        (void)res;
+                        if (m_lvSrv[lvCiInsp]) {
+                            m_lvSrv[lvCiInsp]->Release(); m_lvSrv[lvCiInsp] = nullptr;
+                        }
+                        m_configDb.SetSettingInt(
+                            std::format("lv_enabled_{}", lvCiInsp).c_str(), 0);
+                    }
+                }
+                if (m_lvEnabled[lvCiInsp]) {
+                    ImGui::Spacing();
+                    ImGui::TextColored(kGray, "LV Opacity"); ImGui::SameLine(90);
+                    int opPct = static_cast<int>(m_lvOpacity * 100.f + 0.5f);
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::SliderInt("##lvop_tc", &opPct, 0, 100, "%d%%")) {
+                        m_lvOpacity = static_cast<float>(opPct) / 100.f;
+                        m_configDb.SetSettingInt("lv_opacity_pct", opPct);
+                    }
+                }
+            }
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopFont();
+    }
 
     // ── Last command result ────────────────────────────────────────────────
     if (!m_lastResult.empty()) {
@@ -3616,64 +3666,7 @@ void App::RenderTimelineBottom() {
         float labelY  = hasFocal ? ty + 2.f : ty + 7.f;
         std::string dynLbl = TrackLabel(tr);
 
-        // ── LV checkbox + opacity slider (camera tracks only) ─────────────
-        // Find camera config index for this track (match by model name)
-        int lvCi = -1;
-        if (tr.IsCamera() && !tr.cameraId.empty()) {
-            for (int ci2 = 0; ci2 < (int)m_camConfigs.size() && ci2 < kMaxCamTracks; ++ci2) {
-                if (m_camConfigs[ci2].model == tr.cameraId) { lvCi = ci2; break; }
-            }
-        }
-        if (lvCi >= 0) {
-            // Checkbox: [ ] before camera name
-            static constexpr float kCbSz = 12.f;
-            float cbX = winPos.x + 2.f;
-            float cbY = ty + (kTrackH - kCbSz) * 0.5f;
-            ImGui::SetCursorScreenPos({cbX, cbY});
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
-            std::string cbId = std::format("##lvcb_{}", ti);
-            bool prevLv = m_lvEnabled[lvCi];
-            if (ImGui::Checkbox(cbId.c_str(), &m_lvEnabled[lvCi]) && m_lvEnabled[lvCi] != prevLv) {
-                if (m_lvEnabled[lvCi]) {
-                    auto res = m_pipe.SendRequest(
-                        std::format(R"({{"cmd":"lv_start","cam":"{}"}})", lvCi));
-                    (void)res;
-                    if (!m_lvThread.joinable()) StartLvThread();
-                    m_configDb.SetSettingInt(
-                        std::format("lv_enabled_{}", lvCi).c_str(), 1);
-                } else {
-                    auto res = m_pipe.SendRequest(
-                        std::format(R"({{"cmd":"lv_stop","cam":"{}"}})", lvCi));
-                    (void)res;
-                    if (m_lvSrv[lvCi]) { m_lvSrv[lvCi]->Release(); m_lvSrv[lvCi] = nullptr; }
-                    m_configDb.SetSettingInt(
-                        std::format("lv_enabled_{}", lvCi).c_str(), 0);
-                }
-            }
-            ImGui::PopStyleVar();
-
-            if (m_lvEnabled[lvCi]) {
-                // Opacity slider fills remaining label width, overlaid with "LV XX%"
-                float slX = cbX + kCbSz + 2.f;
-                float slW = winPos.x + kLabelW - 4.f - slX;
-                ImGui::SetCursorScreenPos({slX, ty + 1.f});
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.f, 1.f));
-                ImGui::SetNextItemWidth(slW);
-                int opPct = static_cast<int>(m_lvOpacity * 100.f + 0.5f);
-                std::string slId = std::format("##lvop_{}", ti);
-                if (ImGui::SliderInt(slId.c_str(), &opPct, 0, 100, "LV %d%%")) {
-                    m_lvOpacity = static_cast<float>(opPct) / 100.f;
-                    m_configDb.SetSettingInt("lv_opacity_pct", opPct);
-                }
-                ImGui::PopStyleVar();
-            } else {
-                // LV off — draw camera name shifted past checkbox
-                dl->AddText({winPos.x + 16.f, labelY}, lc, dynLbl.c_str());
-            }
-        } else {
-            // Audio track or no LV config — name in normal position
-            dl->AddText({winPos.x + 20.f, labelY}, lc, dynLbl.c_str());
-        }
+        dl->AddText({winPos.x + 20.f, labelY}, lc, dynLbl.c_str());
         if (hasFocal) {
             char focalBuf[16];
             snprintf(focalBuf, sizeof(focalBuf), "%d mm", tr.focalMm);
