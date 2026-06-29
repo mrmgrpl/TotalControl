@@ -5670,11 +5670,12 @@ void App::OnFrame() {
     const float totalH = io.DisplaySize.y - menuH;
     const float totalW = io.DisplaySize.x;
 
-    // Timeline height: separator header + ruler + clamp(tracks, 1, 4) rows + padding
-    static constexpr float kTlHdrH   = 26.f;
-    static constexpr float kTlRulerH = 85.f;
-    static constexpr float kTlTrackH = 28.f;
-    static constexpr float kTlPadH   = 10.f;
+    // Timeline height: separator + full ruler section + clamp(tracks,1,4) rows + padding
+    // Ruler section = kMarkerH(14) + kPhaseH(20) + kRelRulerH(22) + kRulerH(85) = 141px
+    static constexpr float kTlHdrH   =  26.f;   // SeparatorText "TIMELINE"
+    static constexpr float kTlRulerH = 141.f;   // all ruler layers combined
+    static constexpr float kTlTrackH =  28.f;   // one track row
+    static constexpr float kTlPadH   =  10.f;
     int   nTl        = std::clamp((int)m_tracks.size(), 1, 4);
     float kTimelineH = kTlHdrH + kTlRulerH + float(nTl) * kTlTrackH + kTlPadH;
 
