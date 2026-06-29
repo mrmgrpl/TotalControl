@@ -3196,6 +3196,24 @@ void App::RenderTimelineBottom() {
     float  cntW    = winW - kLabelW;   // content width (right of labels)
     m_tlScreenTopY = winPos.y;         // drag-above-here = delete; covers separator row
 
+    // Snapshot connected cameras for dynamic track labels (avoids holding mutex in loop)
+    std::vector<CamStatus> camSnap;
+    { std::lock_guard lk(m_camerasMutex); camSnap = m_cameras; }
+
+    // Helper: resolve track label from connection state
+    auto TrackLabel = [&](const TLTrack& tr) -> std::string {
+        if (tr.IsAudio()) return "Audio track";
+        if (tr.cameraId.empty()) return "Photo track";
+        for (const auto& cs : camSnap) {
+            if (cs.model == tr.cameraId && !cs.guid.empty()) {
+                std::string sid = cs.guid.size() >= 4
+                    ? cs.guid.substr(cs.guid.size() - 4) : cs.guid;
+                return cs.model + "  #" + sid;
+            }
+        }
+        return tr.cameraId;   // configured but camera not connected yet
+    };
+
     ImGui::SeparatorText("TIMELINE");
     float y = ImGui::GetCursorScreenPos().y;   // baseline BELOW the separator
 
@@ -3226,10 +3244,37 @@ void App::RenderTimelineBottom() {
         return winPos.x + kLabelW + float(ms - m_tlViewStart) / float(vDur) * cntW;
     };
 
-    // ── Phase bar ─────────────────────────────────────────────────────────
+    // ── Strip #1 label: Contacts ──────────────────────────────────────────
+    dl->AddRectFilled({winPos.x, y}, {winPos.x + kLabelW - 2.f, y + kMarkerH},
+                      IM_COL32(10, 10, 14, 255));
+    dl->AddText({winPos.x + 4.f, y + 1.f}, IM_COL32(70, 75, 100, 200), "Contacts");
+
+    // ── Strip #2 phase bar — label column holds "Fit timeline" button ─────
     float phaseY = y + kMarkerH;
     dl->AddRectFilled({winPos.x, phaseY}, {winPos.x + kLabelW, phaseY + kPhaseH},
-                      IM_COL32(10,10,14,255));
+                      IM_COL32(10, 10, 14, 255));
+    {
+        static constexpr int64_t kFitMarginMs = 5LL * 60 * 1000;
+        ImGui::SetCursorScreenPos({winPos.x + 4.f, phaseY + 1.f});
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.12f,.14f,.20f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.22f,.24f,.34f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.30f,.28f,.12f,1.f));
+        if (ImGui::Button("Fit timeline##tz", ImVec2(kLabelW - 8.f, kPhaseH - 2.f))) {
+            int64_t minMs = INT64_MAX, maxMs = INT64_MIN;
+            for (const auto& tr : m_tracks)
+                for (const auto& b : tr.blocks)
+                    if (b.atMs >= 0) {
+                        minMs = std::min(minMs, b.atMs);
+                        maxMs = std::max(maxMs, b.atMs + BlockDurMs(b));
+                    }
+            if (minMs == INT64_MAX) { minMs = ct.c1Ms; maxMs = ct.c4Ms; }
+            m_tlViewStart = minMs - kFitMarginMs;
+            m_tlViewEnd   = maxMs + kFitMarginMs;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Fit all blocks in view (+/- 5 min margin)");
+        ImGui::PopStyleColor(3);
+    }
 
     int64_t c1=ct.c1Ms, c2=ct.c2Ms, mx=ct.maxMs, c3=ct.c3Ms, c4=ct.c4Ms;
 
@@ -3300,12 +3345,13 @@ void App::RenderTimelineBottom() {
     dl->AddLine({winPos.x + kLabelW, relRulerY + kRelRulerH - 1.f},
                 {winPos.x + winW,    relRulerY + kRelRulerH - 1.f},
                 IM_COL32(28, 28, 46, 255), 1.f);
-    // Corner label
-    dl->AddText({winPos.x + 4.f, relRulerY + 5.f}, IM_COL32(55, 60, 85, 200), "rel");
+    // Strip #3 label: Relative time
+    dl->AddText({winPos.x + 4.f, relRulerY + 4.f}, IM_COL32(70, 75, 100, 200), "Relative");
 
-    // UTC ruler background
+    // UTC ruler background + strip #4 label
     dl->AddRectFilled({winPos.x, rulerY}, {winPos.x + winW, rulerY + kRulerH},
                       IM_COL32(10, 10, 14, 255));
+    dl->AddText({winPos.x + 4.f, rulerY + 4.f}, IM_COL32(70, 75, 100, 200), "UTC");
 
     // Collect ticks: phase transitions + 60s / 10s / 1s interval marks.
     // Fixed-size stack array (no heap alloc): NASA rule 3.
@@ -3474,27 +3520,6 @@ void App::RenderTimelineBottom() {
         }
     }
 
-    // ── Reset-zoom button (ruler label area, bottom-left) ─────────────────
-    static constexpr int64_t kFitMarginMs = 5LL * 60 * 1000; // 5 min
-    ImGui::SetCursorScreenPos({winPos.x + 4.f, rulerY + kRulerH - 22.f});
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.12f,.12f,.18f,1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.22f,.22f,.32f,1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.30f,.28f,.12f,1.f));
-    if (ImGui::SmallButton(" \xe2\x86\x94 fit ##tz")) {  // ↔ fit
-        int64_t minMs = INT64_MAX, maxMs = INT64_MIN;
-        for (const auto& tr : m_tracks)
-            for (const auto& b : tr.blocks)
-                if (b.atMs >= 0) {
-                    minMs = std::min(minMs, b.atMs);
-                    maxMs = std::max(maxMs, b.atMs + BlockDurMs(b));
-                }
-        if (minMs == INT64_MAX) { minMs = ct.c1Ms; maxMs = ct.c4Ms; }
-        m_tlViewStart = minMs - kFitMarginMs;
-        m_tlViewEnd   = maxMs + kFitMarginMs;
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Fit all blocks in view (+/-5 min margin)");
-    ImGui::PopStyleColor(3);
 
     // ── Tracks ────────────────────────────────────────────────────────────
     float tracksY = rulerY + kRulerH;
@@ -3645,7 +3670,8 @@ void App::RenderTimelineBottom() {
         ImU32 lc = tr.IsAudio() ? IM_COL32(150,100,210,255) : IM_COL32(120,148,172,255);
         bool hasFocal = tr.IsCamera() && tr.focalMm > 0;
         float labelY  = hasFocal ? ty + 2.f : ty + 7.f;
-        dl->AddText({winPos.x + 20.f, labelY}, lc, tr.label.c_str());  // shifted right to make room
+        std::string dynLbl = TrackLabel(tr);
+        dl->AddText({winPos.x + 20.f, labelY}, lc, dynLbl.c_str());  // shifted right for triangle marker
         if (hasFocal) {
             char focalBuf[16];
             snprintf(focalBuf, sizeof(focalBuf), "%d mm", tr.focalMm);
