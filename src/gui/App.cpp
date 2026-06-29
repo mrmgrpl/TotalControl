@@ -1144,12 +1144,21 @@ void App::StatusThreadProc() {
                     s.slot1Remaining = JInt(*res, "remaining",       -1);
                     s.slot2Remaining = JInt(*res, "slot2_remaining", -1);
                     s.store          = JStr(*res, "store");
-                    // Preserve lastShotMs across polls
+                    // Carry forward lastShotMs and slot max-remaining across polls
                     {
                         std::lock_guard lk(m_camerasMutex);
-                        for (auto& prev : m_cameras)
-                            if (prev.guid == guid) { s.lastShotMs = prev.lastShotMs; break; }
+                        for (auto& prev : m_cameras) {
+                            if (prev.guid != guid) continue;
+                            s.lastShotMs  = prev.lastShotMs;
+                            s.slot1MaxRem = prev.slot1MaxRem;
+                            s.slot2MaxRem = prev.slot2MaxRem;
+                            break;
+                        }
                     }
+                    if (s.slot1Remaining > 0 && s.slot1Remaining > s.slot1MaxRem)
+                        s.slot1MaxRem = s.slot1Remaining;
+                    if (s.slot2Remaining > 0 && s.slot2Remaining > s.slot2MaxRem)
+                        s.slot2MaxRem = s.slot2Remaining;
                     next.push_back(std::move(s));
                 }
                 std::lock_guard lk(m_camerasMutex);
@@ -4328,19 +4337,26 @@ void App::RenderCameraSection() {
         Row("Focus", s.focus.empty() ? "?" : s.focus.c_str());
         Row("Drive", s.drive.empty() ? "?" : s.drive.c_str());
 
-        // Cards
-        auto CardRow = [&](const char* lbl, const std::string& status, int remaining) {
-            char buf[32];
-            if (remaining >= 0)
-                snprintf(buf, sizeof(buf), "%s  %d", status.c_str(), remaining);
-            else
+        // Cards — show remaining/max (shots) and % free when max is known
+        auto CardRow = [&](const char* lbl, const std::string& status,
+                           int remaining, int maxRem) {
+            char buf[48];
+            if (remaining > 0 && maxRem > 0) {
+                int pct = remaining * 100 / maxRem;
+                snprintf(buf, sizeof(buf), "%d/%d  %d%%", remaining, maxRem, pct);
+            } else if (remaining > 0) {
+                snprintf(buf, sizeof(buf), "%d shots", remaining);
+            } else if (status == "ok") {
+                snprintf(buf, sizeof(buf), "reading...");
+            } else {
                 snprintf(buf, sizeof(buf), "%s", status.c_str());
-            ImVec4 col = (status == "OK") ? kGreen : kRed;
+            }
+            ImVec4 col = (status == "ok") ? kGreen : kRed;
             Row(lbl, buf, col);
         };
 
-        CardRow("C1", s.slot1Status.empty() ? "?" : s.slot1Status, s.slot1Remaining);
-        CardRow("C2", s.slot2Status.empty() ? "?" : s.slot2Status, s.slot2Remaining);
+        CardRow("C1", s.slot1Status, s.slot1Remaining, s.slot1MaxRem);
+        CardRow("C2", s.slot2Status, s.slot2Remaining, s.slot2MaxRem);
 
         // Last shoot latency — full stack (SDK + USB + shutter + confirm)
         if (s.lastShotMs >= 0) {
@@ -5145,14 +5161,19 @@ void App::RenderCamConfigWindows() {
             Row("Focus",  live.focus);
             Row("Drive",  live.drive);
             {
-                std::string s1 = live.slot1Status;
-                if (live.slot1Remaining >= 0)
-                    s1 += std::format("  ({})", live.slot1Remaining);
-                Row("Slot 1", s1);
-                std::string s2 = live.slot2Status;
-                if (live.slot2Remaining >= 0)
-                    s2 += std::format("  ({})", live.slot2Remaining);
-                Row("Slot 2", s2);
+                auto SlotStr = [](int rem, int maxRem, const std::string& status) {
+                    if (rem > 0 && maxRem > 0) {
+                        int pct = rem * 100 / maxRem;
+                        return std::format("{}  {}/{} shots  ({}%)", status, rem, maxRem, pct);
+                    } else if (rem > 0) {
+                        return std::format("{}  {} shots", status, rem);
+                    } else if (status == "ok") {
+                        return status + "  (reading...)";
+                    }
+                    return status;
+                };
+                Row("Slot 1", SlotStr(live.slot1Remaining, live.slot1MaxRem, live.slot1Status));
+                Row("Slot 2", SlotStr(live.slot2Remaining, live.slot2MaxRem, live.slot2Status));
             }
         } else {
             ImGui::TextColored(kDim, "  (Not connected)");

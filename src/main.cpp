@@ -388,9 +388,15 @@ int main() {
         swprintf_s(row, L"  Focus    : %-14s  Area : %-12s  Drive : %s",
                    cs.focusMode.c_str(), cs.focusArea.c_str(), cs.driveMode.c_str());
         LogBanner(row);
-        swprintf_s(row, L"  Card 1   : %-4d shots  [%-8s]  Card 2 : %-4d shots  [%s]",
-                   cs.remainingShots, cs.slot1Status.c_str(),
-                   cs.slot2Remaining, cs.slot2Status.c_str());
+        // remaining==0 at startup = SDK not yet reported (timing); mark as "?"
+        auto CardDesc = [](int rem, const std::wstring& st) -> std::wstring {
+            if (rem > 0)         return std::format(L"{} shots  [{}]", rem, st);
+            if (st == L"no-card") return L"no card  [no-card]";
+            return std::format(L"? shots  [{}]  (reading...)", st);
+        };
+        swprintf_s(row, L"  Card 1   : %-30s  Card 2 : %s",
+                   CardDesc(cs.remainingShots, cs.slot1Status).c_str(),
+                   CardDesc(cs.slot2Remaining, cs.slot2Status).c_str());
         LogBanner(row);
         swprintf_s(row, L"  Store    : %-8s  File : %-10s  Size : %-4s  WB : %-12s  Meter : %s",
                    cs.storeDestination.c_str(), cs.fileType.c_str(), cs.imageSize.c_str(),
@@ -423,9 +429,11 @@ int main() {
         // ── Card capacity — warn if remaining <= 900 ──────────────────────────
         // "no-card" only when both slot_status AND remaining==0 confirm it
         // (slot_status alone is unreliable on ILCE-7RM4A — returns 0 even with card present)
+        // remaining==0 with status=="ok" means SDK hasn't delivered the count yet (startup
+        // timing) — treat as "unknown" and skip the low-capacity warning to avoid false alarm.
         if (cs.slot1Status == L"no-card" && cs.remainingShots == 0) {
             LogWarning(L"*** WARNING: card slot 1 — no card inserted! ***");
-        } else if (cs.remainingShots <= kCardWarnThresh) {
+        } else if (cs.remainingShots > 0 && cs.remainingShots <= kCardWarnThresh) {
             wchar_t buf[128];
             swprintf_s(buf, L"*** WARNING: card 1 — only %d shots remaining! ***",
                        cs.remainingShots);
@@ -433,7 +441,7 @@ int main() {
         }
         if (cs.slot2Status == L"no-card" && cs.slot2Remaining == 0) {
             LogWarning(L"*** WARNING: card slot 2 — no card inserted! ***");
-        } else if (cs.slot2Remaining <= kCardWarnThresh) {
+        } else if (cs.slot2Remaining > 0 && cs.slot2Remaining <= kCardWarnThresh) {
             wchar_t buf[128];
             swprintf_s(buf, L"*** WARNING: card 2 — only %d shots remaining! ***",
                        cs.slot2Remaining);

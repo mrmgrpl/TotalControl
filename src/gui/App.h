@@ -50,6 +50,8 @@ struct CamStatus {
     std::string slot2Status;
     int         slot1Remaining = -1;
     int         slot2Remaining = -1;
+    int         slot1MaxRem   = -1;  // max remaining seen this session → used for % calc
+    int         slot2MaxRem   = -1;
     std::string store;
     int         lastShotMs   = -1;
 };
