@@ -288,6 +288,8 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Camera Track Mode (Sun/Moon/Horizon)** | **DONE 2026-06-29** |
 | **Card remaining shots false alarm fix** | **DONE 2026-06-29** |
 | **Card capacity display (shots/max/%)** | **DONE 2026-06-29** |
+| **GUI layout refactor — 3 kolumny** | **DONE 2026-06-30** |
+| **Burst block fix** | **DONE 2026-06-30** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -569,6 +571,33 @@ Pearl-white at limb (`sunR*1.06`) → deep amber outer corona (`sunR*9`). Replac
 - Apply button: `SetBeApiKey(newKey)` + `m_configDb.SetSetting("be_api_key", newKey.c_str())`
 - Instructions: contact besselianelements.com for key; without key → local BE model; with key → IQP API
 - `m_showOptions` flag, `m_beApiKeyBuf[48]`, `m_beKeyVisible` in `App.h`
+
+### TotalControlGUI — GUI layout refactor 3-column (complete 2026-06-30)
+
+Layout zmieniony z 4-kolumnowego na **3-kolumnowy**: Left(300px) | Center(auto) | Right(270px).
+
+**Lewa kolumna — `RenderLeftColumn()`** (sekcje kolejno):
+- **ECLIPSE**: combo + pola read-only z niebieskim tłem (domyślny `ImGuiCol_FrameBg`): Eclipse type / Duration at GE / GE location (każde 100px, opis po prawej). Wybór zaćmienia → auto-load GE lat/lon → TriggerIqpFetch.
+- **LOCATION**: DMS Latitude / Longitude (opis po prawej od N/S button); Altitude 100px (opis po prawej); centrowalny status IN TOTALITY ZONE / OUTSIDE TOTALITY.
+- **TIME**: przycisk "Calculate contact times"; 3 zegary (UTC/Home/Loc z gear); tabela 5-kolumn (IQP/BE/Loc/GE) × C1/C2/Max/C3/C4/Rise/Set.
+- **SERVER** (był HARDWARE): przycisk trójstanowy — "Connect cameras" → pomarańczowy "Connection in progress..." (m_connecting=true) → zielony "Cameras are connected"; Test picture; Disconnect; CAMERAS.
+
+**Prawa kolumna** — Inspector + EXECUTE (RenderSequencerButtons przeniesiony pod Block Inspector).
+
+**SKY VIEW SIMULATOR — pasek statusu**: po `Obs=XX.XX%` wyświetlane countdowns w jednej linii:
+`C1: Xd HH:MM:SS  C2: …  Max: …  C3: …  C4: …` — kolor zgodny z typem zaćmienia.
+
+**PITFALLs**:
+- `FormatCountdown` używana w `RenderSolarView` (wcześniej niż definicja) → forward declaration przed `RenderStatusColumn`
+- `m_connecting` (bool w App.h) reset automatyczny gdy `connected=true` w każdym frame
+
+### TotalControlGUI — Burst block fix (complete 2026-06-30)
+
+**Przyczyna**: `BuildBlockCmd(Burst)` nie wysyłał `"count"` → `CommandHandler` widział `count=1` → `Shoot()` zwalniał migawkę po 1 klatce (275ms zamiast burstDurMs).
+
+**Fix w `CommandHandler.cpp`**:
+- `isContinuousDrive = driveStr.contains("cont") || driveStr.contains("burst")` → wchodzi w ścieżkę burst niezależnie od count
+- Gdy `isContinuousDrive && count <= 1`: `count = 9999` (sentinel) → `Shoot(count=9999, holdForBurst=true)` trzyma migawkę przez pełny `timeout_ms = burstDurMs + 2000ms`
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 

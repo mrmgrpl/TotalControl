@@ -90,6 +90,11 @@ private:
     void RenderAboutModal();
     void RenderOptionsWindow();      // floating Options window (API keys, etc.)
     void RenderSequencerButtons();   // TEST RUN / STOP / RUN / STOP RUN in Col1
+    void RenderLeftColumn();         // new single 270px left column
+    void RenderLocationSection();    // observer DMS + totality status
+    void RenderTimeSection();        // 3 clocks + contact comparison table + countdowns
+    void RenderHardwareSection();    // connection + camera status
+    int64_t FindSunAltCrossing(bool findRise) const;  // scan EPH for sunrise/sunset
     void ExportTimelineJson();
 
     // Camera configuration
@@ -129,6 +134,7 @@ private:
 
     int         m_reconnectCountdown = 0;
     std::string m_lastResult;
+    bool        m_connecting = false;
 
     bool m_showStyleEditor = false;
     bool m_showDemoWindow  = false;
@@ -210,6 +216,7 @@ private:
     std::atomic<bool>  m_suviFetching{false};
     std::atomic<int64_t> m_suviFetchedAtMs{0};  // set at completion, not start → interval from end of fetch
     float              m_suviOpacity     = 1.0f;  // 0–1; < 0.05 = hidden (persisted to DB)
+    std::string        m_suviChannel     = "Fe171"; // selected SUVI wavelength band (persisted to DB)
     bool               m_suviJustCleared = false; // set by TriggerSuviFetch, resets s_prevSrvN
 
     // ── JPL Horizons ephemeris ────────────────────────────────────────────────
@@ -235,6 +242,7 @@ private:
     std::mutex         m_iqpMutex;
     ContactTimes       m_contacts;
     ContactTimes       m_beResult;
+    ContactTimes       m_geResult;   // BesselCalc at eclipse GE lat/lon
     std::atomic<int>   m_iqpState{0};  // 0=Idle 1=Loading 2=Ready 3=Error
     float              m_iqpFetchedLat = 1e9f;
     float              m_iqpFetchedLon = 1e9f;

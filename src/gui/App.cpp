@@ -278,6 +278,9 @@ void App::TriggerIqpFetch() {
     // Besselian: synchronous (fast, always available immediately)
     BesselianElements bel = m_dataDb.LoadBesselianElements(y, mo, d);
     m_beResult = CalcBesselian(bel, lat, lon, static_cast<double>(altM));
+    // GE column: same elements but at eclipse geographic maximum lat/lon, alt=0
+    m_geResult = CalcBesselian(bel, static_cast<double>(e.latGe),
+                                    static_cast<double>(e.lonGe), 0.0);
 
     // IQP: asynchronous, no BE fallback (results shown side-by-side)
     m_iqpState.store(1);
@@ -501,14 +504,21 @@ void App::SuviThreadProc() {
     assert(m_d3dDev != nullptr);   // rule 5: D3D device must be set before SUVI fetch is triggered
     CoInitialize(nullptr);
 
-    // SUVI Fe171 filenames have variable SS and trailing digit — cannot guess.
+    // Capture channel at thread start — m_suviChannel only changes on main thread when not fetching.
+    const std::string channel = m_suviChannel;
+
+    // SUVI filenames have variable SS and trailing digit — cannot guess.
     // Strategy: fetch CDN directory listing, parse actual 1200x1200 filenames,
     // take last 300 (alphabetical = chronological), download each.
     static constexpr int    kNumFrames    = 300;
     static constexpr size_t kMaxJpegBytes = 2u * 1024u * 1024u;   // 1200x1200 ~1.35 MB each
     static constexpr size_t kMaxDirBytes  = 20u * 1024u * 1024u;  // directory listing ~10 MB
 
-    std::wstring cacheDir = ExeDir() + L"\\suvi_cache";
+    // Per-channel cache directory: suvi_cache/<channel>/
+    std::wstring cacheBase = ExeDir() + L"\\suvi_cache";
+    CreateDirectoryW(cacheBase.c_str(), nullptr);
+    std::wstring channelW(channel.begin(), channel.end());
+    std::wstring cacheDir = cacheBase + L"\\" + channelW;
     CreateDirectoryW(cacheDir.c_str(), nullptr);
 
     // ── WIC factory ──────────────────────────────────────────────────────────
@@ -608,8 +618,12 @@ void App::SuviThreadProc() {
     };
 
     // ── Step 1: fetch CDN directory listing and parse 1200x1200 filenames ────
-    LogLine("SUVI: fetching directory listing…");
-    auto dirHtml = httpGet(L"/GOES19/SUVI/FD/Fe171/", kMaxDirBytes);
+    const std::string suffix   = "_GOES19-SUVI-" + channel + "-1200x1200.jpg";
+    const std::wstring dirPath = L"/GOES19/SUVI/FD/" + channelW + L"/";
+    const std::wstring cdnBase = L"/GOES19/SUVI/FD/" + channelW + L"/";
+
+    LogLine(std::format("SUVI: fetching directory listing for channel {}…", channel));
+    auto dirHtml = httpGet(dirPath.c_str(), kMaxDirBytes);
     if (dirHtml.empty()) {
         LogLine("SUVI: directory fetch failed");
         wicFac->Release();
@@ -618,19 +632,18 @@ void App::SuviThreadProc() {
         m_suviFetching.store(false); CoUninitialize(); return;
     }
 
-    // Scan for "NNNNNNNNNNNNNN_GOES19-SUVI-Fe171-1200x1200.jpg" (14-digit timestamp)
-    static constexpr std::string_view kSuffix = "_GOES19-SUVI-Fe171-1200x1200.jpg";
+    // Scan for "NNNNNNNNNNNNNN_GOES19-SUVI-<channel>-1200x1200.jpg" (14-digit timestamp)
     std::vector<std::string> names;
     const char* p = reinterpret_cast<const char*>(dirHtml.data());
     const char* end = p + dirHtml.size();
-    // Rule 2: each iteration advances p by at least kSuffix.size() (32 chars),
-    // so the loop executes at most dirHtml.size() / kSuffix.size() times.
-    const size_t kMaxIter = kMaxDirBytes / kSuffix.size() + 1;   // ≤ 655 362 with 20 MB cap
+    // Rule 2: each iteration advances p by at least suffix.size() chars,
+    // so the loop executes at most dirHtml.size() / suffix.size() times.
+    const size_t kMaxIter = kMaxDirBytes / suffix.size() + 1;
     size_t iterCount = 0;
     while (p < end) {
         assert(++iterCount <= kMaxIter);  // rule 2: explicit upper bound
         // Find suffix
-        const char* hit = std::search(p, end, kSuffix.begin(), kSuffix.end());
+        const char* hit = std::search(p, end, suffix.begin(), suffix.end());
         if (hit == end) break;
         // Walk back 14 digits
         if (hit < p + 14) { p = hit + 1; continue; }
@@ -639,11 +652,11 @@ void App::SuviThreadProc() {
         for (int i = 0; i < 14; ++i)
             if (nameStart[i] < '0' || nameStart[i] > '9') { allDigits = false; break; }
         if (allDigits) {
-            std::string name(nameStart, 14 + kSuffix.size());
+            std::string name(nameStart, 14 + suffix.size());
             if (names.empty() || names.back() != name)
                 names.push_back(std::move(name));
         }
-        p = hit + kSuffix.size();
+        p = hit + suffix.size();
     }
     dirHtml.clear();   // free ~10 MB
 
@@ -716,7 +729,7 @@ void App::SuviThreadProc() {
             if (!jpg.empty()) ++fromCache;
         }
         if (jpg.empty()) {
-            std::wstring cdnPath = L"/GOES19/SUVI/FD/Fe171/" + wname;
+            std::wstring cdnPath = cdnBase + wname;
             jpg = httpGet(cdnPath.c_str(), kMaxJpegBytes);
             if (!jpg.empty()) { writeCache(wname, jpg); ++downloaded; }
         }
@@ -1855,7 +1868,7 @@ void App::RenderSequencerButtons() {
     const ImVec2 kBtnSz(-1, 30);
 
     ImGui::Spacing();
-    ImGui::SeparatorText("SEQUENCER");
+    ImGui::SeparatorText("EXECUTE");
 
     ImGui::PushFont(m_fontMono);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
@@ -2014,6 +2027,8 @@ void App::RenderSequencerButtons() {
     ImGui::Spacing();
 }
 
+static void FormatCountdown(int64_t diffMs, char* buf, int len);  // defined below
+
 // ─── Status column (middle-right of top area) ─────────────────────────────────
 
 void App::RenderStatusColumn() {
@@ -2024,6 +2039,8 @@ void App::RenderStatusColumn() {
 
 void App::RenderSolarView() {
     assert(m_fontMono != nullptr);
+    ImGui::SeparatorText("SKY VIEW SIMULATOR");
+    ImGui::Spacing();
     // Upload any newly decoded SUVI frames to D3D11 (render-thread only)
     if (m_suviNewFrames.load()) CreateSuviTextures();
     // Periodic re-fetch: refresh every 30 min so the animation stays current
@@ -2718,6 +2735,38 @@ void App::RenderSolarView() {
                       : (obsPct >= 50.f)  ? ImVec4(.95f,.6f, .1f, 1.f)    // deep partial
                       :                     ImVec4(.5f, .5f, .55f, 1.f);   // early partial
         ImGui::TextColored(obsCol, " Obs=%.2f%%", obsPct);
+
+        // Contact countdowns — one line to the right of Obs
+        {
+            ContactTimes ctBar;
+            { std::lock_guard lk(m_iqpMutex); ctBar = m_contacts; }
+            if (!ctBar.valid) ctBar = m_beResult;
+            if (ctBar.valid) {
+                int64_t nowBar = UtcNowMs();
+                ImVec4 cdBarCol = (obsPct >= 99.9f) ? ImVec4{0.95f,0.80f,0.20f,1.f}
+                                : (obsPct >= 0.1f)  ? ImVec4{0.85f,0.55f,0.15f,1.f}
+                                                    : ImVec4{0.55f,0.55f,0.60f,1.f};
+                struct BEvt { const char* lbl; int64_t ms; };
+                BEvt evts[] = {
+                    {"C1",ctBar.c1Ms},{"C2",ctBar.c2Ms},
+                    {"Max",ctBar.maxMs},{"C3",ctBar.c3Ms},{"C4",ctBar.c4Ms}
+                };
+                static constexpr int kBN = 5;
+                static_assert(sizeof(evts)/sizeof(evts[0]) == kBN);
+                char line[256]; line[0] = '\0'; int pos = 0;
+                for (int i = 0; i < kBN; ++i) {
+                    if (evts[i].ms <= 0) continue;
+                    char cd[32]; FormatCountdown(evts[i].ms - nowBar, cd, sizeof(cd));
+                    char seg[48];
+                    int segLen = snprintf(seg, sizeof(seg), "  %s: %s", evts[i].lbl, cd);
+                    if (segLen > 0 && pos + segLen < (int)sizeof(line) - 1) {
+                        memcpy(line + pos, seg, segLen); pos += segLen;
+                    }
+                }
+                line[pos] = '\0';
+                if (pos > 0) { ImGui::SameLine(); ImGui::TextColored(cdBarCol, "%s", line); }
+            }
+        }
     } else if (m_ephFetching.load()) {
         ImGui::TextColored({0.55f,0.75f,0.95f,1.f}, "EPH: fetching...");
     } else {
@@ -2732,8 +2781,8 @@ void App::RenderInspectorColumn() {
     static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
     static const ImVec4 kDim  {0.28f, 0.28f, 0.32f, 1.0f};
 
-    // ── ECLIPSE SIMULATOR CONFIG ──────────────────────────────────────────
-    ImGui::SeparatorText("ECLIPSE SIMULATOR CONFIG");
+    // ── SIMULATOR CONFIG ──────────────────────────────────────────────────
+    ImGui::SeparatorText("SIMULATOR CONFIG");
     ImGui::Spacing();
 
     // ── Opacity sliders: SUVI + per-camera LV ─────────────────────────────
@@ -2759,15 +2808,58 @@ void App::RenderInspectorColumn() {
         int suviPct = static_cast<int>(m_suviOpacity * 100.f + 0.5f);
         PushSliderColor(suviPct >= 5);
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::SliderInt("##suvi_op", &suviPct, 0, 100, "SUVI  %d%%")) {
+        if (ImGui::SliderInt("##suvi_op", &suviPct, 0, 100, "GOES-19 SUVI  %d%%")) {
             m_suviOpacity = suviPct / 100.f;
             m_configDb.SetSettingInt("suvi_opacity_pct", suviPct);
         }
         ImGui::PopStyleColor(4);
     }
+    ImGui::PopFont();
+
+    // SUVI channel selector
+    static constexpr const char* kSuviChannels[] = {
+        "Fe094", "Fe131", "Fe171", "Fe195", "Fe284", "He304", "R2G4B3"
+    };
+    static constexpr int kSuviChannelCount = 7;
+    int curCh = 2; // default Fe171
+    for (int i = 0; i < kSuviChannelCount; ++i)
+        if (m_suviChannel == kSuviChannels[i]) { curCh = i; break; }
+    ImGui::PushFont(m_fontMono);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::Combo("##suvi_ch", &curCh, kSuviChannels, kSuviChannelCount)) {
+        if (!m_suviFetching.load()) {
+            m_suviChannel = kSuviChannels[curCh];
+            m_configDb.SetSetting("suvi_channel", m_suviChannel.c_str());
+            TriggerSuviFetch();
+        }
+    }
+    ImGui::PopFont();
+    ImGui::Spacing();
+
+    // SUVI alignment: scale + offsets — value+buttons white, label gray
+    bool suviChanged = false;
+    ImGui::PushFont(m_fontMono);
+    ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_disc", &m_suviHalfQ,       0.005f, 0.02f, "%8.4f")) suviChanged = true;
+    ImGui::SameLine(); ImGui::TextColored(kGray, "Disc scale");
+    ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_foot", &m_suviFooterPx,    1.0f, 5.0f, "%8.4f")) suviChanged = true;
+    ImGui::SameLine(); ImGui::TextColored(kGray, "Footer offset");
+    ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_horz", &m_suviCorrRightPx, 1.0f, 5.0f, "%8.4f")) suviChanged = true;
+    ImGui::SameLine(); ImGui::TextColored(kGray, "Horizontal offset");
+    ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_vert", &m_suviCorrUpPx,    1.0f, 5.0f, "%8.4f")) suviChanged = true;
+    ImGui::SameLine(); ImGui::TextColored(kGray, "Vertical offset");
+    ImGui::PopFont();
+    if (suviChanged) {
+        m_configDb.SetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str());
+        m_configDb.SetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str());
+        m_configDb.SetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str());
+        m_configDb.SetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str());
+        LogLine(std::format("SUVI align: halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f}",
+                            m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx));
+    }
     ImGui::Spacing();
 
     // Per-camera LV opacity sliders — sorted by focal length ascending
+    ImGui::PushFont(m_fontMono);
     {
         struct LvSlEnt { int focalMm; int ci; };
         LvSlEnt ents[kMaxCamTracks]; int nEnts = 0;
@@ -2818,23 +2910,6 @@ void App::RenderInspectorColumn() {
     }
     ImGui::PopFont();
     ImGui::Spacing();
-    ImGui::SetNextItemWidth(-1);
-    bool suviChanged = false;
-    ImGui::PushFont(m_fontMono);
-    if (ImGui::InputFloat("Skala dysku",   &m_suviHalfQ,       0.005f, 0.02f, "%.4f")) suviChanged = true;
-    if (ImGui::InputFloat("Offset stopki", &m_suviFooterPx,    1.0f,   5.0f,  "%.1f")) suviChanged = true;
-    if (ImGui::InputFloat("Korekta prawo", &m_suviCorrRightPx, 1.0f,   5.0f,  "%.1f")) suviChanged = true;
-    if (ImGui::InputFloat("Korekta gora",  &m_suviCorrUpPx,    1.0f,   5.0f,  "%.1f")) suviChanged = true;
-    ImGui::PopFont();
-    if (suviChanged) {
-        m_configDb.SetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str());
-        m_configDb.SetSetting("suvi_footer_px",     std::to_string(m_suviFooterPx).c_str());
-        m_configDb.SetSetting("suvi_corr_right_px", std::to_string(m_suviCorrRightPx).c_str());
-        m_configDb.SetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str());
-        LogLine(std::format("SUVI align: halfQ={:.4f} foot={:.1f} corrR={:.1f} corrU={:.1f}",
-                            m_suviHalfQ, m_suviFooterPx, m_suviCorrRightPx, m_suviCorrUpPx));
-    }
-    ImGui::Spacing();
 
     // ── Action block palette ───────────────────────────────────────────────
     ImGui::Spacing();
@@ -2849,18 +2924,23 @@ void App::RenderInspectorColumn() {
         {BlockType::Audio,   "Audio",   IM_COL32(140, 80,200,255)},
     };
 
-    for (auto& pe : pal) {
+    // 2×2 grid — half-width cells, two rows
+    const float palAvail = ImGui::GetContentRegionAvail().x;
+    const float palGap   = ImGui::GetStyle().ItemSpacing.x;
+    const float palHW    = (palAvail - palGap) / 2.f - 10.f;
+    for (int pi = 0; pi < 4; ++pi) {
+        auto& pe = pal[pi];
+        if (pi == 1 || pi == 3) ImGui::SameLine(0, palGap);
         ImGui::PushID((int)pe.type);
-        float    pw  = ImGui::GetContentRegionAvail().x;
-        ImVec2   pos = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##pb", {pw, 34.0f});
-        bool     hov = ImGui::IsItemHovered();
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##pb", {palHW, 34.0f});
+        bool hov = ImGui::IsItemHovered();
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(pos, {pos.x+pw, pos.y+34.f},
+        dl->AddRectFilled(pos, {pos.x+palHW, pos.y+34.f},
                           hov ? IM_COL32(45,45,58,255) : IM_COL32(20,20,28,255), 4.f);
         dl->AddRectFilled({pos.x+5, pos.y+8}, {pos.x+17, pos.y+26}, pe.col, 2.f);
         dl->AddText({pos.x+22, pos.y+9}, IM_COL32(200,200,215,255), pe.name);
-        if (hov) dl->AddRect(pos, {pos.x+pw, pos.y+34.f}, pe.col, 4.f, 0, 1.f);
+        if (hov) dl->AddRect(pos, {pos.x+palHW, pos.y+34.f}, pe.col, 4.f, 0, 1.f);
         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             const char* pid = (pe.type == BlockType::Audio) ? "TL_AUD_BLOCK" : "TL_CAM_BLOCK";
             ImGui::SetDragDropPayload(pid, &pe.type, sizeof(BlockType));
@@ -2871,7 +2951,7 @@ void App::RenderInspectorColumn() {
             ImGui::PopFont();
             ImGui::EndDragDropSource();
         }
-        ImGui::Spacing();
+        if (pi == 1 || pi == 3) ImGui::Spacing();
         ImGui::PopID();
     }
 
@@ -2895,28 +2975,103 @@ void App::RenderInspectorColumn() {
         ImGui::PushFont(m_fontMono);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
 
-        // Type label (colour-coded)
-        ImU32  tc = BlockColor(b.type);
-        ImVec4 tcv{float(tc&0xff)/255.f, float((tc>>8)&0xff)/255.f,
-                   float((tc>>16)&0xff)/255.f, 1.f};
-        ImGui::TextColored(kGray, "Type"); ImGui::SameLine(52);
-        ImGui::TextColored(tcv, "%s", BlockTypeName(b.type));
+        // Field width: available minus widest label ("Burst duration") minus two spacings
+        const float kFldW = ImGui::GetContentRegionAvail().x
+                          - ImGui::CalcTextSize("Burst duration").x
+                          - ImGui::GetStyle().ItemSpacing.x * 2.f;
+
+        // Play button — audio blocks only, full width, before Type
+        if (b.type == BlockType::Audio && !b.audioFile.empty()) {
+            if (ImGui::Button("Play##aud_top", ImVec2(-1, 0))) {
+                std::wstring wrel = Utf8ToW(b.audioFile);
+                for (auto& c : wrel) if (c == L'/') c = L'\\';
+                MciPlayAsync(ExeDir() + L"\\" + wrel);
+            }
+        }
+
+        // Type — read-only InputText, same style as other fields
+        {
+            char typeBuf[16];
+            snprintf(typeBuf, sizeof(typeBuf), "%s", BlockTypeName(b.type));
+            ImGui::SetNextItemWidth(kFldW);
+            ImGui::InputText("##type_ro", typeBuf, sizeof(typeBuf), ImGuiInputTextFlags_ReadOnly);
+            ImGui::SameLine(); ImGui::TextColored(kGray, "Type");
+        }
+
+        // UTC start time — read-only, same style as other fields
+        {
+            char atBuf[16] = "--:--:--.---";
+            if (b.atMs > 0) {
+                int64_t s = b.atMs / 1000;
+                snprintf(atBuf, sizeof(atBuf), "%02d:%02d:%02d.%03d",
+                         (int)((s/3600)%24),(int)((s/60)%60),(int)(s%60),(int)(b.atMs%1000));
+            }
+            ImGui::SetNextItemWidth(kFldW);
+            ImGui::InputText("##at_ro", atBuf, sizeof(atBuf), ImGuiInputTextFlags_ReadOnly);
+            ImGui::SameLine(); ImGui::TextColored(kGray, "Start UTC");
+        }
 
         if (b.type != BlockType::Audio) {
-            char buf[32];
-            ImGui::TextColored(kGray, "SS");   ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
-            snprintf(buf, sizeof(buf), "%s", b.ss.c_str());
-            if (ImGui::InputText("##ss", buf, sizeof(buf))) { b.ss = buf; m_tlDirty = true; }
+            // Shutter speed combo — Sony standard values
+            static constexpr const char* kSS[] = {
+                "30s","25s","20s","15s","13s","10s","8s","6s","5s","4s",
+                "3.2s","2.5s","2s","1.6s","1.3s","1s","0.8s","0.6s","0.5s","0.4s",
+                "1/3","1/4","1/5","1/6","1/8","1/10","1/13","1/15","1/20","1/25",
+                "1/30","1/40","1/50","1/60","1/80","1/100","1/125","1/160","1/200",
+                "1/250","1/320","1/400","1/500","1/640","1/800","1/1000","1/1250",
+                "1/1600","1/2000","1/2500","1/3200","1/4000","1/5000","1/6400","1/8000"
+            };
+            static constexpr int kSSN = 55;
+            const char* ssPrev = b.ss.empty() ? "1/100" : b.ss.c_str();
+            ImGui::SetNextItemWidth(kFldW);
+            if (ImGui::BeginCombo("##ss_c", ssPrev)) {
+                for (int i = 0; i < kSSN; ++i) {
+                    bool sel = (b.ss == kSS[i]);
+                    if (ImGui::Selectable(kSS[i], sel)) { b.ss = kSS[i]; m_tlDirty = true; }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine(); ImGui::TextColored(kGray, "SS");
 
-            ImGui::TextColored(kGray, "ISO");  ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputInt("##iso", &b.iso, 0)) m_tlDirty = true;
+            // ISO combo — Sony standard values
+            static constexpr int kISO[] = {
+                50,64,80,100,125,160,200,250,320,400,500,640,800,
+                1000,1250,1600,2000,2500,3200,4000,5000,6400,8000,
+                10000,12800,16000,20000,25600,32000,40000,51200,102400
+            };
+            static constexpr int kISOn = 32;
+            char isoPrev[16]; snprintf(isoPrev, sizeof(isoPrev), "%d", b.iso > 0 ? b.iso : 100);
+            ImGui::SetNextItemWidth(kFldW);
+            if (ImGui::BeginCombo("##iso_c", isoPrev)) {
+                for (int i = 0; i < kISOn; ++i) {
+                    char lb[16]; snprintf(lb, sizeof(lb), "%d", kISO[i]);
+                    bool sel = (b.iso == kISO[i]);
+                    if (ImGui::Selectable(lb, sel)) { b.iso = kISO[i]; m_tlDirty = true; }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine(); ImGui::TextColored(kGray, "ISO");
 
-            ImGui::TextColored(kGray, "f/");   ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
-            snprintf(buf, sizeof(buf), "%s", b.fstop.c_str());
-            if (ImGui::InputText("##fstop", buf, sizeof(buf))) { b.fstop = buf; m_tlDirty = true; }
+            // F-stop combo — Sony standard values
+            static constexpr const char* kFS[] = {
+                "1.4","1.6","1.8","2.0","2.2","2.5","2.8","3.2","3.5",
+                "4.0","4.5","5.0","5.6","6.3","7.1","8.0","9.0","10",
+                "11","13","14","16","18","20","22"
+            };
+            static constexpr int kFSN = 25;
+            const char* fsPrev = b.fstop.empty() ? "8.0" : b.fstop.c_str();
+            ImGui::SetNextItemWidth(kFldW);
+            if (ImGui::BeginCombo("##fs_c", fsPrev)) {
+                for (int i = 0; i < kFSN; ++i) {
+                    bool sel = (b.fstop == kFS[i]);
+                    if (ImGui::Selectable(kFS[i], sel)) { b.fstop = kFS[i]; m_tlDirty = true; }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine(); ImGui::TextColored(kGray, "f-number");
         }
 
         if (b.type == BlockType::Bracket) {
@@ -2947,8 +3102,7 @@ void App::RenderInspectorColumn() {
             for (int i = 0; i < kBrkN; ++i)
                 if (b.ev == kBrk[i].ev && b.count == kBrk[i].count) { idx = i; break; }
 
-            ImGui::TextColored(kGray, "Bracket"); ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
+            ImGui::SetNextItemWidth(kFldW);
             if (ImGui::BeginCombo("##brk", kBrk[idx].label)) {
                 for (int i = 0; i < kBrkN; ++i) {
                     if (i > 0 && strcmp(kBrk[i].ev, kBrk[i-1].ev) != 0)
@@ -2962,6 +3116,7 @@ void App::RenderInspectorColumn() {
                 }
                 ImGui::EndCombo();
             }
+            ImGui::SameLine(); ImGui::TextColored(kGray, "Bracket");
         }
 
         if (b.type == BlockType::Burst) {
@@ -2977,8 +3132,7 @@ void App::RenderInspectorColumn() {
             for (int i = 0; i < 4; ++i)
                 if (b.burstDrive == kModes[i].drive) { modeIdx = i; break; }
 
-            ImGui::TextColored(kGray, "Drive");  ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
+            ImGui::SetNextItemWidth(kFldW);
             if (ImGui::BeginCombo("##bdrive", kModes[modeIdx].label)) {
                 for (int i = 0; i < 4; ++i) {
                     char lbl[24];
@@ -2992,15 +3146,16 @@ void App::RenderInspectorColumn() {
                 }
                 ImGui::EndCombo();
             }
+            ImGui::SameLine(); ImGui::TextColored(kGray, "Drive speed");
 
-            ImGui::TextColored(kGray, "Dur s");  ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
+            ImGui::SetNextItemWidth(kFldW);
             float ds = b.burstDurMs / 1000.f;
             if (ImGui::InputFloat("##bdur", &ds, 0.f, 0.f, "%.1f")) {
                 if (std::isfinite(ds) && ds >= 0.f)
                     b.burstDurMs = int32_t(std::min(ds, 3600.f) * 1000.f);
                 m_tlDirty = true;
             }
+            ImGui::SameLine(); ImGui::TextColored(kGray, "Burst duration");
 
             // Informational: estimated frame count
             float fps  = kModes[modeIdx].fps;
@@ -3012,9 +3167,8 @@ void App::RenderInspectorColumn() {
         if (b.type == BlockType::Audio) {
             // Combo: MP3 files from eclipse_audio_*/ dirs — scanned once per combo open.
             // audioFile stores relative path: "eclipse_audio_PL\01_pre_c1_10min.mp3"
-            ImGui::TextColored(kGray, "File"); ImGui::SameLine(52);
             const char* preview = b.audioFile.empty() ? "(none)" : b.audioFile.c_str();
-            ImGui::SetNextItemWidth(-1);
+            ImGui::SetNextItemWidth(kFldW);
             static std::vector<std::string> s_audioFiles;
             static bool                     s_audScanned = false;
             if (ImGui::BeginCombo("##afc", preview)) {
@@ -3079,10 +3233,16 @@ void App::RenderInspectorColumn() {
             } else {
                 s_audScanned = false;
             }
+            ImGui::SameLine(); ImGui::TextColored(kGray, "File");
 
             // Duration (auto-detected from MP3 on file select)
-            ImGui::TextColored(kGray, "Dur"); ImGui::SameLine(52);
-            ImGui::Text("%.1f s", b.audioDurMs / 1000.f);
+            {
+                char durBuf[16];
+                snprintf(durBuf, sizeof(durBuf), "%.1f s", b.audioDurMs / 1000.f);
+                ImGui::SetNextItemWidth(kFldW);
+                ImGui::InputText("##aud_dur_ro", durBuf, sizeof(durBuf), ImGuiInputTextFlags_ReadOnly);
+                ImGui::SameLine(); ImGui::TextColored(kGray, "Duration");
+            }
 
             // Scan status — shown while AudioScanThreadProc is active or after
             {
@@ -3096,27 +3256,21 @@ void App::RenderInspectorColumn() {
                                        "Cached: %d files", total);
             }
 
-            // Preview — fire-and-forget on detached thread
-            if (!b.audioFile.empty()) {
-                if (ImGui::Button("\xe2\x96\xb6 Play##aud", ImVec2(-1, 0))) {
-                    std::wstring wrel = Utf8ToW(b.audioFile);
-                    for (auto& c : wrel) if (c == L'/') c = L'\\';
-                    MciPlayAsync(ExeDir() + L"\\" + wrel);
-                }
-            }
         }
 
         // Label
         {
             char lbuf[64];
-            ImGui::TextColored(kGray, "Label"); ImGui::SameLine(52);
-            ImGui::SetNextItemWidth(-1);
+            ImGui::SetNextItemWidth(kFldW);
             snprintf(lbuf, sizeof(lbuf), "%s", b.label.c_str());
             if (ImGui::InputText("##lbl", lbuf, sizeof(lbuf))) { b.label = lbuf; m_tlDirty = true; }
+            ImGui::SameLine(); ImGui::TextColored(kGray, "Label");
         }
 
         bool prevSnap = b.snapToPrev;
-        ImGui::Checkbox("Snap to prev##snp", &b.snapToPrev);
+        ImGui::PushStyleColor(ImGuiCol_Text, kGray);
+        ImGui::Checkbox("Snap to previous##snp", &b.snapToPrev);
+        ImGui::PopStyleColor();
         if (b.snapToPrev != prevSnap) {
             if (b.snapToPrev && m_selBlock > 0) {
                 auto& prev = m_tracks[m_selTrack].blocks[m_selBlock - 1];
@@ -3129,41 +3283,13 @@ void App::RenderInspectorColumn() {
         }
         ImGui::Spacing();
 
-        // Computed duration
-        int64_t dur = BlockDurMs(b);
-        char durBuf[24];
-        if (dur < 1000) snprintf(durBuf,sizeof(durBuf), "%lldms", dur);
-        else            snprintf(durBuf,sizeof(durBuf), "%.2fs", dur/1000.0);
-        ImGui::TextColored(kDim, "Dur:"); ImGui::SameLine(52);
-        ImGui::TextColored(kGray, "%s", durBuf);
-
-        // UTC time
-        if (b.atMs > 0) {
-            int64_t s = b.atMs / 1000;
-            char atBuf[16];
-            snprintf(atBuf, sizeof(atBuf), "%02d:%02d:%02d.%03d",
-                     (int)((s/3600)%24),(int)((s/60)%60),(int)(s%60),(int)(b.atMs%1000));
-            ImGui::TextColored(kDim, "At:");  ImGui::SameLine(52);
-            ImGui::TextColored(kGray, "%s", atBuf);
-        }
-
         ImGui::PopStyleVar();
         ImGui::PopFont();
     }
 
-    // ── Last command result ────────────────────────────────────────────────
-    if (!m_lastResult.empty()) {
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        ImGui::PushFont(m_fontMono);
-        bool ok = m_lastResult.find("ERROR") == std::string::npos;
-        ImGui::TextColored(ok ? ImVec4(0.55f,0.85f,0.55f,1.f)
-                              : ImVec4(1.0f, 0.35f,0.25f,1.f),
-                           "%s", m_lastResult.c_str());
-        ImGui::PopFont();
-    }
-
+    // ── EXECUTE (sequencer run control) ───────────────────────────────────
+    ImGui::Spacing();
+    RenderSequencerButtons();
 }
 
 // ─── Timeline (bottom, full width) ────────────────────────────────────────────
@@ -3240,9 +3366,9 @@ void App::RenderTimelineBottom() {
     {
         static constexpr int64_t kFitMarginMs = 5LL * 60 * 1000;
         ImGui::SetCursorScreenPos({winPos.x + 4.f, phaseY + 1.f});
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.12f,.14f,.20f,1.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.22f,.24f,.34f,1.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.30f,.28f,.12f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.26f, 0.59f, 0.98f, 0.40f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.59f, 0.98f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.06f, 0.53f, 0.98f, 1.00f));
         {   // centre label vertically: padV = (btnH - textH) / 2
             float btnH = kPhaseH - 2.f;
             float padV = std::max(0.f, (btnH - ImGui::GetTextLineHeight()) * 0.5f);
@@ -3947,6 +4073,7 @@ App::App() {
             try { m_suviCorrUpPx    = std::stof(m_configDb.GetSetting("suvi_corr_up_px",    std::to_string(m_suviCorrUpPx).c_str())); }    catch (...) {}
         }
         m_suviOpacity = m_configDb.GetSettingInt("suvi_opacity_pct", 100) / 100.f;
+        m_suviChannel = m_configDb.GetSetting("suvi_channel", "Fe171");
 
         LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",
                             m_homeTzIana, m_eclTzIana, m_obsLat, m_obsLon, m_obsAltM));
@@ -4378,25 +4505,6 @@ void App::RenderCameraSection() {
 
 // ─── Eclipse time helpers ─────────────────────────────────────────────────────
 
-// Returns UTC ms (Unix epoch) of greatest eclipse.
-// td_ge is Terrestrial Time "HH:MM:SS[.s]"; dt = TT−UTC in seconds.
-// Returns INT64_MIN on parse failure.
-static int64_t EclipseGeUtcMs(const EclipseEntry& e) {
-    using namespace std::chrono;
-    int hh = 0, mm = 0;
-    float fs = 0.f;
-    if (sscanf_s(e.timeGe.c_str(), "%d:%d:%f", &hh, &mm, &fs) < 2)
-        return INT64_MIN;
-    auto ymd = year_month_day{ year(e.year), month(static_cast<unsigned>(e.month)),
-                               day(static_cast<unsigned>(e.day)) };
-    auto dp    = sys_days{ ymd };
-    int64_t datMs = duration_cast<milliseconds>(dp.time_since_epoch()).count();
-    int64_t timMs = (int64_t(hh) * 3600 + int64_t(mm) * 60) * 1000
-                  + static_cast<int64_t>(fs * 1000.f);
-    int64_t dtMs  = static_cast<int64_t>(e.dt * 1000.f);  // TT − UTC → subtract
-    return datMs + timMs - dtMs;
-}
-
 // Formats a signed millisecond duration as "Xd HH:MM:SS.mmm" (negative = past).
 static void FormatCountdown(int64_t diffMs, char* buf, int len) {
     bool neg   = diffMs < 0;
@@ -4449,6 +4557,11 @@ void App::RenderEclipseSection() {
                 bool sel = (i == m_eclipseIdx);
                 if (ImGui::Selectable(lbl, sel)) {
                     m_eclipseIdx = i;
+                    // Auto-load GE location into observer fields
+                    m_obsLat = m_eclipses[i].latGe;
+                    m_obsLon = m_eclipses[i].lonGe;
+                    SyncDecimalToDms();
+                    SaveObserverSettings();
                     TriggerIqpFetch();
                 }
                 if (sel) ImGui::SetItemDefaultFocus();
@@ -4474,89 +4587,47 @@ void App::RenderEclipseSection() {
     case 'P': typeName = "Partial"; typeCol = kGray;                               break;
     }
 
-    const float kValX = 42.0f;
-
+    static const ImVec4 kBlueBg {0.16f, 0.29f, 0.48f, 0.54f};
+    ImGui::Spacing();
     ImGui::PushFont(m_fontMono);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.f, 2.f));
 
-    // Type + duration
-    ImGui::TextColored(typeCol, "%s", typeName);
-    if (!e.duration.empty()) {
-        ImGui::SameLine(kValX);
-        ImGui::TextColored(kGray, "%s", e.duration.c_str());
+    // Type
+    {
+        char buf[16]; snprintf(buf, sizeof(buf), "%s", typeName);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
+        ImGui::SetNextItemWidth(100.f);
+        ImGui::InputText("##ecl_type", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 6);
+        ImGui::TextColored(kGray, "Eclipse type");
     }
 
-    // Location of maximum
-    char latBuf[10], lonBuf[10];
-    snprintf(latBuf, sizeof(latBuf), "%.1f%c", fabsf(e.latGe), e.latGe >= 0.f ? 'N' : 'S');
-    snprintf(lonBuf, sizeof(lonBuf), "%.1f%c", fabsf(e.lonGe), e.lonGe >= 0.f ? 'E' : 'W');
-    ImGui::TextColored(kGray, "Max");
-    ImGui::SameLine(kValX);
-    char coordBuf[24];
-    snprintf(coordBuf, sizeof(coordBuf), "%s %s", latBuf, lonBuf);
-    ImGui::TextColored(kWhite, "%s", coordBuf);
+    // Duration
+    if (!e.duration.empty()) {
+        char buf[16]; snprintf(buf, sizeof(buf), "%s", e.duration.c_str());
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
+        ImGui::SetNextItemWidth(100.f);
+        ImGui::InputText("##ecl_dur", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 6);
+        ImGui::TextColored(kGray, "Duration at GE");
+    }
 
-    ImGui::PopFont();
+    // GE coordinates
+    {
+        char latBuf[10], lonBuf[10], coordBuf[24];
+        snprintf(latBuf,   sizeof(latBuf),   "%.1f%c", fabsf(e.latGe), e.latGe >= 0.f ? 'N' : 'S');
+        snprintf(lonBuf,   sizeof(lonBuf),   "%.1f%c", fabsf(e.lonGe), e.lonGe >= 0.f ? 'E' : 'W');
+        snprintf(coordBuf, sizeof(coordBuf), "%s %s",  latBuf, lonBuf);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
+        ImGui::SetNextItemWidth(100.f);
+        ImGui::InputText("##ecl_geo", coordBuf, sizeof(coordBuf), ImGuiInputTextFlags_ReadOnly);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 6);
+        ImGui::TextColored(kGray, "GE location");
+    }
 
-    // ── Observer location (DMS) ───────────────────────────────────────────────
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    ImGui::PushFont(m_fontMono);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.f, 3.f));
-
-    // Helper: render one DMS row (label on its own line, fields on next line).
-    // posLabel/negLabel: "N"/"S" or "E"/"W"
-    auto DmsRow = [&](const char* label,
-                      DmsCoord&   dms,
-                      int         maxDeg,
-                      const char* posLabel,
-                      const char* negLabel,
-                      const char* idD, const char* idM, const char* idS) {
-        ImGui::TextColored(kGray, "%s", label);
-        bool t = false;
-
-        ImGui::SetNextItemWidth(38);
-        ImGui::InputInt(idD, &dms.deg, 0);
-        t |= ImGui::IsItemDeactivatedAfterEdit();
-
-        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "°");
-        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(26);
-        ImGui::InputInt(idM, &dms.min, 0);
-        t |= ImGui::IsItemDeactivatedAfterEdit();
-
-        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "'");
-        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(52);
-        ImGui::InputFloat(idS, &dms.sec, 0.f, 0.f, "%.2f");
-        t |= ImGui::IsItemDeactivatedAfterEdit();
-
-        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "\"");
-        ImGui::SameLine(0, 2);
-        if (ImGui::Button(dms.pos ? posLabel : negLabel, ImVec2(22.f, 0.f))) {
-            dms.pos = !dms.pos; t = true;
-        }
-
-        if (t) {
-            dms.deg = std::clamp(dms.deg, 0, maxDeg);
-            dms.min = std::clamp(dms.min, 0, 59);
-            dms.sec = std::clamp(dms.sec, 0.f, 59.99f);
-            SyncDmsToDecimal();
-            SaveObserverSettings();
-        }
-    };
-
-    DmsRow("Latitude",  m_latDms, 90,  "N##latn", "S##latn",
-           "##latd", "##latm", "##lats");
-    DmsRow("Longitude", m_lonDms, 180, "E##lone", "W##lone",
-           "##lond", "##lonm", "##lons");
-
-    // Altitude
-    ImGui::TextColored(kGray, "Altitude");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputInt("##obs_alt", &m_obsAltM, 0);
-    if (ImGui::IsItemDeactivatedAfterEdit()) SaveObserverSettings();
-
-    ImGui::Spacing();
     ImGui::PopStyleVar();
     ImGui::PopFont();
 }
@@ -4674,6 +4745,356 @@ void App::RenderContactTimesSection() {
     ImGui::Spacing();
     renderSection("BE",  m_beResult, false,
                   ImVec4{0.40f, 1.00f, 0.60f, 1.0f});   // green
+}
+
+// ─── Sunrise / Sunset from EPH ───────────────────────────────────────────────
+
+int64_t App::FindSunAltCrossing(bool findRise) const {
+    assert(static_cast<size_t>(EphBody::Sun) < m_ephSamples.size());
+    std::lock_guard lk(m_ephMutex);
+    const auto& rows = m_ephSamples[static_cast<size_t>(EphBody::Sun)];
+    if (rows.size() < 2) return -1;
+    assert(rows.size() <= 2000); // bounded: JPL Horizons returns ≤1440 samples/day
+    for (size_t i = 1; i < rows.size(); ++i) {
+        double prev = rows[i-1].alt_deg;
+        double curr = rows[i].alt_deg;
+        bool match = findRise ? (prev < 0.0 && curr >= 0.0) : (prev >= 0.0 && curr < 0.0);
+        if (match) {
+            double t = prev / (prev - curr);
+            return rows[i-1].utc_ms
+                 + static_cast<int64_t>(t * double(rows[i].utc_ms - rows[i-1].utc_ms));
+        }
+    }
+    return -1;
+}
+
+// ─── Location section (observer DMS + totality status) ───────────────────────
+
+void App::RenderLocationSection() {
+    assert(m_fontMono != nullptr);
+    static const ImVec4 kGray  {0.40f, 0.40f, 0.45f, 1.0f};
+    static const ImVec4 kGreen2{0.15f, 0.90f, 0.35f, 1.0f};
+    static const ImVec4 kRed2  {0.95f, 0.22f, 0.18f, 1.0f};
+    static const ImVec4 kDim3  {0.40f, 0.40f, 0.45f, 1.0f};
+
+    ImGui::SeparatorText("LOCATION");
+    ImGui::PushFont(m_fontMono);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.f, 3.f));
+
+    auto DmsRow = [&](const char* label, DmsCoord& dms, int maxDeg,
+                      const char* posLabel, const char* negLabel,
+                      const char* idD, const char* idM, const char* idS) {
+        bool t = false;
+        ImGui::SetNextItemWidth(38); ImGui::InputInt(idD, &dms.deg, 0);
+        t |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "\xc2\xb0");
+        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(26); ImGui::InputInt(idM, &dms.min, 0);
+        t |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "'");
+        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(52);
+        ImGui::InputFloat(idS, &dms.sec, 0.f, 0.f, "%.2f");
+        t |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "\"");
+        ImGui::SameLine(0, 2);
+        if (ImGui::Button(dms.pos ? posLabel : negLabel, ImVec2(22.f, 0.f))) {
+            dms.pos = !dms.pos; t = true;
+        }
+        ImGui::SameLine(0, 6); ImGui::TextColored(kGray, "%s", label);
+        if (t) {
+            dms.deg = std::clamp(dms.deg, 0, maxDeg);
+            dms.min = std::clamp(dms.min, 0, 59);
+            dms.sec = std::clamp(dms.sec, 0.f, 59.99f);
+            SyncDmsToDecimal();
+            SaveObserverSettings();
+        }
+    };
+
+    DmsRow("Latitude",  m_latDms, 90,  "N##latn", "S##latn", "##latd","##latm","##lats");
+    DmsRow("Longitude", m_lonDms, 180, "E##lone",  "W##lone", "##lond","##lonm","##lons");
+
+    ImGui::SetNextItemWidth(100.f);
+    ImGui::InputInt("##obs_alt", &m_obsAltM, 0);
+    if (ImGui::IsItemDeactivatedAfterEdit()) SaveObserverSettings();
+    ImGui::SameLine(0, 6); ImGui::TextColored(kGray, "Altitude");
+
+    ImGui::PopStyleVar();
+    ImGui::PopFont();
+
+    // Totality zone status (moved from Col2 Calculate button area)
+    ImGui::Spacing();
+    {
+        int iqpSt = m_iqpState.load();
+        if (iqpSt == 2 || iqpSt == 3) {
+            ContactTimes ct;
+            { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+            ImGui::PushFont(m_fontMono);
+            const char* msg =
+                !ct.apiOk    ? "network error"    :
+                !ct.valid    ? "OUTSIDE TOTALITY" :
+                ct.c2Ms > 0 ? "IN TOTALITY ZONE" : "OUTSIDE TOTALITY";
+            const ImVec4& col =
+                !ct.apiOk    ? kDim3   :
+                !ct.valid    ? kRed2   :
+                ct.c2Ms > 0 ? kGreen2 : kRed2;
+            float textW = ImGui::CalcTextSize(msg).x;
+            float avail = ImGui::GetContentRegionAvail().x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - textW) * 0.5f);
+            ImGui::TextColored(col, "%s", msg);
+            ImGui::PopFont();
+        }
+    }
+}
+
+// ─── Time section (3 clocks + contact comparison table + countdowns) ──────────
+
+void App::RenderTimeSection() {
+    assert(m_fontMono != nullptr);
+    static const ImVec4 kGray {0.40f, 0.40f, 0.45f, 1.0f};
+    static const ImVec4 kDim  {0.28f, 0.28f, 0.32f, 1.0f};
+    static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
+    static const ImVec4 kBlue {0.45f, 0.75f, 1.00f, 1.0f};
+    static const ImVec4 kCyan {0.40f, 1.00f, 0.80f, 1.0f};
+
+    ImGui::SeparatorText("TIME");
+
+    {
+        int iqpSt = m_iqpState.load();
+        bool loading = (iqpSt == 1);
+        if (loading) ImGui::BeginDisabled();
+        if (ImGui::Button(loading ? "Calculating..." : "Calculate contact times", ImVec2(-1, 0)))
+            TriggerIqpFetch();
+        if (loading) ImGui::EndDisabled();
+    }
+
+    int64_t nowMs = UtcNowMs();
+
+    // ── 3 clocks in compact table ─────────────────────────────────────────
+    ImGui::PushFont(m_fontMono);
+    {
+        char buf[20]; FormatUtcHms(nowMs, buf, sizeof(buf));
+        ImGui::TextColored(kGray, "UTC "); ImGui::SameLine(36.f);
+        ImGui::TextColored(kGold, "%s", buf);
+    }
+
+    // Helper lambda: one TZ clock row with right-aligned gear button + popup
+    auto TzRow = [&](const char* label, std::string& tzIana, ImVec4 col,
+                     const char* btnId, const char* popupId) {
+        char timeBuf[12]; FormatLocalHms(nowMs, tzIana, timeBuf, sizeof(timeBuf));
+        int  ci = TzFindByIana(m_tzList, tzIana);
+        assert(ci >= 0 && ci < static_cast<int>(m_tzList.size()));
+        ImGui::TextColored(kGray, "%s", label); ImGui::SameLine(36.f);
+        ImGui::TextColored(col, "%s", timeBuf); ImGui::SameLine();
+        ImGui::TextColored(kDim, " %s", m_tzList[ci].code.c_str());
+        float gW = ImGui::CalcTextSize("[=]").x + ImGui::GetStyle().FramePadding.x * 2.f;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - gW);
+        if (ImGui::SmallButton(btnId)) ImGui::OpenPopup(popupId);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(420, 0), ImVec2(420, 520));
+        if (ImGui::BeginPopup(popupId)) {
+            int ci2 = TzFindByIana(m_tzList, tzIana);
+            assert(m_tzList.size() <= 1024); // bounded: DB has 598 IANA zones
+            for (int i = 0; i < static_cast<int>(m_tzList.size()); ++i) {
+                bool sel = (i == ci2);
+                char entry[80];
+                snprintf(entry, sizeof(entry), "%-22s  %s",
+                         m_tzList[i].code.c_str(), m_tzList[i].iana.c_str());
+                if (ImGui::Selectable(entry, sel)) {
+                    tzIana = m_tzList[i].iana;
+                    SaveClockSettings();
+                    ImGui::CloseCurrentPopup();
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndPopup();
+        }
+    };
+
+    TzRow("Home", m_homeTzIana, kBlue, "[=]##gh", "##tz_home_new");
+    TzRow("Loc ", m_eclTzIana,  kCyan, "[=]##gl", "##tz_loc_new");
+    ImGui::PopFont();
+
+    ImGui::Spacing();
+
+    // ── Contact comparison table: IQP | BE | Loc | GE ────────────────────
+    int  iqpSt = m_iqpState.load();
+    ContactTimes iqpCt;
+    { std::lock_guard lk(m_iqpMutex); iqpCt = m_contacts; }
+
+    int offH = 0;
+    if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
+        const auto& ec = m_eclipses[m_eclipseIdx];
+        offH = LocalUtcOffsetHours(m_eclTzIana, ec.year, ec.month, ec.day);
+    }
+
+    int64_t sunriseMs = FindSunAltCrossing(true);
+    int64_t sunsetMs  = FindSunAltCrossing(false);
+
+    auto FmtHM = [](int64_t ms, char* buf, int len) {
+        if (ms <= 0) { snprintf(buf, len, "--:--"); return; }
+        int64_t s = ms / 1000;
+        snprintf(buf, len, "%02d:%02d", (int)((s/3600)%24), (int)((s/60)%60));
+    };
+    auto FmtLoc = [&](int64_t ms, char* buf, int len) {
+        int64_t shifted = (ms > 0) ? ms + int64_t(offH) * 3600000LL : -1;
+        FmtHM(shifted, buf, len);
+    };
+
+    ImGui::PushFont(m_fontMono);
+    constexpr float kLblW  = 34.f;
+    constexpr float kDataW = 50.f;
+    if (ImGui::BeginTable("##ct_tbl", 5,
+            ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("##l", ImGuiTableColumnFlags_WidthFixed, kLblW);
+        ImGui::TableSetupColumn("IQP", ImGuiTableColumnFlags_WidthFixed, kDataW);
+        ImGui::TableSetupColumn("BE",  ImGuiTableColumnFlags_WidthFixed, kDataW);
+        ImGui::TableSetupColumn("Loc", ImGuiTableColumnFlags_WidthFixed, kDataW);
+        ImGui::TableSetupColumn("GE",  ImGuiTableColumnFlags_WidthFixed, kDataW);
+        ImGui::TableHeadersRow();
+
+        bool loading = (iqpSt == 1);
+        struct CtRow { const char* lbl; int64_t iqp; int64_t be; int64_t ge; };
+        CtRow ctRows[] = {
+            { "C1",  iqpCt.c1Ms,  m_beResult.c1Ms,  m_geResult.c1Ms  },
+            { "C2",  iqpCt.c2Ms,  m_beResult.c2Ms,  m_geResult.c2Ms  },
+            { "Max", iqpCt.maxMs, m_beResult.maxMs, m_geResult.maxMs  },
+            { "C3",  iqpCt.c3Ms,  m_beResult.c3Ms,  m_geResult.c3Ms  },
+            { "C4",  iqpCt.c4Ms,  m_beResult.c4Ms,  m_geResult.c4Ms  },
+            { "Rise",sunriseMs,   sunriseMs,          -1               },
+            { "Set", sunsetMs,    sunsetMs,           -1               },
+        };
+        static constexpr int kCtRowN = 7;
+        static_assert(sizeof(ctRows)/sizeof(ctRows[0]) == kCtRowN);
+
+        for (int ri = 0; ri < kCtRowN; ++ri) {
+            const auto& r = ctRows[ri];
+            ImGui::TableNextRow();
+            char i1[8], i2[8], i3[8], i4[8];
+            FmtHM(r.iqp,  i1, sizeof(i1));
+            FmtHM(r.be,   i2, sizeof(i2));
+            FmtLoc(r.iqp, i3, sizeof(i3));
+            FmtHM(r.ge,   i4, sizeof(i4));
+
+            ImGui::TableSetColumnIndex(0); ImGui::TextColored(kGray, "%s", r.lbl);
+            ImGui::TableSetColumnIndex(1);
+                if (loading) ImGui::TextColored(kDim, "...");
+                else         ImGui::TextColored(kBlue, "%s", i1);
+            ImGui::TableSetColumnIndex(2); ImGui::TextColored(kCyan, "%s", i2);
+            ImGui::TableSetColumnIndex(3);
+                if (loading) ImGui::TextColored(kDim, "...");
+                else         ImGui::TextColored(kGray, "%s", i3);
+            ImGui::TableSetColumnIndex(4); ImGui::TextColored(kDim,  "%s", i4);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopFont();
+
+}
+
+// ─── Hardware section (connection + cameras) ──────────────────────────────────
+
+void App::RenderHardwareSection() {
+    assert(m_fontMono != nullptr);
+
+    bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
+
+    ImGui::SeparatorText("SERVER");
+
+    const ImVec2 btnSz(-1, 28);
+
+    {
+        bool srvRunning = false;
+        HANDLE hm = OpenMutexW(SYNCHRONIZE, FALSE, L"TotalControl_DaemonRunning");
+        if (hm) { srvRunning = true; CloseHandle(hm); }
+
+        if (connected) {
+            m_connecting = false;
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.10f, 0.55f, 0.18f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.14f, 0.65f, 0.24f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.08f, 0.45f, 0.14f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  1.0f,  1.0f,  1.0f));
+            ImGui::Button("Cameras are connected", btnSz);
+            ImGui::PopStyleColor(4);
+        } else if (m_connecting) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.65f, 0.38f, 0.05f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.72f, 0.44f, 0.08f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.55f, 0.32f, 0.04f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  1.0f,  1.0f,  1.0f));
+            ImGui::BeginDisabled();
+            ImGui::Button("Connection in progress...", btnSz);
+            ImGui::EndDisabled();
+            ImGui::PopStyleColor(4);
+        } else {
+            if (srvRunning) ImGui::BeginDisabled();
+            if (ImGui::Button("Connect cameras", btnSz)) {
+                LogLine("user: Start TotalControlSRV");
+                if (TryLaunchDaemon()) {
+                    m_connecting = true;
+                    m_reconnectCountdown = 0;
+                } else {
+                    m_lastResult = "ERROR: cannot launch TotalControlSRV.exe";
+                    LogLine(m_lastResult);
+                }
+            }
+            if (srvRunning) ImGui::EndDisabled();
+        }
+    }
+
+    if (!connected) ImGui::BeginDisabled();
+    if (ImGui::Button("Test picture", btnSz)) {
+        LogLine("user: take test picture");
+        const char* req =
+            "{\"cmd\":\"shoot\",\"drive\":\"single\","
+            "\"ss\":\"1/8000\",\"iso\":100,\"f\":8.0}";
+        if (auto res = m_pipe.SendRequest(req)) {
+            bool ok  = JStr(*res, "ok") == "true";
+            int  lat = JInt(*res, "latency_ms", -1);
+            if (ok && lat >= 0 && !m_cameras.empty())
+                m_cameras[0].lastShotMs = lat;
+            m_lastResult = ok ? std::format("Shot OK — {} ms", lat >= 0 ? lat : 0)
+                              : "ERROR: shoot failed";
+            LogLine(m_lastResult);
+        } else {
+            m_lastResult = std::format("ERROR: {}", PipeErrorMessage(res.error()));
+            LogLine(m_lastResult);
+        }
+    }
+    if (!connected) ImGui::EndDisabled();
+
+    if (!connected) ImGui::BeginDisabled();
+    if (ImGui::Button("Disconnect cameras", btnSz)) {
+        if (m_seqRun.load()) { StopSeqThread(); m_guiSeqMode.store(GuiSeqMode::Idle); }
+        LogLine("user: disconnect & quit SRV");
+        (void)m_pipe.Send("{\"cmd\":\"quit\"}");
+        m_pipe.Disconnect();
+        { std::lock_guard lk(m_camerasMutex); m_cameras.clear(); }
+        m_lastResult = "Server stopped.";
+        LogLine("SRV quit sent");
+    }
+    if (!connected) ImGui::EndDisabled();
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("CAMERAS");
+    ImGui::Spacing();
+    RenderCameraSection();
+}
+
+// ─── Left column (270px): ECLIPSE / LOCATION / TIME / HARDWARE / EXECUTE ─────
+
+void App::RenderLeftColumn() {
+    assert(m_fontMono != nullptr);
+
+    ImGui::SeparatorText("ECLIPSE");
+    ImGui::Spacing();
+    RenderEclipseSection();
+
+    ImGui::Spacing();
+    RenderLocationSection();
+
+    ImGui::Spacing();
+    RenderTimeSection();
+
+    ImGui::Spacing();
+    RenderHardwareSection();
 }
 
 // ─── Menu actions ────────────────────────────────────────────────────────────
@@ -5667,9 +6088,8 @@ void App::OnFrame() {
     RenderOptionsWindow();
     if (m_configDb.IsOpen()) RenderSnapshotModal();
 
-    const float colW   = 200.0f;   // Col1: Hardware
-    const float colW2  = 400.0f;   // Col2: Eclipse
-    const float kInspW = 260.0f;   // Inspector + Palette
+    const float kLeftW = 300.0f;   // Left column: Eclipse/Location/Time/Hardware/Execute
+    const float kInspW = 270.0f;   // Right column: Inspector + Palette
     const float totalH = io.DisplaySize.y - menuH;
     const float totalW = io.DisplaySize.x;
 
@@ -5683,345 +6103,26 @@ void App::OnFrame() {
     float kTimelineH = kTlHdrH + kTlRulerH + float(nTl) * kTlTrackH + kTlPadH;
 
     const float topH = totalH - kTimelineH;
-    const float statusW   = totalW - colW - colW2 - kInspW;
-
-    bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
 
     // ════════════════════════════════════════════════════════════════════════
-    // COLUMN 1 — Hardware (TIME / CONNECTION / CAMERA STATUS)
+    // LEFT COLUMN — Eclipse / Location / Time / Hardware / Execute (270px)
     // ════════════════════════════════════════════════════════════════════════
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.06f, 0.07f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 14));
-    ImGui::BeginChild("##col_hw", ImVec2(colW, topH), false, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
+    ImGui::BeginChild("##col_left", ImVec2(kLeftW, topH), false, 0);
     ImGui::PopStyleVar();
-
-    // ── app name ─────────────────────────────────────────────────────────
-    ImGui::PushFont(m_fontMono);
-    ImGui::TextColored(ImVec4(0.90f, 0.90f, 0.92f, 1.0f), "TotalControl");
-    ImGui::PopFont();
-
-    // ════════════════════════════════
-    // Section: TIME
-    // ════════════════════════════════
-    ImGui::SeparatorText("TIME");
-
-    // ── UTC clock (always on, no options) ─────────────────────────────────
-    {
-        char buf[20];
-        FormatUtcHms(UtcNowMs(), buf, sizeof(buf));
-        ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(ImVec4(0.90f, 0.75f, 0.20f, 1.0f), "%s", buf);
-        ImGui::TextColored(ImVec4(0.40f, 0.40f, 0.45f, 1.0f), "Universal Time Zone");
-        ImGui::PopFont();
-    }
-
-    ImGui::Spacing();
-
-    // ── Home clock ────────────────────────────────────────────────────────
-    RenderExtraClock("Home Time Zone##home", "##popup_home", m_showHomeClock, m_homeTzIana);
-
-    ImGui::Spacing();
-
-    // ── Local / eclipse clock ─────────────────────────────────────────────
-    RenderExtraClock("Local Time Zone##ecl", "##popup_ecl",  m_showEclClock,  m_eclTzIana);
-
-    // ── Countdowns ────────────────────────────────────────────────────────────
-    if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
-        const auto& ec = m_eclipses[m_eclipseIdx];
-        char tc = ec.type.empty() ? '?' : ec.type[0];
-        ImVec4 cdCol = (tc == 'T') ? ImVec4{0.95f, 0.80f, 0.20f, 1.0f}
-                     : (tc == 'A') ? ImVec4{0.85f, 0.50f, 0.15f, 1.0f}
-                     : (tc == 'H') ? ImVec4{0.80f, 0.75f, 0.20f, 1.0f}
-                                   : ImVec4{0.55f, 0.55f, 0.60f, 1.0f};
-        static const ImVec4 kDim {0.35f, 0.35f, 0.40f, 1.0f};
-        static const ImVec4 kGray{0.40f, 0.40f, 0.45f, 1.0f};
-
-        ImGui::Spacing();
-        ImGui::PushFont(m_fontMono);
-
-        // Row 1 — GE (always visible, eclipse-axis reference)
-        int64_t geMs = EclipseGeUtcMs(ec);
-        if (geMs != INT64_MIN) {
-            char cdBuf[32];
-            FormatCountdown(geMs - UtcNowMs(), cdBuf, sizeof(cdBuf));
-            ImGui::TextColored(kGray, "GE");
-            ImGui::SameLine(25.0f);
-            ImGui::TextColored(cdCol, "%s", cdBuf);
-        }
-
-        // Rows C1/C2/Max/C3/C4 from IQP or Besselian
-        {
-            int iqpSt = m_iqpState.load();
-            if (iqpSt == 1) {
-                ImGui::TextColored(kGray, "C1");
-                ImGui::SameLine(25.0f);
-                ImGui::TextColored(kDim, "loading...");
-            } else if (iqpSt == 2 || iqpSt == 3) {
-                ContactTimes ct;
-                { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-
-                if (!ct.valid && ct.apiOk) {
-                    ImGui::TextColored(kGray, "C1");
-                    ImGui::SameLine(25.0f);
-                    ImGui::TextColored(kDim, "no eclipse");
-                } else if (ct.valid) {
-                    // Source label shown once on C1 line
-                    const char* srcLabel =
-                        (ct.source == ContactSource::BesselApi) ? "IQP API" :
-                        (ct.source == ContactSource::IQP)       ? "IQP"     : "BE";
-
-                    // Helper: format UTC ms → "HH:MM:SS"
-                    auto fmtUtc = [](int64_t ms, char* buf, int len) {
-                        if (ms < 0) { snprintf(buf, len, "--:--:--"); return; }
-                        int64_t s  = ms / 1000;
-                        int hh = static_cast<int>((s / 3600) % 24);
-                        int mm = static_cast<int>((s / 60)   % 60);
-                        int sc = static_cast<int>(s % 60);
-                        snprintf(buf, len, "%02d:%02d:%02d", hh, mm, sc);
-                    };
-
-                    struct Row { const char* lbl; int64_t ms; };
-                    Row rows[] = {
-                        {"C1",  ct.c1Ms},
-                        {"C2",  ct.c2Ms},
-                        {"Max", ct.maxMs},
-                        {"C3",  ct.c3Ms},
-                        {"C4",  ct.c4Ms},
-                    };
-                    bool first = true;
-                    for (auto& r : rows) {
-                        if (r.ms < 0) continue;
-                        char tbuf[12];
-                        fmtUtc(r.ms, tbuf, sizeof(tbuf));
-                        ImGui::TextColored(kGray, "%s", r.lbl);
-                        ImGui::SameLine(30.0f);
-                        ImGui::TextColored(cdCol, "%s", tbuf);
-                        if (first) {
-                            ImGui::SameLine();
-                            ImGui::TextColored(kDim, " %s", srcLabel);
-                            first = false;
-                        }
-                    }
-                } else {
-                    ImGui::TextColored(kGray, "C1");
-                    ImGui::SameLine(25.0f);
-                    ImGui::TextColored(kDim, "err");
-                }
-            }
-        }
-
-        ImGui::PopFont();
-
-        // ── Prominent countdown D:HH:MM:SS.mmm ──────────────────────────────
-        // Counts down to C1; on arrival, switches automatically to C2, C3, C4.
-        {
-            ContactTimes ct;
-            int iqpSt = m_iqpState.load();
-            if (iqpSt == 2 || iqpSt == 3)
-                { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-            if (!ct.valid && m_beResult.valid) ct = m_beResult;
-
-            if (ct.valid) {
-                int64_t nowMs = UtcNowMs();
-                // Determine next upcoming contact
-                struct CdEvent { const char* lbl; int64_t ms; };
-                CdEvent events[] = {
-                    {"C1", ct.c1Ms}, {"C2", ct.c2Ms},
-                    {"C3", ct.c3Ms}, {"C4", ct.c4Ms}
-                };
-                const char* nextLbl = nullptr;
-                int64_t     nextMs  = 0;
-                for (auto& ev : events) {
-                    if (ev.ms > 0 && ev.ms > nowMs) {
-                        nextLbl = ev.lbl;
-                        nextMs  = ev.ms;
-                        break;
-                    }
-                }
-                ImGui::Spacing();
-                ImGui::PushFont(m_fontMono);
-                static const ImVec4 kCdGray {0.40f, 0.40f, 0.45f, 1.0f};
-                if (nextLbl) {
-                    int64_t rem  = nextMs - nowMs;          // ms remaining (>0)
-                    int64_t ms3  = rem % 1000;
-                    int64_t tot  = rem / 1000;
-                    int sec  = static_cast<int>(tot % 60);
-                    int min  = static_cast<int>((tot / 60) % 60);
-                    int hr   = static_cast<int>((tot / 3600) % 24);
-                    int day  = static_cast<int>(tot / 86400);
-                    ImGui::TextColored(kCdGray, "%s in:", nextLbl);
-                    char cdBuf[32];
-                    snprintf(cdBuf, sizeof(cdBuf), "%dd %02d:%02d:%02d.%03d",
-                             day, hr, min, sec, (int)ms3);
-                    ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.25f, 1.0f), "%s", cdBuf);
-                } else if (ct.c4Ms > 0) {
-                    // All contacts passed — show elapsed since C4
-                    int64_t el   = nowMs - ct.c4Ms;
-                    int64_t tot  = el / 1000;
-                    int sec  = static_cast<int>(tot % 60);
-                    int min  = static_cast<int>((tot / 60) % 60);
-                    int hr   = static_cast<int>((tot / 3600) % 24);
-                    int day  = static_cast<int>(tot / 86400);
-                    ImGui::TextColored(kCdGray, "C4+:");
-                    char cdBuf[32];
-                    snprintf(cdBuf, sizeof(cdBuf), "%dd %02d:%02d:%02d",
-                             day, hr, min, sec);
-                    ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", cdBuf);
-                }
-                ImGui::PopFont();
-            }
-        }
-    }
-
-    // ════════════════════════════════
-    // Section: CONNECTION
-    // ════════════════════════════════
-    ImGui::SeparatorText("CONNECTION");
-
-    ImGui::PushFont(m_fontMono);
-    if (connected)
-        ImGui::TextColored(ImVec4(0.20f, 0.85f, 0.30f, 1.0f), "● connected");
-    else
-        ImGui::TextColored(ImVec4(0.75f, 0.22f, 0.18f, 1.0f), "○ no server");
-    ImGui::PopFont();
-
-    ImGui::Spacing();
-
-    const ImVec2 btnSz(-1, 34);
-
-    {
-        bool srvRunning = false;
-        HANDLE hm = OpenMutexW(SYNCHRONIZE, FALSE, L"TotalControl_DaemonRunning");
-        if (hm) { srvRunning = true; CloseHandle(hm); }
-
-        if (srvRunning) ImGui::BeginDisabled();
-        if (ImGui::Button("Connect cameras", btnSz)) {
-            LogLine("user: Start TotalControlSRV");
-            if (TryLaunchDaemon()) {
-                m_lastResult = "SRV launched...";
-                m_reconnectCountdown = 0;
-            } else {
-                m_lastResult = "ERROR: cannot launch TotalControlSRV.exe";
-                LogLine(m_lastResult);
-            }
-        }
-        if (srvRunning) ImGui::EndDisabled();
-    }
-
-    ImGui::Spacing();
-
-    if (!connected) ImGui::BeginDisabled();
-    if (ImGui::Button("Test picture", btnSz)) {
-        LogLine("user: take test picture");
-        const char* req =
-            "{\"cmd\":\"shoot\",\"drive\":\"single\","
-            "\"ss\":\"1/8000\",\"iso\":100,\"f\":8.0}";
-        if (auto res = m_pipe.SendRequest(req)) {
-            bool ok  = JStr(*res, "ok") == "true";
-            int  lat = JInt(*res, "latency_ms", -1);
-            // Store shot latency in camera[0] (Test picture targets camera[0])
-            if (ok && lat >= 0 && !m_cameras.empty())
-                m_cameras[0].lastShotMs = lat;
-            m_lastResult = ok
-                ? std::format("Shot OK — {} ms", lat >= 0 ? lat : 0)
-                : "ERROR: shoot failed";
-            LogLine(m_lastResult);
-        } else {
-            m_lastResult = std::format("ERROR: {}", PipeErrorMessage(res.error()));
-            LogLine(m_lastResult);
-        }
-    }
-    if (!connected) ImGui::EndDisabled();
-
-    ImGui::Spacing();
-
-    if (!connected) ImGui::BeginDisabled();
-    if (ImGui::Button("Disconnect cameras", btnSz)) {
-        // Stop sequencer first if running
-        if (m_seqRun.load()) { StopSeqThread(); m_guiSeqMode.store(GuiSeqMode::Idle); }
-        LogLine("user: disconnect & quit SRV");
-        (void)m_pipe.Send("{\"cmd\":\"quit\"}");  // fire-and-forget: SRV closes connection before replying
-        m_pipe.Disconnect();
-        { std::lock_guard lk(m_camerasMutex); m_cameras.clear(); }
-        m_lastResult = "Server stopped.";
-        LogLine("SRV quit sent");
-    }
-    if (!connected) ImGui::EndDisabled();
-
-    // ── Sequencer buttons: TEST RUN / RUN ─────────────────────────────────
-    RenderSequencerButtons();
-
-    // ════════════════════════════════
-    // Section: CAMERA STATUS
-    // ════════════════════════════════
-    ImGui::Spacing();
-    ImGui::SeparatorText("CAMERA STATUS");
-    ImGui::Spacing();
-    RenderCameraSection();
-
+    RenderLeftColumn();
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
     // ════════════════════════════════════════════════════════════════════════
-    // COLUMN 2 — Eclipse (selector / observer / calculate / contact times)
+    // CENTER — Sky View Simulator (auto width = total − left − right)
     // ════════════════════════════════════════════════════════════════════════
     ImGui::SameLine(0, 0);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.05f, 0.065f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 14));
-    ImGui::BeginChild("##col_ecl", ImVec2(colW2, topH), false, 0);
-    ImGui::PopStyleVar();
-
-    ImGui::SeparatorText("ECLIPSE");
-    ImGui::Spacing();
-    RenderEclipseSection();
-
-    ImGui::Spacing();
-    {
-        int iqpSt = m_iqpState.load();
-        bool loading = (iqpSt == 1);
-        if (loading) ImGui::BeginDisabled();
-        if (ImGui::Button(loading ? "Calculating..." : "Calculate Contacts", ImVec2(-1, 34)))
-            TriggerIqpFetch();
-        if (loading) ImGui::EndDisabled();
-    }
-
-    {
-        static const ImVec4 kGreen2 {0.15f, 0.90f, 0.35f, 1.0f};
-        static const ImVec4 kRed2   {0.95f, 0.22f, 0.18f, 1.0f};
-        static const ImVec4 kDim3   {0.40f, 0.40f, 0.45f, 1.0f};
-        int iqpSt2 = m_iqpState.load();
-        if (iqpSt2 == 1 || iqpSt2 == 2) {
-            ImGui::Spacing();
-            ImGui::PushFont(m_fontLarge);
-            if (iqpSt2 == 1) {
-                ImGui::TextColored(kDim3, "checking location...");
-            } else {
-                ContactTimes ct2;
-                { std::lock_guard lk(m_iqpMutex); ct2 = m_contacts; }
-                if (!ct2.apiOk)       ImGui::TextColored(kDim3,   "network error");
-                else if (!ct2.valid)  ImGui::TextColored(kRed2,   "NO ECLIPSE VISIBLE HERE");
-                else if (ct2.c2Ms>0) ImGui::TextColored(kGreen2, "YOU ARE IN THE TOTALITY ZONE");
-                else                  ImGui::TextColored(kRed2,   "YOU ARE OUTSIDE TOTALITY ZONE");
-            }
-            ImGui::PopFont();
-        }
-    }
-
-    ImGui::Spacing();
-    ImGui::SeparatorText("CONTACTS");
-    ImGui::Spacing();
-    RenderContactTimesSection();
-
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-
-    // ════════════════════════════════════════════════════════════════════════
-    // COLUMN 3 — Status / Result
-    // ════════════════════════════════════════════════════════════════════════
-    ImGui::SameLine(0, 0);
+    const float centerW = totalW - kLeftW - kInspW;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.07f, 0.09f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-    ImGui::BeginChild("##col_status", ImVec2(statusW, topH), false,
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 6));
+    ImGui::BeginChild("##col_center", ImVec2(centerW, topH), false,
                       ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
     RenderStatusColumn();
@@ -6029,7 +6130,7 @@ void App::OnFrame() {
     ImGui::PopStyleColor();
 
     // ════════════════════════════════════════════════════════════════════════
-    // COLUMN 4 — Inspector + Palette
+    // RIGHT COLUMN — Inspector + Palette (270px)
     // ════════════════════════════════════════════════════════════════════════
     ImGui::SameLine(0, 0);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.06f, 0.075f, 1.0f));
@@ -6066,6 +6167,7 @@ void App::OnFrame() {
     // Camera status polling is handled by m_statusThread (background, ~2 s interval).
 
     // ── silent auto-reconnect ─────────────────────────────────────────────
+    const bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
     if (!connected) {
         if (m_reconnectCountdown <= 0) {
             m_pipe.Connect();

@@ -702,7 +702,15 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
         std::wstring driveStr = JHas(req, L"drive") ? JStr(req, L"drive") : L"";
 
-        if (count > 1) {
+        // Burst path when count>1 OR when drive is a continuous/burst mode name
+        bool isContinuousDrive = driveStr.find(L"cont") != std::wstring::npos
+                              || driveStr.find(L"burst") != std::wstring::npos;
+
+        // For continuous drive without explicit count: use sentinel so Shoot() holds
+        // the button for the full timeout_ms instead of releasing after 1st capture.
+        if (isContinuousDrive && count <= 1) count = 9999;
+
+        if (count > 1 || isContinuousDrive) {
             // Burst: resolve drive mode string → CrDrive_* code (default cont-hi)
             uint32_t driveCode = 0x00010001; // CrDrive_Continuous_Hi
             if      (driveStr == L"cont-hi-plus")  driveCode = 0x00010002; // CrDrive_Continuous_Hi_Plus  — confirmed ILCE-7RM4A
