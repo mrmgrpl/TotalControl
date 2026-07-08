@@ -87,6 +87,29 @@ date development is fully absorbed into final eclipse preparations, and no
 further fixes will land before Spain. If you find something, don't sit on
 it — the earlier it's reported, the more likely it gets fixed in time.
 
+## Supported camera models
+
+Per Sony Camera Remote SDK **v2.02.00** compatibility list (update your
+camera to the latest firmware before use):
+
+- Alpha 1 II (ILCE-1M2), Alpha 1 (ILCE-1)
+- Alpha 9 III (ILCE-9M3), Alpha 9 II (ILCE-9M2)
+- Alpha 7R VI (ILCE-7RM6), Alpha 7R V (ILCE-7RM5), Alpha 7R IVA (ILCE-7RM4A), Alpha 7R IV (ILCE-7RM4)
+- Alpha 7CR (ILCE-7CR), Alpha 7C II (ILCE-7CM2), Alpha 7C (ILCE-7C)
+- Alpha 7S III (ILCE-7SM3)
+- Alpha 7 V (ILCE-7M5), Alpha 7 IV (ILCE-7M4)
+- Alpha 6700 (ILCE-6700)
+- ZV-E1, ZV-E10 II (ZV-E10M2)
+- ILX-LR1
+- FX6 (ILME-FX6V / ILME-FX6T, firmware v3.00+), FX3A (ILME-FX3A), FX3 (ILME-FX3, firmware v2.00+), FX2 (ILME-FX2), FX30 (ILME-FX30)
+- BURANO (MPC-2610)
+- ILME-FR7
+- PXW-Z300 / PXW-Z380, PXW-Z200 / HXR-NX800
+- BRC-AM7
+- RX1R III (DSC-RX1RM3), RX0 II (DSC-RX0M2, firmware v3.00+)
+
+Development and testing is centered on the **Alpha 7R IVA (ILCE-7RM4A)**.
+
 ## Requirements
 
 ### To use (pre-built release)
