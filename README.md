@@ -6,6 +6,8 @@ sequence, in both space and time.
 
 **📺 Watch the intro video:** [https://youtu.be/rhCX8FMtpQg](https://youtu.be/rhCX8FMtpQg)
 
+![TotalControl — Mission Control GUI: Sky View Simulator with timeline, contact times, and multi-camera panel](docs/images/mission_control.png)
+
 Built for the total solar eclipse of **August 12, 2026** (Burgos/Lerma, Spain —
 totality 103.9s), but usable for any total eclipse.
 
