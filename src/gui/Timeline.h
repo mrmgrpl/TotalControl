@@ -28,6 +28,7 @@ struct TLBlock {
     // Common
     std::string label;
     bool        snapToPrev = false;
+    bool        snapToSec  = false;    // rounds atMs to the nearest whole second
 };
 
 struct TLTrack {

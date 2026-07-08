@@ -122,7 +122,8 @@ std::vector<TzEntry> Database::LoadTimezones() const {
     return result;
 }
 
-std::vector<EclipseEntry> Database::LoadEclipses() const {
+std::vector<EclipseEntry> Database::LoadEclipses(int fromYear, int toYear) const {
+    assert(fromYear <= toYear);
     std::vector<EclipseEntry> out;
     if (!m_db) return out;
 
@@ -131,9 +132,12 @@ std::vector<EclipseEntry> Database::LoadEclipses() const {
         "SELECT year, month, day, eclipse_type, td_ge,"
         "       lat_dd_ge, lng_dd_ge, central_duration, duration_secs, dt"
         " FROM eclipse_besselian"
+        " WHERE year BETWEEN ? AND ?"
         " ORDER BY julian_date;",
         -1, &st, nullptr);
     if (rc != SQLITE_OK) return out;
+    sqlite3_bind_int(st, 1, fromYear);
+    sqlite3_bind_int(st, 2, toYear);
 
     auto col = [&](int i) -> std::string {
         const auto* p = sqlite3_column_text(st, i);
@@ -229,7 +233,8 @@ static constexpr const char* kCreateTlBlocks = R"SQL(
         audio_file    TEXT    NOT NULL DEFAULT '',
         audio_dur_ms  INTEGER NOT NULL DEFAULT 10000,
         label         TEXT    NOT NULL DEFAULT '',
-        snap_to_prev  INTEGER NOT NULL DEFAULT 0
+        snap_to_prev  INTEGER NOT NULL DEFAULT 0,
+        snap_to_sec   INTEGER NOT NULL DEFAULT 0
     );
 )SQL";
 
@@ -240,9 +245,13 @@ void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
 
     Exec(kCreateTlTracks);
     Exec(kCreateTlBlocks);
-    // Migration: add focal_mm if this is an older DB without the column (error ignored if it exists)
+    // Migration: add focal_mm/snap_to_sec if this is an older DB without the
+    // column (error ignored if it exists)
     sqlite3_exec(m_db,
         "ALTER TABLE tl_tracks ADD COLUMN focal_mm INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_blocks ADD COLUMN snap_to_sec INTEGER NOT NULL DEFAULT 0;",
         nullptr, nullptr, nullptr);
 
     sqlite3_exec(m_db, "BEGIN;",                 nullptr, nullptr, nullptr);
@@ -272,8 +281,8 @@ void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
                 "INSERT INTO tl_blocks"
                 " (track_id, at_ms, block_type, ss, iso, fstop,"
                 "  cnt, ev, burst_drive, burst_dur_ms,"
-                "  audio_file, audio_dur_ms, label, snap_to_prev)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+                "  audio_file, audio_dur_ms, label, snap_to_prev, snap_to_sec)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
                 -1, &bs, nullptr);
             sqlite3_bind_int64(bs,  1, trackId);
             sqlite3_bind_int64(bs,  2, b.atMs);
@@ -289,6 +298,7 @@ void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
             sqlite3_bind_int  (bs, 12, b.audioDurMs);
             sqlite3_bind_text (bs, 13, b.label.c_str(),      -1, SQLITE_STATIC);
             sqlite3_bind_int  (bs, 14, b.snapToPrev ? 1 : 0);
+            sqlite3_bind_int  (bs, 15, b.snapToSec  ? 1 : 0);
             sqlite3_step(bs);
             sqlite3_finalize(bs);
         }
@@ -310,6 +320,13 @@ std::vector<TLTrack> Database::LoadTimeline() const {
     bool exists = (sqlite3_step(chk) == SQLITE_ROW);
     sqlite3_finalize(chk);
     if (!exists) return result;
+
+    // Migration: add snap_to_sec if this DB predates the column — must run
+    // here too (not just in SaveTimeline) since Load happens first at
+    // startup, before any Save. Error ignored if the column already exists.
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_blocks ADD COLUMN snap_to_sec INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
 
     auto col = [](sqlite3_stmt* s, int i) -> std::string {
         const auto* p = sqlite3_column_text(s, i);
@@ -338,7 +355,7 @@ std::vector<TLTrack> Database::LoadTimeline() const {
         rc = sqlite3_prepare_v2(m_db,
             "SELECT id, at_ms, block_type, ss, iso, fstop,"
             "       cnt, ev, burst_drive, burst_dur_ms,"
-            "       audio_file, audio_dur_ms, label, snap_to_prev"
+            "       audio_file, audio_dur_ms, label, snap_to_prev, snap_to_sec"
             " FROM tl_blocks WHERE track_id=? ORDER BY at_ms;",
             -1, &bs, nullptr);
         if (rc != SQLITE_OK) continue;
@@ -360,6 +377,7 @@ std::vector<TLTrack> Database::LoadTimeline() const {
             b.audioDurMs = sqlite3_column_int(bs, 11);
             b.label      = col(bs, 12);
             b.snapToPrev = sqlite3_column_int(bs, 13) != 0;
+            b.snapToSec  = sqlite3_column_int(bs, 14) != 0;
             tr.blocks.push_back(std::move(b));
         }
         sqlite3_finalize(bs);
@@ -400,16 +418,20 @@ static constexpr const char* kCreateSnapshots = R"SQL(
         audio_file   TEXT    NOT NULL DEFAULT '',
         audio_dur_ms INTEGER NOT NULL DEFAULT 10000,
         label        TEXT    NOT NULL DEFAULT '',
-        snap_to_prev INTEGER NOT NULL DEFAULT 0
+        snap_to_prev INTEGER NOT NULL DEFAULT 0,
+        snap_to_sec  INTEGER NOT NULL DEFAULT 0
     );
 )SQL";
 
 void Database::CreateSnapshotTables() {
     assert(m_db != nullptr);  // DB must be open before creating tables
     Exec(kCreateSnapshots);
-    // Migration: add focal_mm to snapshots table if absent (error ignored if column already exists)
+    // Migration: add focal_mm/snap_to_sec if absent (error ignored if column already exists)
     sqlite3_exec(m_db,
         "ALTER TABLE tl_snap_tracks ADD COLUMN focal_mm INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_snap_blocks ADD COLUMN snap_to_sec INTEGER NOT NULL DEFAULT 0;",
         nullptr, nullptr, nullptr);
 }
 
@@ -483,8 +505,8 @@ void Database::SaveSnapshot(const std::string& name,
             sqlite3_prepare_v2(m_db,
                 "INSERT INTO tl_snap_blocks"
                 " (track_id,at_ms,block_type,ss,iso,fstop,cnt,ev,"
-                "  burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+                "  burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev,snap_to_sec)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
                 -1, &bs, nullptr);
             sqlite3_bind_int64(bs,  1, trackId);
             sqlite3_bind_int64(bs,  2, b.atMs);
@@ -500,6 +522,7 @@ void Database::SaveSnapshot(const std::string& name,
             sqlite3_bind_int  (bs, 12, b.audioDurMs);
             sqlite3_bind_text (bs, 13, b.label.c_str(),      -1, SQLITE_STATIC);
             sqlite3_bind_int  (bs, 14, b.snapToPrev ? 1 : 0);
+            sqlite3_bind_int  (bs, 15, b.snapToSec  ? 1 : 0);
             sqlite3_step(bs); sqlite3_finalize(bs);
         }
     }
@@ -561,7 +584,7 @@ std::vector<TLTrack> Database::LoadSnapshot(int64_t id) const {
         sqlite3_stmt* bs = nullptr;
         rc = sqlite3_prepare_v2(m_db,
             "SELECT at_ms,block_type,ss,iso,fstop,cnt,ev,"
-            "       burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev"
+            "       burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev,snap_to_sec"
             " FROM tl_snap_blocks WHERE track_id=? ORDER BY at_ms;",
             -1, &bs, nullptr);
         if (rc != SQLITE_OK) continue;
@@ -581,6 +604,7 @@ std::vector<TLTrack> Database::LoadSnapshot(int64_t id) const {
             b.audioDurMs = sqlite3_column_int(bs, 10);
             b.label      = col(bs, 11);
             b.snapToPrev = sqlite3_column_int(bs, 12) != 0;
+            b.snapToSec  = sqlite3_column_int(bs, 13) != 0;
             tr.blocks.push_back(std::move(b));
         }
         sqlite3_finalize(bs);

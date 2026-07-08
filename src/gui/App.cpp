@@ -235,6 +235,7 @@ void App::SaveObserverSettings() {
     m_configDb.SetSetting("obs_lat",   std::format("{:.6f}", m_obsLat).c_str());
     m_configDb.SetSetting("obs_lon",   std::format("{:.6f}", m_obsLon).c_str());
     m_configDb.SetSettingInt("obs_alt_m", m_obsAltM);
+    m_configDb.SetSetting("obs_name",  m_obsName.c_str());
 }
 
 static float DmsToDecimal(const DmsCoord& d) {
@@ -260,6 +261,147 @@ void App::SyncDecimalToDms() {
 void App::SyncDmsToDecimal() {
     m_obsLat = DmsToDecimal(m_latDms);
     m_obsLon = DmsToDecimal(m_lonDms);
+}
+
+// ─── Google Maps URL → lat/lon/name ────────────────────────────────────────────
+
+// '+' → space, "%XX" → raw byte (percent-encoded UTF-8 passes through unchanged
+// and renders fine — ImGui text is UTF-8, default font covers Latin-1 Supplement).
+static std::string UrlDecode(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    auto hexVal = [](char h) -> int {
+        if (h >= '0' && h <= '9') return h - '0';
+        if (h >= 'a' && h <= 'f') return h - 'a' + 10;
+        if (h >= 'A' && h <= 'F') return h - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '+') {
+            out += ' ';
+        } else if (in[i] == '%' && i + 2 < in.size()) {
+            int hi = hexVal(in[i + 1]), lo = hexVal(in[i + 2]);
+            if (hi >= 0 && lo >= 0) { out += static_cast<char>((hi << 4) | lo); i += 2; }
+            else out += in[i];
+        } else {
+            out += in[i];
+        }
+    }
+    return out;
+}
+
+// Extracts the clicked-point coordinates and (optionally) the place name from a
+// Google Maps URL. Prefers the precise pin "!3d<lat>!4d<lon>" pair over the map
+// camera centre "@<lat>,<lon>,<zoom>" — the former is the actual marked point.
+static bool ParseGoogleMapsUrl(const std::string& url, double& lat, double& lon,
+                                std::string& name) {
+    bool found = false;
+
+    if (auto p3 = url.find("!3d"); p3 != std::string::npos) {
+        const char* s = url.c_str() + p3 + 3;
+        char* endLat  = nullptr;
+        double la = std::strtod(s, &endLat);
+        if (endLat != s && endLat[0] == '!' && endLat[1] == '4' && endLat[2] == 'd') {
+            char* endLon = nullptr;
+            double lo = std::strtod(endLat + 3, &endLon);
+            if (endLon != endLat + 3) { lat = la; lon = lo; found = true; }
+        }
+    }
+
+    if (!found) {
+        if (auto pAt = url.find('@'); pAt != std::string::npos) {
+            const char* s = url.c_str() + pAt + 1;
+            char* endLat = nullptr;
+            double la = std::strtod(s, &endLat);
+            if (endLat != s && *endLat == ',') {
+                char* endLon = nullptr;
+                double lo = std::strtod(endLat + 1, &endLon);
+                if (endLon != endLat + 1) { lat = la; lon = lo; found = true; }
+            }
+        }
+    }
+
+    if (!found || lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0)
+        return false;
+
+    name.clear();
+    static constexpr char kPlaceMarker[] = "/place/";
+    if (auto pPlace = url.find(kPlaceMarker); pPlace != std::string::npos) {
+        size_t s = pPlace + sizeof(kPlaceMarker) - 1;
+        size_t e = url.find('/', s);
+        if (e == std::string::npos) e = url.size();
+        name = UrlDecode(url.substr(s, e - s));
+    }
+    return true;
+}
+
+void App::ApplyGoogleMapsUrl() {
+    std::string url(m_gmapsUrlBuf);
+    double lat = 0.0, lon = 0.0;
+    std::string name;
+
+    if (!ParseGoogleMapsUrl(url, lat, lon, name)) {
+        m_gmapsStatusMsg   = "Nie rozpoznano URL Google Maps";
+        m_gmapsStatusIsErr = true;
+        return;
+    }
+
+    m_obsLat = static_cast<float>(lat);
+    m_obsLon = static_cast<float>(lon);
+    // Place name is no longer taken from the Google Maps URL (often absent,
+    // e.g. bare @lat,lon links) — resolved via OpenStreetMap reverse geocoding
+    // instead, together with elevation, in GeoElevationThreadProc.
+    SyncDecimalToDms();
+    SaveObserverSettings();
+
+    m_gmapsStatusMsg   = std::format("Lat={:.6f} Lon={:.6f} — pobieranie wysokosci i nazwy...", lat, lon);
+    m_gmapsStatusIsErr = false;
+
+    if (m_geoThread.joinable()) m_geoThread.join();
+    m_geoState.store(1);
+    m_geoThread = std::thread(&App::GeoElevationThreadProc, this, lat, lon);
+
+    LogLine(std::format("SET LOCATION: parsed lat={:.6f} lon={:.6f} (url place=\"{}\")",
+                        lat, lon, name));
+}
+
+void App::ApplyLocationAndCalculate() {
+    bool haveMapCoords = false;
+    if (m_gmapsUrlBuf[0] != '\0') {
+        ApplyGoogleMapsUrl();
+        haveMapCoords = !m_gmapsStatusIsErr;
+    }
+
+    // No coordinates from the map (empty field or unparseable URL) — fall
+    // back to the selected eclipse's GE (greatest eclipse) location.
+    if (!haveMapCoords &&
+        m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
+        const auto& e = m_eclipses[m_eclipseIdx];
+        m_obsLat = e.latGe;
+        m_obsLon = e.lonGe;
+        SyncDecimalToDms();
+        SaveObserverSettings();
+    }
+
+    TriggerIqpFetch();
+}
+
+void App::GeoElevationThreadProc(double lat, double lon) {
+    auto logger = [this](std::string_view msg) { LogLine(msg); };
+
+    // Reverse-geocode the place name via OpenStreetMap Nominatim. Cleared
+    // first so a failed lookup here never reapplies a stale name from a
+    // previous successful run.
+    GeocodeResult geo = ReverseGeocode(lat, lon, logger);
+    { std::lock_guard lk(m_geoMutex); m_geoNamePending = geo.ok ? geo.name : std::string(); }
+
+    ElevationResult res = FetchElevationM(lat, lon, logger);
+    if (res.ok) {
+        { std::lock_guard lk(m_geoMutex); m_geoElevM = res.elevM; }
+        m_geoState.store(2);
+    } else {
+        m_geoState.store(3);
+    }
 }
 
 void App::TriggerIqpFetch() {
@@ -638,8 +780,8 @@ void App::SuviThreadProc() {
     const char* end = p + dirHtml.size();
     // Rule 2: each iteration advances p by at least suffix.size() chars,
     // so the loop executes at most dirHtml.size() / suffix.size() times.
-    const size_t kMaxIter = kMaxDirBytes / suffix.size() + 1;
-    size_t iterCount = 0;
+    [[maybe_unused]] const size_t kMaxIter = kMaxDirBytes / suffix.size() + 1;
+    [[maybe_unused]] size_t iterCount = 0;
     while (p < end) {
         assert(++iterCount <= kMaxIter);  // rule 2: explicit upper bound
         // Find suffix
@@ -809,6 +951,237 @@ void App::CreateSuviTextures() {
         m_suviSrvs.push_back(srv);
         f.rgba.clear();   // free CPU memory after GPU upload
     }
+}
+
+// ─── Moon texture (static NASA archive photo, fetched once) ───────────────────
+// images-assets.nasa.gov/image/GSFC_20171208_Archive_e001982 — full lunar disc
+// on pure black background; alpha = max(R,G,B) so the background is
+// transparent. Unlike SUVI this never changes, so it's cached locally and
+// only fetched from the network on first run.
+
+void App::TriggerMoonFetch() {
+    assert(m_d3dDev != nullptr);
+    if (m_moonFetching.load()) return;
+    m_moonFetching.store(true);
+    if (m_moonThread.joinable()) m_moonThread.detach();
+    m_moonThread = std::thread(&App::MoonThreadProc, this);
+}
+
+void App::MoonThreadProc() {
+    assert(m_moonFetching.load());
+    CoInitialize(nullptr);
+
+    static constexpr size_t kMaxJpegBytes = 4u * 1024u * 1024u;
+    std::wstring cachePath = ExeDir() + L"\\TotalControlMoon.jpg";
+
+    // Local cache first — this is a static archive photo that never changes,
+    // so it's fetched from NASA exactly once, ever (per this exe location).
+    std::vector<uint8_t> jpg;
+    HANDLE hf = CreateFileW(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                            nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD sz = GetFileSize(hf, nullptr);
+        if (sz > 0 && sz < kMaxJpegBytes) {
+            jpg.resize(sz);
+            DWORD got = 0;
+            if (!ReadFile(hf, jpg.data(), sz, &got, nullptr) || got != sz) jpg.clear();
+        }
+        CloseHandle(hf);
+        if (!jpg.empty()) LogLine("MOON: loaded from local cache (TotalControlMoon.jpg)");
+    }
+
+    if (jpg.empty()) {
+        LogLine("MOON: not cached — fetching from images-assets.nasa.gov (one-time)");
+        jpg = FetchHttpsBytes(L"images-assets.nasa.gov",
+            L"/image/GSFC_20171208_Archive_e001982/GSFC_20171208_Archive_e001982~orig.jpg",
+            static_cast<int>(kMaxJpegBytes),
+            [this](std::string_view m) { LogLine(m); });
+        if (!jpg.empty()) {
+            HANDLE hw = CreateFileW(cachePath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                    CREATE_ALWAYS, 0, nullptr);
+            if (hw != INVALID_HANDLE_VALUE) {
+                DWORD wr = 0;
+                WriteFile(hw, jpg.data(), static_cast<DWORD>(jpg.size()), &wr, nullptr);
+                CloseHandle(hw);
+                LogLine("MOON: cached to TotalControlMoon.jpg for future runs");
+            }
+        }
+    }
+
+    if (jpg.empty()) {
+        LogLine("MOON: fetch failed — no image available, using flat disc fallback");
+        m_moonFetching.store(false); CoUninitialize(); return;
+    }
+
+    // ── WIC decode: JPEG -> RGBA; alpha = max(R,G,B) ──────────────────────────
+    IWICImagingFactory* wicFac = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                  CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFac));
+    if (FAILED(hr)) {
+        LogLine(std::format("MOON: WIC factory {:08x}", static_cast<unsigned>(hr)));
+        m_moonFetching.store(false); CoUninitialize(); return;
+    }
+
+    std::vector<uint8_t> px;
+    UINT imgW = 0, imgH = 0;
+    IWICStream* ws = nullptr;
+    if (SUCCEEDED(wicFac->CreateStream(&ws))) {
+        HRESULT hrc = ws->InitializeFromMemory(jpg.data(), static_cast<DWORD>(jpg.size()));
+        IWICBitmapDecoder* dec = nullptr;
+        if (SUCCEEDED(hrc))
+            hrc = wicFac->CreateDecoderFromStream(ws, nullptr, WICDecodeMetadataCacheOnLoad, &dec);
+        ws->Release();
+        if (SUCCEEDED(hrc)) {
+            IWICBitmapFrameDecode* frm = nullptr;
+            hrc = dec->GetFrame(0, &frm);
+            dec->Release();
+            if (SUCCEEDED(hrc)) {
+                IWICFormatConverter* conv = nullptr;
+                hrc = wicFac->CreateFormatConverter(&conv);
+                if (SUCCEEDED(hrc))
+                    hrc = conv->Initialize(frm, GUID_WICPixelFormat32bppRGBA,
+                                           WICBitmapDitherTypeNone, nullptr, 0.f,
+                                           WICBitmapPaletteTypeCustom);
+                frm->Release();
+                if (SUCCEEDED(hrc)) {
+                    conv->GetSize(&imgW, &imgH);
+                    px.resize(static_cast<size_t>(imgW) * imgH * 4);
+                    hrc = conv->CopyPixels(nullptr, imgW * 4,
+                                          static_cast<UINT>(px.size()), px.data());
+                    if (FAILED(hrc)) px.clear();
+                    conv->Release();
+                }
+            }
+        }
+    }
+    wicFac->Release();
+
+    if (px.empty() || imgW == 0 || imgH == 0) {
+        LogLine("MOON: JPEG decode failed");
+        m_moonFetching.store(false); CoUninitialize(); return;
+    }
+
+    // Pass 1: rough luminance scan just to find the disc's bounding box.
+    // (Not used for the final alpha — dark maria/shadowed craters are dim
+    // enough to trip a luminance threshold too, which made the Moon itself
+    // partly transparent even at 100% opacity.)
+    static constexpr uint8_t kAlphaThresh = 12;
+    int minX = static_cast<int>(imgW), maxX = -1;
+    int minY = static_cast<int>(imgH), maxY = -1;
+    for (UINT y = 0; y < imgH; ++y) {
+        for (UINT x = 0; x < imgW; ++x) {
+            size_t p = (static_cast<size_t>(y) * imgW + x) * 4;
+            uint8_t lum = static_cast<uint8_t>(std::max({ px[p], px[p+1], px[p+2] }));
+            if (lum > kAlphaThresh) {
+                minX = std::min(minX, static_cast<int>(x));
+                maxX = std::max(maxX, static_cast<int>(x));
+                minY = std::min(minY, static_cast<int>(y));
+                maxY = std::max(maxY, static_cast<int>(y));
+            }
+        }
+    }
+    if (maxX < minX || maxY < minY) {
+        // Degenerate (all-black) decode — fall back to the full frame.
+        minX = 0; maxX = static_cast<int>(imgW) - 1;
+        minY = 0; maxY = static_cast<int>(imgH) - 1;
+    }
+
+    // Pass 2: geometric circular mask from the detected centre/radius —
+    // fully opaque anywhere inside the disc (however dark that terrain is),
+    // fully transparent outside, with a small feather at the edge to avoid
+    // a jagged silhouette.
+    {
+        float discCx = (minX + maxX) * 0.5f;
+        float discCy = (minY + maxY) * 0.5f;
+        float discR  = std::max(1.f, ((maxX - minX) + (maxY - minY)) * 0.25f);
+        constexpr float kFeatherPx = 1.5f;
+        for (UINT y = 0; y < imgH; ++y) {
+            float dy = static_cast<float>(y) - discCy;
+            for (UINT x = 0; x < imgW; ++x) {
+                float dx = static_cast<float>(x) - discCx;
+                float d  = sqrtf(dx * dx + dy * dy);
+                uint8_t a;
+                if (d <= discR - kFeatherPx) a = 255;
+                else if (d >= discR + kFeatherPx) a = 0;
+                else a = static_cast<uint8_t>(
+                    (discR + kFeatherPx - d) / (2.f * kFeatherPx) * 255.f + 0.5f);
+                px[(static_cast<size_t>(y) * imgW + x) * 4 + 3] = a;
+            }
+        }
+    }
+
+    {
+        std::lock_guard lk(m_moonMutex);
+        m_moonPending   = std::move(px);
+        m_moonPendingW  = static_cast<int>(imgW);
+        m_moonPendingH  = static_cast<int>(imgH);
+        m_moonPendingCx = (minX + maxX) * 0.5f;
+        m_moonPendingCy = (minY + maxY) * 0.5f;
+        m_moonPendingR  = std::max(1.f, ((maxX - minX) + (maxY - minY)) * 0.25f);
+    }
+    m_moonNewData.store(true);
+    LogLine(std::format("MOON: decoded {}x{}  disc centre=({:.0f},{:.0f}) r={:.0f}px",
+                        imgW, imgH, (minX + maxX) * 0.5f, (minY + maxY) * 0.5f,
+                        ((maxX - minX) + (maxY - minY)) * 0.25f));
+    m_moonFetching.store(false);
+    CoUninitialize();
+}
+
+void App::CreateMoonTexture() {
+    assert(m_d3dDev != nullptr);
+    assert(m_moonNewData.load());
+    m_moonNewData.store(false);
+
+    std::vector<uint8_t> px;
+    int w = 0, h = 0;
+    {
+        std::lock_guard lk(m_moonMutex);
+        px = std::move(m_moonPending);
+        m_moonPending.clear();
+        w = m_moonPendingW;
+        h = m_moonPendingH;
+        m_moonDiscCx = m_moonPendingCx;
+        m_moonDiscCy = m_moonPendingCy;
+        m_moonDiscR  = m_moonPendingR;
+    }
+    if (px.empty() || w <= 0 || h <= 0) return;
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width            = static_cast<UINT>(w);
+    td.Height           = static_cast<UINT>(h);
+    td.MipLevels        = 1;
+    td.ArraySize        = 1;
+    td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage            = D3D11_USAGE_DEFAULT;
+    td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA init{};
+    init.pSysMem     = px.data();
+    init.SysMemPitch = static_cast<UINT>(w * 4);
+
+    ID3D11Texture2D* tex = nullptr;
+    HRESULT hr = m_d3dDev->CreateTexture2D(&td, &init, &tex);
+    if (FAILED(hr)) {
+        LogLine(std::format("MOON: CreateTexture2D {:08x}", static_cast<unsigned>(hr)));
+        return;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvd{};
+    srvd.Format              = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvd.ViewDimension       = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvd.Texture2D.MipLevels = 1;
+
+    if (m_moonSrv) { m_moonSrv->Release(); m_moonSrv = nullptr; }
+    hr = m_d3dDev->CreateShaderResourceView(tex, &srvd, &m_moonSrv);
+    tex->Release();
+    if (FAILED(hr)) {
+        LogLine(std::format("MOON: CreateSRV {:08x}", static_cast<unsigned>(hr)));
+        return;
+    }
+    m_moonImgW = w;
+    m_moonImgH = h;
+    LogLine("MOON: texture uploaded to GPU");
 }
 
 // ─── Live View thread ────────────────────────────────────────────────────────
@@ -1018,6 +1391,27 @@ static int64_t ArmEstMs(const TLBlock& b) {
     return 2000LL;
 }
 
+int64_t App::SnapMsToRelativeSecond(int64_t ms) {
+    ContactTimes ct;
+    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+    if (!ct.valid) ct = m_beResult;
+
+    const int64_t cMs[4] = { ct.c1Ms, ct.c2Ms, ct.c3Ms, ct.c4Ms };
+    int64_t best = -1, bestD = INT64_MAX;
+    for (int64_t c : cMs) {
+        if (c <= 0) continue;
+        int64_t d = llabs(ms - c);
+        if (d < bestD) { bestD = d; best = c; }
+    }
+
+    // No contacts yet — fall back to rounding to the nearest whole UTC second.
+    if (best < 0) return ((ms + 500) / 1000) * 1000;
+
+    int64_t offset = ms - best;
+    int64_t roundedOffset = ((offset >= 0 ? offset + 500 : offset - 500) / 1000) * 1000;
+    return best + roundedOffset;
+}
+
 int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
     assert(b.type == BlockType::Audio || !b.ss.empty());  // camera blocks must have a shutter speed
     assert(b.type != BlockType::Bracket || b.count >= 1); // bracket must have at least 1 shot
@@ -1202,17 +1596,33 @@ void App::StatusThreadProc() {
     std::string cam = std::to_string(camIdx);
 
     if (blk.type == BlockType::Single) {
+        // Timeout must scale with shutter speed — the daemon's flat 5000ms
+        // default (CommandHandler.cpp, count==1 case) times out mid-exposure
+        // for long single shots (e.g. Earthshine 10-40s), which then leaves
+        // the camera physically still exposing when the next block's ARM
+        // fires, cascading into CrError_Api_Insufficient on every following
+        // property set until the real exposure finally ends.
+        int64_t ssMs = ParseSsMs(blk.ss);
+        int64_t timeoutMs = ssMs + 5000;
         return std::format(
             "{{\"cmd\":\"shoot\",\"drive\":\"single\","
-            "\"ss\":\"{}\",\"iso\":{},\"f\":{},\"cam\":\"{}\"}}",
-            blk.ss, blk.iso, blk.fstop, cam);
+            "\"ss\":\"{}\",\"iso\":{},\"f\":{},"
+            "\"timeout_ms\":{},\"cam\":\"{}\"}}",
+            blk.ss, blk.iso, blk.fstop, timeoutMs, cam);
     }
     if (blk.type == BlockType::Bracket) {
+        // Same scaling issue as Single: the daemon's flat 15000ms default
+        // (CommandHandler.cpp bracket branch) doesn't account for count x SS
+        // — a slow-corona bracket (e.g. 5 shots at several seconds each) can
+        // exceed it well before the real capture sequence finishes.
+        int64_t ssMs = ParseSsMs(blk.ss);
+        int64_t timeoutMs = int64_t(blk.count) * (ssMs + kCamOverheadMs) + 5000;
         return std::format(
             "{{\"cmd\":\"bracket\",\"mode\":\"cont\","
             "\"ss\":\"{}\",\"iso\":{},\"f\":{},"
-            "\"ev\":\"{}\",\"count\":{},\"cam\":\"{}\"}}",
-            blk.ss, blk.iso, blk.fstop, blk.ev, blk.count, cam);
+            "\"ev\":\"{}\",\"count\":{},"
+            "\"timeout_ms\":{},\"cam\":\"{}\"}}",
+            blk.ss, blk.iso, blk.fstop, blk.ev, blk.count, timeoutMs, cam);
     }
     if (blk.type == BlockType::Burst) {
         int timeoutMs = blk.burstDurMs + 2000;
@@ -1778,7 +2188,7 @@ void App::AddPhotoPreset() {
     { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
     if (!ct.valid) ct = m_beResult;
     if (!ct.valid || ct.c1Ms <= 0 || ct.c4Ms <= 0) {
-        m_lastResult = "Photo Preset: calculate contacts first (C1 and C4 required)";
+        m_lastResult = "One Picture Per Minute: calculate contacts first (C1 and C4 required)";
         return;
     }
 
@@ -1788,7 +2198,7 @@ void App::AddPhotoPreset() {
         ti = -1;
         for (int i = 0; i < static_cast<int>(m_tracks.size()); ++i)
             if (!m_tracks[i].IsAudio()) { ti = i; break; }
-        if (ti < 0) { m_lastResult = "Photo Preset: no camera track available"; return; }
+        if (ti < 0) { m_lastResult = "One Picture Per Minute: no camera track available"; return; }
         m_presetTargetTrack = ti;
     }
 
@@ -1799,8 +2209,14 @@ void App::AddPhotoPreset() {
     TLTrack& trk = m_tracks[ti];
     trk.blocks.clear();
 
+    // Skip C2..C3 (totality) — that window gets its own bracket sequence via
+    // AddTotalityBracketPreset(); one single shot per minute isn't meant for
+    // the fast-changing corona.
+    bool hasTotality = ct.c2Ms > 0 && ct.c3Ms > 0;
+
     int count = 0;
     for (int64_t t = startMs; t <= endMs; t += kStepMs) {
+        if (hasTotality && t >= ct.c2Ms && t <= ct.c3Ms) continue;
         TLBlock b;
         b.type   = BlockType::Single;
         b.atMs   = t;
@@ -1813,7 +2229,61 @@ void App::AddPhotoPreset() {
     }
 
     m_tlDirty    = true;
-    m_lastResult = std::format("Photo Preset: {} blocks on track \"{}\"", count, trk.label);
+    m_lastResult = std::format("One Picture Per Minute: {} blocks on track \"{}\"", count, trk.label);
+    LogLine(m_lastResult);
+}
+
+void App::AddTotalityBracketPreset() {
+    assert(m_presetTargetTrack >= 0);
+    assert(m_presetTargetTrack < static_cast<int>(m_tracks.size()));  // rule 5: target track must exist
+
+    ContactTimes ct;
+    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
+    if (!ct.valid) ct = m_beResult;
+    if (!ct.valid || ct.c2Ms <= 0 || ct.c3Ms <= 0) {
+        m_lastResult = "Totality Brackets: calculate contacts first (C2 and C3 required)";
+        return;
+    }
+
+    // Validate/fix target track — must be a camera track.
+    int ti = m_presetTargetTrack;
+    if (ti < 0 || ti >= static_cast<int>(m_tracks.size()) || m_tracks[ti].IsAudio()) {
+        ti = -1;
+        for (int i = 0; i < static_cast<int>(m_tracks.size()); ++i)
+            if (!m_tracks[i].IsAudio()) { ti = i; break; }
+        if (ti < 0) { m_lastResult = "Totality Brackets: no camera track available"; return; }
+        m_presetTargetTrack = ti;
+    }
+
+    TLTrack& trk = m_tracks[ti];
+
+    // Replace only the C2..C3 window — leaves any partial-phase blocks
+    // outside totality untouched, so this preset can be (re)run independently
+    // of "One Picture Per Minute".
+    trk.blocks.erase(
+        std::remove_if(trk.blocks.begin(), trk.blocks.end(),
+            [&](const TLBlock& b) { return b.atMs >= ct.c2Ms && b.atMs <= ct.c3Ms; }),
+        trk.blocks.end());
+
+    static constexpr int64_t kStepMs = 3LL * 1000;
+    int count = 0;
+    for (int64_t t = ct.c2Ms; t <= ct.c3Ms; t += kStepMs) {
+        TLBlock b;
+        b.type  = BlockType::Bracket;
+        b.atMs  = t;
+        b.ss    = "1/125";
+        b.iso   = 100;
+        b.fstop = "8.0";
+        b.count = 5;
+        b.ev    = "1.0ev";
+        trk.blocks.push_back(std::move(b));
+        ++count;
+    }
+    std::sort(trk.blocks.begin(), trk.blocks.end(),
+              [](const TLBlock& a, const TLBlock& b) { return a.atMs < b.atMs; });
+
+    m_tlDirty    = true;
+    m_lastResult = std::format("Totality Brackets: {} blocks on track \"{}\"", count, trk.label);
     LogLine(m_lastResult);
 }
 
@@ -1847,14 +2317,13 @@ void App::RenderSequencerButtons() {
     static const ImVec4 kGray   {0.40f, 0.40f, 0.45f, 1.0f};
     static const ImVec4 kDim    {0.28f, 0.28f, 0.32f, 1.0f};
     static const ImVec4 kGreen  {0.20f, 0.85f, 0.30f, 1.0f};
+    static const ImVec4 kWhiteTxt {1.00f, 1.00f, 1.00f, 1.0f};
     // TEST palette — yellow/amber
     static const ImVec4 kTestBg    {0.35f, 0.28f, 0.04f, 1.0f};
     static const ImVec4 kTestHover {0.60f, 0.48f, 0.06f, 1.0f};
-    static const ImVec4 kTestText  {1.00f, 0.82f, 0.20f, 1.0f};
     // RUN palette — red
     static const ImVec4 kRunBg     {0.38f, 0.06f, 0.06f, 1.0f};
     static const ImVec4 kRunHover  {0.65f, 0.10f, 0.10f, 1.0f};
-    static const ImVec4 kRunText   {1.00f, 0.35f, 0.35f, 1.0f};
     // STOP palette — neutral dark
     static const ImVec4 kStopBg    {0.22f, 0.22f, 0.26f, 1.0f};
     static const ImVec4 kStopHover {0.35f, 0.35f, 0.40f, 1.0f};
@@ -1865,7 +2334,8 @@ void App::RenderSequencerButtons() {
     for (auto& tr : m_tracks)
         if (tr.IsCamera() && !tr.blocks.empty()) { hasBlocks = true; break; }
 
-    const ImVec2 kBtnSz(-1, 30);
+    const float halfW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    const ImVec2 kBtnSz(halfW, 30);
 
     ImGui::Spacing();
     ImGui::SeparatorText("EXECUTE");
@@ -1873,22 +2343,8 @@ void App::RenderSequencerButtons() {
     ImGui::PushFont(m_fontMono);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
 
-    // ── Playhead display ─────────────────────────────────────────────────
-    {
-        int64_t ph = m_tlPlayheadMs.load();
-        if (ph > 0) {
-            int64_t sv = ph / 1000;
-            char buf[20];
-            snprintf(buf, sizeof(buf), "\xe2\x96\xb6 %02d:%02d:%02d.%03d",
-                     (int)((sv/3600)%24),(int)((sv/60)%60),(int)(sv%60),(int)(ph%1000));
-            ImVec4 phCol = (sm == GuiSeqMode::TestRunning) ? kGreen : kTestText;
-            ImGui::TextColored(phCol, "%s", buf);
-        } else {
-            ImGui::TextColored(kDim, "\xe2\x96\xb6 --:--:--");
-        }
-    }
-
-    ImGui::Spacing();
+    // Playhead time display moved to the Sky View Simulator status bar
+    // (next to "Obs=") — this column was too narrow to show it legibly.
 
     // ── TEST RUN / STOP ───────────────────────────────────────────────────
     bool testRunning = (sm == GuiSeqMode::TestRunning);
@@ -1900,10 +2356,10 @@ void App::RenderSequencerButtons() {
     if (!canTestStart) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button,        kTestBg);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kTestHover);
-    ImGui::PushStyleColor(ImGuiCol_Text,          kTestText);
+    ImGui::PushStyleColor(ImGuiCol_Text,          kWhiteTxt);
     const char* testBtnLabel = testPaused
-        ? "\xe2\x96\xb6 RESUME TEST"
-        : "\xe2\x96\xb6 TEST RUN";
+        ? "RESUME TEST"
+        : "TEST RUN";
     if (ImGui::Button(testBtnLabel, kBtnSz)) {
         if (!testPaused) {
             // Fresh start: reset per-track indices to blocks at/after playhead
@@ -1935,12 +2391,15 @@ void App::RenderSequencerButtons() {
     ImGui::PopStyleColor(3);
     if (!canTestStart) ImGui::EndDisabled();
 
+    ImGui::SameLine();
+
     // STOP TEST  (enabled only when TestRunning or TestPaused)
     bool canTestStop = testRunning || testPaused;
     if (!canTestStop) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button,        kStopBg);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kStopHover);
-    if (ImGui::Button("\xe2\x96\xa0 STOP TEST", kBtnSz)) {
+    ImGui::PushStyleColor(ImGuiCol_Text,          kWhiteTxt);
+    if (ImGui::Button("STOP TEST", kBtnSz)) {
         if (testRunning) {
             StopSeqThread();
             m_guiSeqMode.store(GuiSeqMode::TestPaused);
@@ -1954,23 +2413,16 @@ void App::RenderSequencerButtons() {
             LogLine("Sequencer: TEST reset to idle");
         }
     }
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(3);
     if (!canTestStop) ImGui::EndDisabled();
 
-    ImGui::Spacing();
-
     // ── RUN (production — real UTC time) ─────────────────────────────────
-    ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.50f,0.15f,0.15f,1.0f));
-    ImGui::Separator();
-    ImGui::PopStyleColor();
-    ImGui::Spacing();
-
     bool canRun = connected && hasBlocks && !anyRun && !testRunning;
     if (!canRun) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button,        kRunBg);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kRunHover);
-    ImGui::PushStyleColor(ImGuiCol_Text,          kRunText);
-    if (ImGui::Button("\xe2\x96\xb6 RUN", kBtnSz)) {
+    ImGui::PushStyleColor(ImGuiCol_Text,          kWhiteTxt);
+    if (ImGui::Button("RUN", kBtnSz)) {
         // RUN always starts from beginning of all tracks
         for (int i = 0; i < kMaxCamTracks;  ++i) m_seqNextBlock[i]   = 0;
         for (int i = 0; i < kMaxAudioTracks; ++i) m_audioNextBlock[i].store(0, std::memory_order_relaxed);
@@ -1981,12 +2433,14 @@ void App::RenderSequencerButtons() {
     ImGui::PopStyleColor(3);
     if (!canRun) ImGui::EndDisabled();
 
+    ImGui::SameLine();
+
     bool canStopRun = anyRun;
     if (!canStopRun) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button,        kStopBg);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kStopHover);
-    ImGui::PushStyleColor(ImGuiCol_Text,          kRunText);
-    if (ImGui::Button("\xe2\x96\xa0 STOP RUN", kBtnSz)) {
+    ImGui::PushStyleColor(ImGuiCol_Text,          kWhiteTxt);
+    if (ImGui::Button("STOP RUN", kBtnSz)) {
         StopSeqThread();
         m_guiSeqMode.store(GuiSeqMode::Idle);
         LogLine("Sequencer: RUN stopped");
@@ -2001,7 +2455,6 @@ void App::RenderSequencerButtons() {
         ImGui::Spacing();
         static const ImVec4 kCalibBg    {0.06f, 0.24f, 0.38f, 1.0f};
         static const ImVec4 kCalibHover {0.10f, 0.40f, 0.65f, 1.0f};
-        static const ImVec4 kCalibText  {0.45f, 0.85f, 1.00f, 1.0f};
 
         // Determine camera model from first connected camera, or "Unknown"
         std::string camModel;
@@ -2016,8 +2469,8 @@ void App::RenderSequencerButtons() {
             "SAVE CALIB: {} ({} smp)", camModel, m_seqCalibBuf.size());
         ImGui::PushStyleColor(ImGuiCol_Button,        kCalibBg);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kCalibHover);
-        ImGui::PushStyleColor(ImGuiCol_Text,          kCalibText);
-        if (ImGui::Button(btnLbl.c_str(), kBtnSz))
+        ImGui::PushStyleColor(ImGuiCol_Text,          kWhiteTxt);
+        if (ImGui::Button(btnLbl.c_str(), ImVec2(-1, 30)))
             SaveCalibFromBuf(camModel);
         ImGui::PopStyleColor(3);
     }
@@ -2596,14 +3049,49 @@ void App::RenderSolarView() {
     }
 
     // ── Moon disc — on top of SUVI and LV (Księżyc zakrywa Słońce) ───────────
+    // Textured NASA photo when available/enabled; flat disc as fallback.
+    // During totality always solid black, regardless of the texture.
     {
+        if (m_moonNewData.load()) CreateMoonTexture();
+
         float dxM = moonX - cx, dyM = moonY - cy;
         float dist = sqrtf(dxM * dxM + dyM * dyM);
-        bool  isTotality = (dist + sunR < moonR);
-        ImU32 moonFill   = isTotality ? IM_COL32(0, 0, 0, 255)
-                                      : IM_COL32(55, 55, 52, 255);
-        dl->AddCircleFilled({moonX, moonY}, moonR, moonFill);
-        dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
+        bool  isTotality     = (dist + sunR < moonR);
+        bool  moonTexVisible = !isTotality && m_moonOpacity >= 0.05f
+                            && m_moonSrv && m_moonImgW > 0 && m_moonImgH > 0;
+
+        if (isTotality) {
+            dl->AddCircleFilled({moonX, moonY}, moonR, IM_COL32(0, 0, 0, 255));
+            dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
+        } else if (moonTexVisible) {
+            // Scale so the auto-detected disc (not the letterboxed frame)
+            // matches moonR; rotate with the Moon's N-pole PA (moonVrad).
+            float moonScale = moonR / m_moonDiscR;
+            float halfW = (m_moonImgW * 0.5f) * moonScale;
+            float halfH = (m_moonImgH * 0.5f) * moonScale;
+            float offXpx = m_moonDiscCx - m_moonImgW * 0.5f;
+            float offYpx = m_moonDiscCy - m_moonImgH * 0.5f;
+            float cosV = cosf(moonVrad), sinV = sinf(moonVrad);
+            float offX = (offXpx * cosV - offYpx * sinV) * moonScale;
+            float offY = (offXpx * sinV + offYpx * cosV) * moonScale;
+            float ccx  = moonX - offX, ccy = moonY - offY;
+
+            float rx  = halfW * cosV,  ry  = halfW * sinV;
+            float dxx = -halfH * sinV, dyy = halfH * cosV;
+            ImVec2 tl{ ccx - rx - dxx, ccy - ry - dyy };
+            ImVec2 tr{ ccx + rx - dxx, ccy + ry - dyy };
+            ImVec2 br{ ccx + rx + dxx, ccy + ry + dyy };
+            ImVec2 bl{ ccx - rx + dxx, ccy - ry + dyy };
+            ImU32 moonCol = IM_COL32(255, 255, 255,
+                static_cast<ImU32>(m_moonOpacity * 255.f + 0.5f));
+            dl->AddImageQuad(
+                static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(m_moonSrv)),
+                tl, tr, br, bl,
+                {0.f,0.f},{1.f,0.f},{1.f,1.f},{0.f,1.f}, moonCol);
+        } else {
+            dl->AddCircleFilled({moonX, moonY}, moonR, IM_COL32(55, 55, 52, 255));
+            dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
+        }
     }
 
     // ── Solar rotation axis N☉ ────────────────────────────────────────────────
@@ -2720,58 +3208,84 @@ void App::RenderSolarView() {
 
     dl->PopClipRect();
 
-    // ── P angle readout + EPH status ─────────────────────────────────────────
-    ImGui::Spacing();
+    // ── P/q/rot/Alt/Obs + UTC/Home/Loc/PlayHead ───────────────────────────────
+    // Unified style: gray label, white value, fixed 25px gap between fields.
     ImGui::PushFont(m_fontMono);
-    if (hasEph && sunEph.utc_ms > 0) {
-        float rot = m_solarP - m_solarQ;
-        ImGui::TextColored(kGray,
-            "P=%.1f\xc2\xb0  q=%.1f\xc2\xb0  rot=%.1f\xc2\xb0  Alt=%.1f\xc2\xb0",
-            m_solarP, m_solarQ, rot, static_cast<float>(sunEph.alt_deg));
-        // Obscuration — colour shifts: dim→amber→bright-yellow at totality
-        ImGui::SameLine();
-        float obsPct = obscuration * 100.f;
-        ImVec4 obsCol = (obsPct >= 99.9f) ? ImVec4(1.f, .95f, .3f, 1.f)   // totality
-                      : (obsPct >= 50.f)  ? ImVec4(.95f,.6f, .1f, 1.f)    // deep partial
-                      :                     ImVec4(.5f, .5f, .55f, 1.f);   // early partial
-        ImGui::TextColored(obsCol, " Obs=%.2f%%", obsPct);
+    {
+        static const ImVec4 kValWhite{0.88f, 0.88f, 0.90f, 1.0f};
 
-        // Contact countdowns — one line to the right of Obs
-        {
-            ContactTimes ctBar;
-            { std::lock_guard lk(m_iqpMutex); ctBar = m_contacts; }
-            if (!ctBar.valid) ctBar = m_beResult;
-            if (ctBar.valid) {
-                int64_t nowBar = UtcNowMs();
-                ImVec4 cdBarCol = (obsPct >= 99.9f) ? ImVec4{0.95f,0.80f,0.20f,1.f}
-                                : (obsPct >= 0.1f)  ? ImVec4{0.85f,0.55f,0.15f,1.f}
-                                                    : ImVec4{0.55f,0.55f,0.60f,1.f};
-                struct BEvt { const char* lbl; int64_t ms; };
-                BEvt evts[] = {
-                    {"C1",ctBar.c1Ms},{"C2",ctBar.c2Ms},
-                    {"Max",ctBar.maxMs},{"C3",ctBar.c3Ms},{"C4",ctBar.c4Ms}
-                };
-                static constexpr int kBN = 5;
-                static_assert(sizeof(evts)/sizeof(evts[0]) == kBN);
-                char line[256]; line[0] = '\0'; int pos = 0;
-                for (int i = 0; i < kBN; ++i) {
-                    if (evts[i].ms <= 0) continue;
-                    char cd[32]; FormatCountdown(evts[i].ms - nowBar, cd, sizeof(cd));
-                    char seg[48];
-                    int segLen = snprintf(seg, sizeof(seg), "  %s: %s", evts[i].lbl, cd);
-                    if (segLen > 0 && pos + segLen < (int)sizeof(line) - 1) {
-                        memcpy(line + pos, seg, segLen); pos += segLen;
-                    }
-                }
-                line[pos] = '\0';
-                if (pos > 0) { ImGui::SameLine(); ImGui::TextColored(cdBarCol, "%s", line); }
-            }
+        auto Field = [&](const char* label, const char* fmt, auto&&... args) {
+            ImGui::TextColored(kGray, "%s", label);
+            ImGui::SameLine(0, 4);
+            ImGui::TextColored(kValWhite, fmt, args...);
+            ImGui::SameLine(0, 25);
+        };
+
+        if (hasEph && sunEph.utc_ms > 0) {
+            float rot = m_solarP - m_solarQ;
+            Field("P",   "%.1f\xc2\xb0", m_solarP);
+            Field("q",   "%.1f\xc2\xb0", m_solarQ);
+            Field("rot", "%.1f\xc2\xb0", rot);
+            Field("Alt", "%.1f\xc2\xb0", static_cast<float>(sunEph.alt_deg));
+            Field("Obs", "%.2f%%",       obscuration * 100.f);
+        } else if (m_ephFetching.load()) {
+            Field("EPH", "%s", "fetching...");
+        } else {
+            Field("P", "%.1f\xc2\xb0 (statyczny)", m_solarP);
         }
-    } else if (m_ephFetching.load()) {
-        ImGui::TextColored({0.55f,0.75f,0.95f,1.f}, "EPH: fetching...");
-    } else {
-        ImGui::TextColored(kGray, "P=%.1f\xc2\xb0 (statyczny — brak efemeryd)", m_solarP);
+
+        int64_t nowMs = UtcNowMs();
+        {
+            char buf[20]; FormatUtcHms(nowMs, buf, sizeof(buf));
+            Field("UTC", "%s", buf);
+        }
+
+        // One inline TZ clock: zone-name button (opens picker) + time.
+        // idSuffix is a stable ImGui id ("##gh_sim") independent of the
+        // visible zone code, which changes whenever the user picks a zone.
+        auto TzInline = [&](std::string& tzIana, const char* idSuffix, const char* popupId) {
+            char timeBuf[12]; FormatLocalHms(nowMs, tzIana, timeBuf, sizeof(timeBuf));
+            int  ci = TzFindByIana(m_tzList, tzIana);
+            assert(ci >= 0 && ci < static_cast<int>(m_tzList.size()));
+            std::string btnLabel = m_tzList[ci].code + idSuffix;
+            if (ImGui::SmallButton(btnLabel.c_str())) ImGui::OpenPopup(popupId);
+            ImGui::SameLine(0, 4);
+            ImGui::TextColored(kValWhite, "%s", timeBuf);
+            ImGui::SameLine(0, 25);
+            ImGui::SetNextWindowSizeConstraints(ImVec2(420, 0), ImVec2(420, 520));
+            if (ImGui::BeginPopup(popupId)) {
+                int ci2 = TzFindByIana(m_tzList, tzIana);
+                assert(m_tzList.size() <= 1024); // bounded: DB has 598 IANA zones
+                for (int i = 0; i < static_cast<int>(m_tzList.size()); ++i) {
+                    bool sel = (i == ci2);
+                    char entry[80];
+                    snprintf(entry, sizeof(entry), "%-22s  %s",
+                             m_tzList[i].code.c_str(), m_tzList[i].iana.c_str());
+                    if (ImGui::Selectable(entry, sel)) {
+                        tzIana = m_tzList[i].iana;
+                        SaveClockSettings();
+                        ImGui::CloseCurrentPopup();
+                    }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndPopup();
+            }
+        };
+
+        TzInline(m_homeTzIana, "##gh_sim", "##tz_home_sim");
+        TzInline(m_eclTzIana,  "##gl_sim", "##tz_loc_sim");
+
+        // PlayHead — always shown regardless of ephemeris availability.
+        int64_t ph = m_tlPlayheadMs.load();
+        if (ph > 0) {
+            int64_t sv = ph / 1000;
+            Field("PlayHead", "%02d:%02d:%02d.%03d",
+                (int)((sv/3600)%24), (int)((sv/60)%60), (int)(sv%60), (int)(ph%1000));
+        } else {
+            Field("PlayHead", "%s", "--:--:--");
+        }
     }
+
     ImGui::PopFont();
 }
 
@@ -2801,6 +3315,20 @@ void App::RenderInspectorColumn() {
             ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(.80f,.22f,.22f,1.f));
         }
     };
+
+    // Moon opacity slider — NASA archive photo, textured over the flat disc.
+    ImGui::PushFont(m_fontMono);
+    {
+        int moonPct = static_cast<int>(m_moonOpacity * 100.f + 0.5f);
+        PushSliderColor(moonPct >= 5);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderInt("##moon_op", &moonPct, 0, 100, "Moon  %d%%")) {
+            m_moonOpacity = moonPct / 100.f;
+            m_configDb.SetSettingInt("moon_opacity_pct", moonPct);
+        }
+        ImGui::PopStyleColor(4);
+    }
+    ImGui::PopFont();
 
     // SUVI opacity slider
     ImGui::PushFont(m_fontMono);
@@ -2840,13 +3368,13 @@ void App::RenderInspectorColumn() {
     bool suviChanged = false;
     ImGui::PushFont(m_fontMono);
     ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_disc", &m_suviHalfQ,       0.005f, 0.02f, "%8.4f")) suviChanged = true;
-    ImGui::SameLine(); ImGui::TextColored(kGray, "Disc scale");
+    ImGui::SameLine(); ImGui::TextColored(kGray, "Scale");
     ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_foot", &m_suviFooterPx,    1.0f, 5.0f, "%8.4f")) suviChanged = true;
-    ImGui::SameLine(); ImGui::TextColored(kGray, "Footer offset");
+    ImGui::SameLine(); ImGui::TextColored(kGray, "V-offset");
     ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_horz", &m_suviCorrRightPx, 1.0f, 5.0f, "%8.4f")) suviChanged = true;
-    ImGui::SameLine(); ImGui::TextColored(kGray, "Horizontal offset");
-    ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_vert", &m_suviCorrUpPx,    1.0f, 5.0f, "%8.4f")) suviChanged = true;
-    ImGui::SameLine(); ImGui::TextColored(kGray, "Vertical offset");
+    ImGui::SameLine(); ImGui::TextColored(kGray, "H-offset");
+    // "Vertical offset" (m_suviCorrUpPx) control intentionally removed from the
+    // UI — variable and its use in SUVI positioning/persistence stay untouched.
     ImGui::PopFont();
     if (suviChanged) {
         m_configDb.SetSetting("suvi_half_q",        std::to_string(m_suviHalfQ).c_str());
@@ -2975,10 +3503,12 @@ void App::RenderInspectorColumn() {
         ImGui::PushFont(m_fontMono);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
 
-        // Field width: available minus widest label ("Burst duration") minus two spacings
+        // Field width: available minus widest label ("Burst duration") minus two
+        // spacings, plus a fixed 10px so the fields read wider/less cramped.
         const float kFldW = ImGui::GetContentRegionAvail().x
                           - ImGui::CalcTextSize("Burst duration").x
-                          - ImGui::GetStyle().ItemSpacing.x * 2.f;
+                          - ImGui::GetStyle().ItemSpacing.x * 2.f
+                          + 10.f;
 
         // Play button — audio blocks only, full width, before Type
         if (b.type == BlockType::Audio && !b.audioFile.empty()) {
@@ -3151,8 +3681,11 @@ void App::RenderInspectorColumn() {
             ImGui::SetNextItemWidth(kFldW);
             float ds = b.burstDurMs / 1000.f;
             if (ImGui::InputFloat("##bdur", &ds, 0.f, 0.f, "%.1f")) {
-                if (std::isfinite(ds) && ds >= 0.f)
-                    b.burstDurMs = int32_t(std::min(ds, 3600.f) * 1000.f);
+                // Clamp to [0.1s, 3600s] — 0 or negative violates the
+                // "burstDurMs > 0" invariant used elsewhere (BlockDurMs,
+                // shoot timeout) and previously crashed the Debug build.
+                ds = std::isfinite(ds) ? std::clamp(ds, 0.1f, 3600.f) : 0.1f;
+                b.burstDurMs = int32_t(ds * 1000.f);
                 m_tlDirty = true;
             }
             ImGui::SameLine(); ImGui::TextColored(kGray, "Burst duration");
@@ -3281,15 +3814,38 @@ void App::RenderInspectorColumn() {
             }
             m_tlDirty = true;
         }
+
+        // Snap to Seconds — rounds so the OFFSET FROM THE NEAREST CONTACT is a
+        // whole second (matches the Relative ruler row), not so atMs lands on
+        // a whole UTC second. Also applied continuously while dragging the
+        // block on the timeline (see drag-to-move in RenderTimelineBottom).
+        bool secSnap = b.snapToSec;
+        ImGui::PushStyleColor(ImGuiCol_Text, kGray);
+        ImGui::Checkbox("Snap to Seconds##sns", &b.snapToSec);
+        ImGui::PopStyleColor();
+        if (b.snapToSec && !secSnap && b.atMs >= 0) {
+            b.atMs = SnapMsToRelativeSecond(b.atMs);
+            m_tlDirty = true;
+        }
         ImGui::Spacing();
 
         ImGui::PopStyleVar();
         ImGui::PopFont();
     }
 
-    // ── EXECUTE (sequencer run control) ───────────────────────────────────
+    // ── EXECUTE (sequencer run control) — pinned to the bottom of the ─────
+    // column; BLOCK INSPECTOR above stretches to fill the gap. ImGui has no
+    // native bottom-anchor, so this uses the standard trick: reserve space
+    // based on EXECUTE's height measured on the *previous* frame (stable
+    // frame-to-frame since content doesn't change shape), then remeasure.
+    static float s_executeH = 160.f;   // seed guess; self-corrects each frame
+    float spacerH = ImGui::GetContentRegionAvail().y - s_executeH;
+    if (spacerH > 0.f) ImGui::Dummy(ImVec2(0.f, spacerH));
+
+    float executeY0 = ImGui::GetCursorPosY();
     ImGui::Spacing();
     RenderSequencerButtons();
+    s_executeH = ImGui::GetCursorPosY() - executeY0;
 }
 
 // ─── Timeline (bottom, full width) ────────────────────────────────────────────
@@ -3483,26 +4039,27 @@ void App::RenderTimelineBottom() {
             ticks[numTicks++] = {ms, col, phase, hf};
     };
 
-    // Phase transition times
+    // Phase transition times — one tick per boundary of the phase-description
+    // bar above (Partial/Diamond Ring/Baily's Beads/Total/Maximum zones), plus
+    // the C1-C4/Max contact instants themselves. Boundaries match the `zones`
+    // array above exactly so every visible colour transition has a UTC label.
     if (c2 > 0 && c3 > 0) {
         constexpr ImU32 kC   = IM_COL32(255, 210,  50, 200);
         constexpr ImU32 kMax = IM_COL32(255, 255, 255, 180);
         constexpr ImU32 kC14 = IM_COL32(140, 140, 165, 160);
         constexpr ImU32 kSub = IM_COL32(130, 110,  70, 140);
         if (c1 > 0)  addTick(c1,          kC14, true, 1.0f);
-        addTick(c2 - 10000, kSub, true, 1.0f);
-        addTick(c2 -  2000, kSub, true, 1.0f);
-        addTick(c2,         kC,   true, 1.0f);
-        addTick(c2 +  2000, kSub, true, 1.0f);
-        addTick(c2 + 45000, kSub, true, 1.0f);
-        addTick(mx - 20000, kSub, true, 1.0f);
-        addTick(mx,         kMax, true, 1.0f);
-        addTick(mx + 20000, kSub, true, 1.0f);
-        addTick(c3 - 45000, kSub, true, 1.0f);
-        addTick(c3 -  2000, kSub, true, 1.0f);
-        addTick(c3,         kC,   true, 1.0f);
-        addTick(c3 +  2000, kSub, true, 1.0f);
-        addTick(c3 + 10000, kSub, true, 1.0f);
+        addTick(c2 - 30000, kSub, true, 1.0f);   // Partial → Diamond Ring
+        addTick(c2 - 10000, kSub, true, 1.0f);   // Diamond Ring → Baily's Beads
+        addTick(c2,         kC,   true, 1.0f);   // C2 contact
+        addTick(c2 + 10000, kSub, true, 1.0f);   // Baily's Beads → Total
+        addTick(mx -  5000, kSub, true, 1.0f);   // Total → Maximum
+        addTick(mx,         kMax, true, 1.0f);   // Max contact
+        addTick(mx +  5000, kSub, true, 1.0f);   // Maximum → Total
+        addTick(c3 - 10000, kSub, true, 1.0f);   // Total → Baily's Beads
+        addTick(c3,         kC,   true, 1.0f);   // C3 contact
+        addTick(c3 + 10000, kSub, true, 1.0f);   // Baily's Beads → Diamond Ring
+        addTick(c3 + 30000, kSub, true, 1.0f);   // Diamond Ring → Partial
         if (c4 > 0)  addTick(c4,          kC14, true, 1.0f);
     }
 
@@ -3651,8 +4208,10 @@ void App::RenderTimelineBottom() {
             m_tlDragging = true;
             float   dx  = ImGui::GetMousePos().x - m_tlDragMouseX0;
             int64_t dMs = int64_t(dx / cntW * vDur);
-            m_tracks[m_tlDragTrack].blocks[m_tlDragBlock].atMs =
-                std::max(m_tlDragStartMs + dMs, m_tlViewStart);
+            int64_t newMs = std::max(m_tlDragStartMs + dMs, m_tlViewStart);
+            TLBlock& dragged = m_tracks[m_tlDragTrack].blocks[m_tlDragBlock];
+            if (dragged.snapToSec) newMs = SnapMsToRelativeSecond(newMs);
+            dragged.atMs = newMs;
         }
 
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
@@ -3784,16 +4343,9 @@ void App::RenderTimelineBottom() {
         ImU32 labelBg = isSelTrack ? IM_COL32(28, 40, 62, 255) : IM_COL32(14, 14, 22, 255);
         dl->AddRectFilled({winPos.x, ty}, {winPos.x + kLabelW - 2.f, tyFill}, labelBg);
         ImU32 lc = tr.IsAudio() ? IM_COL32(150,100,210,255) : IM_COL32(120,148,172,255);
-        bool hasFocal = tr.IsCamera() && tr.focalMm > 0;
-        float labelY  = hasFocal ? ty + 2.f : ty + 7.f;
         std::string dynLbl = TrackLabel(tr);
 
-        dl->AddText({winPos.x + 8.f, labelY}, lc, dynLbl.c_str());
-        if (hasFocal) {
-            char focalBuf[16];
-            snprintf(focalBuf, sizeof(focalBuf), "%d mm", tr.focalMm);
-            dl->AddText({winPos.x + 8.f, ty + 15.f}, IM_COL32(100, 180, 120, 220), focalBuf);
-        }
+        dl->AddText({winPos.x + 8.f, ty + 7.f}, lc, dynLbl.c_str());
         // Left-click on track label → select track (highlights label background)
         {
             ImVec2 mp = ImGui::GetMousePos();
@@ -3926,12 +4478,8 @@ void App::RenderTimelineBottom() {
                 {px - 6.f, rulerY},
                 {px + 6.f, rulerY},
                 IM_COL32(80, 220, 255, 230));
-            // Time label just above triangle
-            int64_t sv = ph / 1000;
-            char phLbl[12];
-            snprintf(phLbl, sizeof(phLbl), "%02d:%02d:%02d",
-                     (int)((sv/3600)%24), (int)((sv/60)%60), (int)(sv%60));
-            dl->AddText({px + 4.f, rulerY}, IM_COL32(80, 220, 255, 220), phLbl);
+            // Time label removed — too little room here to read it; the same
+            // playhead time is shown in the Sky View Simulator status bar.
         }
     }
 
@@ -3995,6 +4543,36 @@ void App::RenderTimelineBottom() {
         }
     }
 
+    // ── Timeline pan (grab "Contacts" strip above phase bar, drag L/R) ──────
+    // Deliberately restricted to the strip above the phase-description row
+    // (y .. phaseY) so it never competes with playhead drag (ruler) or
+    // block drag (track rows).
+    {
+        if (!m_tlPanDragging && ImGui::IsWindowHovered()
+            && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            ImVec2 mp = ImGui::GetMousePos();
+            bool inContactsStrip = mp.y >= y && mp.y < phaseY
+                                && mp.x > winPos.x + kLabelW
+                                && mp.x < winPos.x + winW;
+            if (inContactsStrip) {
+                m_tlPanDragging     = true;
+                m_tlPanMouseX0      = mp.x;
+                m_tlPanStartViewMs  = m_tlViewStart;
+                m_tlPanStartViewDur = vDur;
+            }
+        }
+
+        if (m_tlPanDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            float   dx  = ImGui::GetMousePos().x - m_tlPanMouseX0;
+            int64_t dMs = int64_t(dx / cntW * float(m_tlPanStartViewDur));
+            m_tlViewStart = m_tlPanStartViewMs - dMs;
+            m_tlViewEnd   = m_tlViewStart + m_tlPanStartViewDur;
+        }
+
+        if (m_tlPanDragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+            m_tlPanDragging = false;
+    }
+
     // ── Scroll wheel zoom ─────────────────────────────────────────────────
     if (ImGui::IsWindowHovered()) {
         float wheel = ImGui::GetIO().MouseWheel;
@@ -4044,7 +4622,8 @@ App::App() {
 
         try { m_obsLat = std::stof(m_configDb.GetSetting("obs_lat", "0")); } catch (...) {}
         try { m_obsLon = std::stof(m_configDb.GetSetting("obs_lon", "0")); } catch (...) {}
-        m_obsAltM = m_configDb.GetSettingInt("obs_alt_m", 0);
+        m_obsAltM  = m_configDb.GetSettingInt("obs_alt_m", 0);
+        m_obsName  = m_configDb.GetSetting("obs_name", "");
         SyncDecimalToDms();
 
         // Load IQP API key (user-supplied, 40 hex chars, stored in Config.db, never in source)
@@ -4074,6 +4653,7 @@ App::App() {
         }
         m_suviOpacity = m_configDb.GetSettingInt("suvi_opacity_pct", 100) / 100.f;
         m_suviChannel = m_configDb.GetSetting("suvi_channel", "Fe171");
+        m_moonOpacity = m_configDb.GetSettingInt("moon_opacity_pct", 100) / 100.f;
 
         LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",
                             m_homeTzIana, m_eclTzIana, m_obsLat, m_obsLon, m_obsAltM));
@@ -4201,9 +4781,12 @@ App::~App() {
     if (m_ephThread.joinable())       m_ephThread.join();
     if (m_suviThread.joinable())       m_suviThread.join();
     if (m_audioScanThread.joinable()) m_audioScanThread.join();
+    if (m_geoThread.joinable())       m_geoThread.join();
+    if (m_moonThread.joinable())      m_moonThread.join();
 
     for (auto* srv : m_suviSrvs) if (srv) srv->Release();
     m_suviSrvs.clear();
+    if (m_moonSrv) { m_moonSrv->Release(); m_moonSrv = nullptr; }
 
     if (m_pipe.GetState() == PipeClient::State::Connected) {
         (void)m_pipe.Send("{\"cmd\":\"quit\"}");
@@ -4296,6 +4879,7 @@ void App::OnInit(ID3D11Device* d3dDev, ID3D11DeviceContext* d3dCtx) {
     style.WindowPadding    = ImVec2(12, 12);
 
     TriggerSuviFetch();
+    TriggerMoonFetch();
     StartStatusThread();
 }
 
@@ -4398,6 +4982,7 @@ void App::RenderCameraSection() {
     static const ImVec4 kYellow { 0.95f, 0.80f, 0.10f, 1.0f };
     static const ImVec4 kOrange { 1.00f, 0.55f, 0.10f, 1.0f };
     static const ImVec4 kRed    { 0.90f, 0.20f, 0.18f, 1.0f };
+    static const ImVec4 kDim    { 0.35f, 0.35f, 0.40f, 1.0f };
 
     // Snapshot cameras under mutex — render thread must not hold mutex during drawing
     std::vector<CamStatus> cameras;
@@ -4406,77 +4991,81 @@ void App::RenderCameraSection() {
         cameras = m_cameras;
     }
 
-    if (cameras.empty()) {
-        ImGui::TextColored(kGray, "no cameras");
-        return;
-    }
-
-    // Value column starts at fixed x offset within panel content
-    const float kValX = 52.0f;
-
-    auto Row = [&](const char* label, const char* value,
-                   ImVec4 valCol = kWhite) {
-        ImGui::PushFont(m_fontMono);
-        ImGui::TextColored(kGray, "%s", label);
-        ImGui::SameLine(kValX);
-        ImGui::TextColored(valCol, "%s", value);
-        ImGui::PopFont();
+    static_assert(kMaxCamTracks == 4, "camera table is hardcoded to 4 columns");
+    auto CamAt = [&](int ci) -> const CamStatus* {
+        return (ci < static_cast<int>(cameras.size())) ? &cameras[ci] : nullptr;
     };
 
-    for (int ci = 0; ci < static_cast<int>(cameras.size()); ++ci) {
-        const CamStatus& s = cameras[ci];
-
-        if (ci > 0) ImGui::Spacing();
-
-        // Camera header: model name or index fallback
-        ImGui::PushFont(m_fontMono);
-        const char* modelStr = s.model.empty() ? "Camera" : s.model.c_str();
-        ImGui::TextColored(kWhite, "[%d] %s", ci + 1, modelStr);
-        ImGui::PopFont();
-
-        if (!s.valid) {
-            ImGui::TextColored(kRed, "    disconnected");
-            continue;
+    ImGui::PushFont(m_fontMono);
+    if (ImGui::BeginTable("##cam_tbl", 5,
+                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                           ImGuiTableFlags_SizingFixedFit)) {
+        // Column names are set fresh every frame, so the header bar can show
+        // the live model name (or "Cam N") — same real header-bar look as
+        // the contact-times table (IQP/BE/Loc/GE/T-).
+        ImGui::TableSetupColumn("Cam", ImGuiTableColumnFlags_WidthFixed, 42.f);
+        char hdrBuf[kMaxCamTracks][24];
+        for (int ci = 0; ci < kMaxCamTracks; ++ci) {
+            const CamStatus* s = CamAt(ci);
+            if (s && !s->model.empty()) snprintf(hdrBuf[ci], sizeof(hdrBuf[ci]), "%s", s->model.c_str());
+            else                        snprintf(hdrBuf[ci], sizeof(hdrBuf[ci]), "Cam %d", ci + 1);
+            ImGui::TableSetupColumn(hdrBuf[ci], ImGuiTableColumnFlags_WidthStretch);
         }
 
-        // Battery — coloured bar + percentage
-        {
+        // ── Header row: real ImGui header bar (TableHeadersRow style) ──
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+        ImGui::TableSetColumnIndex(0);
+        ImGui::PushStyleColor(ImGuiCol_Text, kWhite);
+        ImGui::TableHeader(ImGui::TableGetColumnName(0));
+        ImGui::PopStyleColor();
+        for (int ci = 0; ci < kMaxCamTracks; ++ci) {
+            ImGui::TableSetColumnIndex(ci + 1);
+            ImGui::PushStyleColor(ImGuiCol_Text, kWhite);
+            ImGui::TableHeader(ImGui::TableGetColumnName(ci + 1));
+            ImGui::PopStyleColor();
+        }
+
+        // Renders one parameter row across all 4 camera columns; getValue maps
+        // a connected camera's status to (display text, colour).
+        auto Row = [&](const char* label, auto&& getValue) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextColored(kGray, "%s", label);
+            for (int ci = 0; ci < kMaxCamTracks; ++ci) {
+                ImGui::TableSetColumnIndex(ci + 1);
+                const CamStatus* s = CamAt(ci);
+                if (!s || !s->valid) { ImGui::TextColored(kDim, "-"); continue; }
+                auto [val, col] = getValue(*s);
+                ImGui::TextColored(col, "%s", val.c_str());
+            }
+        };
+
+        Row("Batt", [&](const CamStatus& s) -> std::pair<std::string, ImVec4> {
             ImVec4 batCol = kGreen;
-            int bars = 4;
             std::string_view lvl = s.batteryLevel;
-            if      (lvl.find("1/4")  != std::string_view::npos) { bars = 1; batCol = kRed;    }
-            else if (lvl.find("1/2")  != std::string_view::npos) { bars = 2; batCol = kOrange; }
-            else if (lvl.find("3/4")  != std::string_view::npos) { bars = 3; batCol = kYellow; }
-
+            if      (lvl.find("1/4") != std::string_view::npos) { batCol = kRed;    }
+            else if (lvl.find("1/2") != std::string_view::npos) { batCol = kOrange; }
+            else if (lvl.find("3/4") != std::string_view::npos) { batCol = kYellow; }
             bool usb = lvl.find("usb") != std::string_view::npos;
-            char barStr[8];
-            for (int b = 0; b < 4; ++b) barStr[b] = (b < bars) ? '|' : '.';
-            barStr[4] = '\0';
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d%%%s", s.batteryPct, usb ? " U" : "");
+            return { buf, batCol };
+        });
 
-            char batBuf[24];
-            snprintf(batBuf, sizeof(batBuf), "%s %d%%%s",
-                     barStr, s.batteryPct, usb ? " USB" : "");
-            Row("Batt", batBuf, batCol);
-        }
+        Row("Mode",  [&](const CamStatus& s) { return std::pair{ s.mode.empty()  ? "?" : s.mode,  kWhite }; });
+        Row("SS",    [&](const CamStatus& s) { return std::pair{ s.ss.empty()    ? "?" : s.ss,    kWhite }; });
+        Row("ISO",   [&](const CamStatus& s) { return std::pair{ s.iso ? std::to_string(s.iso) : "?", kWhite }; });
+        Row("f/",    [&](const CamStatus& s) { return std::pair{ s.fnum.empty()  ? "?" : s.fnum,  kWhite }; });
+        Row("Focus", [&](const CamStatus& s) { return std::pair{ s.focus.empty() ? "?" : s.focus, kWhite }; });
+        Row("Drive", [&](const CamStatus& s) { return std::pair{ s.drive.empty() ? "?" : s.drive, kWhite }; });
 
-        // Exposure
-        Row("Mode",  s.mode.empty()  ? "?" : s.mode.c_str());
-        Row("SS",    s.ss.empty()    ? "?" : s.ss.c_str());
-
-        char isoBuf[12];
-        snprintf(isoBuf, sizeof(isoBuf), "%d", s.iso);
-        Row("ISO",   s.iso ? isoBuf : "?");
-        Row("f/",    s.fnum.empty()  ? "?" : s.fnum.c_str());
-        Row("Focus", s.focus.empty() ? "?" : s.focus.c_str());
-        Row("Drive", s.drive.empty() ? "?" : s.drive.c_str());
-
-        // Cards — show remaining/max (shots) and % free when max is known
-        auto CardRow = [&](const char* lbl, const std::string& status,
-                           int remaining, int maxRem) {
+        // Cards — remaining/max (shots) and % free when max is known
+        auto CardVal = [&](const std::string& status, int remaining, int maxRem)
+                -> std::pair<std::string, ImVec4> {
             char buf[48];
             if (remaining > 0 && maxRem > 0) {
                 int pct = remaining * 100 / maxRem;
-                snprintf(buf, sizeof(buf), "%d/%d  %d%%", remaining, maxRem, pct);
+                snprintf(buf, sizeof(buf), "%d/%d %d%%", remaining, maxRem, pct);
             } else if (remaining > 0) {
                 snprintf(buf, sizeof(buf), "%d shots", remaining);
             } else if (status == "ok") {
@@ -4485,22 +5074,25 @@ void App::RenderCameraSection() {
                 snprintf(buf, sizeof(buf), "%s", status.c_str());
             }
             ImVec4 col = (status == "ok") ? kGreen : kRed;
-            Row(lbl, buf, col);
+            return { buf, col };
         };
-
-        CardRow("C1", s.slot1Status, s.slot1Remaining, s.slot1MaxRem);
-        CardRow("C2", s.slot2Status, s.slot2Remaining, s.slot2MaxRem);
+        Row("C1", [&](const CamStatus& s) { return CardVal(s.slot1Status, s.slot1Remaining, s.slot1MaxRem); });
+        Row("C2", [&](const CamStatus& s) { return CardVal(s.slot2Status, s.slot2Remaining, s.slot2MaxRem); });
 
         // Last shoot latency — full stack (SDK + USB + shutter + confirm)
-        if (s.lastShotMs >= 0) {
-            char shotBuf[16];
-            snprintf(shotBuf, sizeof(shotBuf), "%d ms", s.lastShotMs);
-            ImVec4 shotCol = s.lastShotMs < 500  ? kGreen
-                           : s.lastShotMs < 1500 ? kYellow
-                                                 : kRed;
-            Row("Shot", shotBuf, shotCol);
-        }
+        Row("Shot", [&](const CamStatus& s) -> std::pair<std::string, ImVec4> {
+            if (s.lastShotMs < 0) return { "-", kDim };
+            char buf[16]; snprintf(buf, sizeof(buf), "%d ms", s.lastShotMs);
+            ImVec4 col = s.lastShotMs < 500 ? kGreen : s.lastShotMs < 1500 ? kYellow : kRed;
+            return { buf, col };
+        });
+
+        ImGui::EndTable();
     }
+    ImGui::PopFont();
+
+    if (cameras.empty())
+        ImGui::TextColored(kGray, "no cameras connected");
 }
 
 // ─── Eclipse time helpers ─────────────────────────────────────────────────────
@@ -4525,6 +5117,7 @@ static void FormatCountdown(int64_t diffMs, char* buf, int len) {
 void App::RenderEclipseSection() {
     static const ImVec4 kGray  { 0.40f, 0.40f, 0.45f, 1.0f };
     static const ImVec4 kWhite { 0.88f, 0.88f, 0.90f, 1.0f };
+    static const ImVec4 kBlueBg{ 0.16f, 0.29f, 0.48f, 0.54f };
 
     if (m_eclipses.empty()) {
         ImGui::PushFont(m_fontMono);
@@ -4533,99 +5126,116 @@ void App::RenderEclipseSection() {
         return;
     }
 
-    // Combo preview: YYYY-MM-DD  T
-    char preview[20] = "---";
-    if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
-        const auto& e = m_eclipses[m_eclipseIdx];
-        char tc = e.type.empty() ? '?' : e.type[0];
-        snprintf(preview, sizeof(preview), "%04d-%02d-%02d  %c",
-                 e.year, e.month, e.day, tc);
-    }
-
-    ImGui::PushFont(m_fontMono);
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##ecl_sel", preview, ImGuiComboFlags_HeightLarge)) {
-        ImGuiListClipper clipper;
-        clipper.Begin(static_cast<int>(m_eclipses.size()));
-        while (clipper.Step()) {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const auto& e = m_eclipses[i];
-                char tc = e.type.empty() ? '?' : e.type[0];
-                char lbl[20];
-                snprintf(lbl, sizeof(lbl), "%04d-%02d-%02d  %c",
-                         e.year, e.month, e.day, tc);
-                bool sel = (i == m_eclipseIdx);
-                if (ImGui::Selectable(lbl, sel)) {
-                    m_eclipseIdx = i;
-                    // Auto-load GE location into observer fields
-                    m_obsLat = m_eclipses[i].latGe;
-                    m_obsLon = m_eclipses[i].lonGe;
-                    SyncDecimalToDms();
-                    SaveObserverSettings();
-                    TriggerIqpFetch();
-                }
-                if (sel) ImGui::SetItemDefaultFocus();
-            }
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::PopFont();
-
-    // Details for selected eclipse
-    if (m_eclipseIdx < 0 || m_eclipseIdx >= static_cast<int>(m_eclipses.size()))
-        return;
-
-    const auto& e = m_eclipses[m_eclipseIdx];
-    char tc = e.type.empty() ? '?' : e.type[0];
-
-    const char* typeName = "Unknown";
-    ImVec4 typeCol = kWhite;
-    switch (tc) {
-    case 'T': typeName = "Total";   typeCol = ImVec4{0.95f, 0.80f, 0.20f, 1.0f}; break;
-    case 'A': typeName = "Annular"; typeCol = ImVec4{0.85f, 0.50f, 0.15f, 1.0f}; break;
-    case 'H': typeName = "Hybrid";  typeCol = ImVec4{0.80f, 0.75f, 0.20f, 1.0f}; break;
-    case 'P': typeName = "Partial"; typeCol = kGray;                               break;
-    }
-
-    static const ImVec4 kBlueBg {0.16f, 0.29f, 0.48f, 0.54f};
-    ImGui::Spacing();
     ImGui::PushFont(m_fontMono);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.f, 2.f));
 
-    // Type
-    {
-        char buf[16]; snprintf(buf, sizeof(buf), "%s", typeName);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
-        ImGui::SetNextItemWidth(100.f);
-        ImGui::InputText("##ecl_type", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
-        ImGui::PopStyleColor();
-        ImGui::SameLine(0, 6);
-        ImGui::TextColored(kGray, "Eclipse type");
-    }
+    if (ImGui::BeginTable("##ecl_tbl", 4,
+                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                           ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Date",        ImGuiTableColumnFlags_WidthFixed, 110.f);
+        ImGui::TableSetupColumn("Type",        ImGuiTableColumnFlags_WidthFixed,  70.f);
+        ImGui::TableSetupColumn("Duration",    ImGuiTableColumnFlags_WidthFixed,  90.f);
+        ImGui::TableSetupColumn("GE location", ImGuiTableColumnFlags_WidthFixed, 140.f);
 
-    // Duration
-    if (!e.duration.empty()) {
-        char buf[16]; snprintf(buf, sizeof(buf), "%s", e.duration.c_str());
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
-        ImGui::SetNextItemWidth(100.f);
-        ImGui::InputText("##ecl_dur", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
-        ImGui::PopStyleColor();
-        ImGui::SameLine(0, 6);
-        ImGui::TextColored(kGray, "Duration at GE");
-    }
+        // ── Header row: real ImGui header bar — same style as ##cam_tbl/##ct_tbl ──
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+        for (int ci = 0; ci < 4; ++ci) {
+            ImGui::TableSetColumnIndex(ci);
+            ImGui::PushStyleColor(ImGuiCol_Text, kWhite);
+            ImGui::TableHeader(ImGui::TableGetColumnName(ci));
+            ImGui::PopStyleColor();
+        }
 
-    // GE coordinates
-    {
-        char latBuf[10], lonBuf[10], coordBuf[24];
-        snprintf(latBuf,   sizeof(latBuf),   "%.1f%c", fabsf(e.latGe), e.latGe >= 0.f ? 'N' : 'S');
-        snprintf(lonBuf,   sizeof(lonBuf),   "%.1f%c", fabsf(e.lonGe), e.lonGe >= 0.f ? 'E' : 'W');
-        snprintf(coordBuf, sizeof(coordBuf), "%s %s",  latBuf, lonBuf);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
-        ImGui::SetNextItemWidth(100.f);
-        ImGui::InputText("##ecl_geo", coordBuf, sizeof(coordBuf), ImGuiInputTextFlags_ReadOnly);
-        ImGui::PopStyleColor();
-        ImGui::SameLine(0, 6);
-        ImGui::TextColored(kGray, "GE location");
+        ImGui::TableNextRow();
+
+        // ── Col 0: date-only dropdown ────────────────────────────────────────
+        ImGui::TableSetColumnIndex(0);
+        char preview[12] = "---";
+        if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
+            const auto& e = m_eclipses[m_eclipseIdx];
+            snprintf(preview, sizeof(preview), "%04d-%02d-%02d", e.year, e.month, e.day);
+        }
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##ecl_sel", preview, ImGuiComboFlags_HeightLarge)) {
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(m_eclipses.size()));
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    const auto& e = m_eclipses[i];
+                    char lbl[12];
+                    snprintf(lbl, sizeof(lbl), "%04d-%02d-%02d", e.year, e.month, e.day);
+                    bool sel = (i == m_eclipseIdx);
+                    if (ImGui::Selectable(lbl, sel)) {
+                        m_eclipseIdx = i;
+                        // Auto-load GE location into observer fields
+                        m_obsLat = m_eclipses[i].latGe;
+                        m_obsLon = m_eclipses[i].lonGe;
+                        SyncDecimalToDms();
+                        SaveObserverSettings();
+                        TriggerIqpFetch();
+                    }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        // Remaining columns need a valid selection
+        if (m_eclipseIdx < 0 || m_eclipseIdx >= static_cast<int>(m_eclipses.size())) {
+            ImGui::EndTable();
+            ImGui::PopStyleVar();
+            ImGui::PopFont();
+            return;
+        }
+
+        const auto& e = m_eclipses[m_eclipseIdx];
+        char tc = e.type.empty() ? '?' : e.type[0];
+
+        const char* typeName = "Unknown";
+        ImVec4 typeCol = kWhite;
+        switch (tc) {
+        case 'T': typeName = "Total";   typeCol = ImVec4{0.95f, 0.80f, 0.20f, 1.0f}; break;
+        case 'A': typeName = "Annular"; typeCol = ImVec4{0.85f, 0.50f, 0.15f, 1.0f}; break;
+        case 'H': typeName = "Hybrid";  typeCol = ImVec4{0.80f, 0.75f, 0.20f, 1.0f}; break;
+        case 'P': typeName = "Partial"; typeCol = kGray;                               break;
+        }
+
+        // ── Col 1: Type ───────────────────────────────────────────────────────
+        ImGui::TableSetColumnIndex(1);
+        {
+            char buf[16]; snprintf(buf, sizeof(buf), "%s", typeName);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
+            ImGui::PushStyleColor(ImGuiCol_Text, typeCol);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##ecl_type", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopStyleColor(2);
+        }
+
+        // ── Col 2: Duration at GE ────────────────────────────────────────────
+        ImGui::TableSetColumnIndex(2);
+        {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%s", e.duration.empty() ? "--" : e.duration.c_str());
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##ecl_dur", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopStyleColor();
+        }
+
+        // ── Col 3: GE location ───────────────────────────────────────────────
+        ImGui::TableSetColumnIndex(3);
+        {
+            char latBuf[10], lonBuf[10], coordBuf[24];
+            snprintf(latBuf,   sizeof(latBuf),   "%.1f%c", fabsf(e.latGe), e.latGe >= 0.f ? 'N' : 'S');
+            snprintf(lonBuf,   sizeof(lonBuf),   "%.1f%c", fabsf(e.lonGe), e.lonGe >= 0.f ? 'E' : 'W');
+            snprintf(coordBuf, sizeof(coordBuf), "%s %s",  latBuf, lonBuf);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, kBlueBg);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##ecl_geo", coordBuf, sizeof(coordBuf), ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::EndTable();
     }
 
     ImGui::PopStyleVar();
@@ -4776,41 +5386,55 @@ void App::RenderLocationSection() {
     static const ImVec4 kGreen2{0.15f, 0.90f, 0.35f, 1.0f};
     static const ImVec4 kRed2  {0.95f, 0.22f, 0.18f, 1.0f};
     static const ImVec4 kDim3  {0.40f, 0.40f, 0.45f, 1.0f};
+    static const ImVec4 kWhite2{0.80f, 0.85f, 0.90f, 1.0f};
 
-    ImGui::SeparatorText("LOCATION");
+    ImGui::SeparatorText("Time and Location");
     ImGui::PushFont(m_fontMono);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.f, 3.f));
 
+    // Seconds are split into whole + hundredths as two separate fields joined
+    // by a literal "." — mirrors the deg/min layout instead of one merged
+    // float box (previously "6.34" was a single editable field).
     auto DmsRow = [&](const char* label, DmsCoord& dms, int maxDeg,
                       const char* posLabel, const char* negLabel,
-                      const char* idD, const char* idM, const char* idS) {
+                      const char* idD, const char* idM,
+                      const char* idSW, const char* idSF) {
         bool t = false;
-        ImGui::SetNextItemWidth(38); ImGui::InputInt(idD, &dms.deg, 0);
+        int secW = static_cast<int>(dms.sec);
+        int secF = static_cast<int>(std::lround((dms.sec - static_cast<float>(secW)) * 100.f));
+        if (secF >= 100) { secF = 0; ++secW; }
+
+        ImGui::SetNextItemWidth(30); ImGui::InputInt(idD, &dms.deg, 0);
         t |= ImGui::IsItemDeactivatedAfterEdit();
         ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "\xc2\xb0");
-        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(26); ImGui::InputInt(idM, &dms.min, 0);
+        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(22); ImGui::InputInt(idM, &dms.min, 0);
         t |= ImGui::IsItemDeactivatedAfterEdit();
         ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "'");
-        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(52);
-        ImGui::InputFloat(idS, &dms.sec, 0.f, 0.f, "%.2f");
+        ImGui::SameLine(0, 2); ImGui::SetNextItemWidth(22); ImGui::InputInt(idSW, &secW, 0);
+        t |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SameLine(0, 1); ImGui::TextColored(kGray, ".");
+        ImGui::SameLine(0, 1); ImGui::SetNextItemWidth(24); ImGui::InputInt(idSF, &secF, 0);
         t |= ImGui::IsItemDeactivatedAfterEdit();
         ImGui::SameLine(0, 1); ImGui::TextColored(kGray, "\"");
         ImGui::SameLine(0, 2);
-        if (ImGui::Button(dms.pos ? posLabel : negLabel, ImVec2(22.f, 0.f))) {
+        if (ImGui::Button(dms.pos ? posLabel : negLabel, ImVec2(20.f, 0.f))) {
             dms.pos = !dms.pos; t = true;
         }
         ImGui::SameLine(0, 6); ImGui::TextColored(kGray, "%s", label);
         if (t) {
             dms.deg = std::clamp(dms.deg, 0, maxDeg);
             dms.min = std::clamp(dms.min, 0, 59);
-            dms.sec = std::clamp(dms.sec, 0.f, 59.99f);
+            secW    = std::clamp(secW, 0, 59);
+            secF    = std::clamp(secF, 0, 99);
+            dms.sec = static_cast<float>(secW) + static_cast<float>(secF) / 100.f;
             SyncDmsToDecimal();
             SaveObserverSettings();
         }
     };
 
-    DmsRow("Latitude",  m_latDms, 90,  "N##latn", "S##latn", "##latd","##latm","##lats");
-    DmsRow("Longitude", m_lonDms, 180, "E##lone",  "W##lone", "##lond","##lonm","##lons");
+    // One coordinate per line, trailing label — Latitude, then Longitude.
+    DmsRow("Latitude",  m_latDms, 90,  "N##latn", "S##latn", "##latd", "##latm", "##latsw", "##latsf");
+    DmsRow("Longitude", m_lonDms, 180, "E##lone", "W##lone", "##lond", "##lonm", "##lonsw", "##lonsf");
 
     ImGui::SetNextItemWidth(100.f);
     ImGui::InputInt("##obs_alt", &m_obsAltM, 0);
@@ -4818,6 +5442,102 @@ void App::RenderLocationSection() {
     ImGui::SameLine(0, 6); ImGui::TextColored(kGray, "Altitude");
 
     ImGui::PopStyleVar();
+    ImGui::PopFont();
+
+    // ── Consume background elevation+geocode result (if ready) ──────────────
+    {
+        int geoSt = m_geoState.load();
+        if (geoSt == 2 || geoSt == 3) {
+            std::string pendingName;
+            double elevM = 0.0;
+            { std::lock_guard lk(m_geoMutex);
+              pendingName = m_geoNamePending; elevM = m_geoElevM; }
+            if (!pendingName.empty()) {
+                m_obsName = pendingName;
+                SaveObserverSettings();
+            }
+
+            if (geoSt == 2) {
+                m_obsAltM = static_cast<int>(std::lround(elevM));
+                SaveObserverSettings();
+                m_gmapsStatusMsg.clear();
+                m_gmapsStatusIsErr = false;
+            } else {
+                m_gmapsStatusMsg   = "Wysokosc: blad pobierania (Open-Elevation) - ustaw recznie";
+                m_gmapsStatusIsErr = true;
+            }
+            m_geoState.store(0);
+        }
+    }
+
+    // ── Set Location from Google Maps URL ────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::PushFont(m_fontMono);
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::InputTextWithHint("##gmaps_url", "Paste Google Maps URL",
+                              m_gmapsUrlBuf, sizeof(m_gmapsUrlBuf));
+
+    // One button does both: parse the URL (if given) then calculate contact
+    // times for the resulting (or unchanged) location. Turns green (same
+    // style as "Camera connected") once contacts have been computed.
+    bool geoLoading = (m_geoState.load() == 1);
+    bool ctLoading  = (m_iqpState.load() == 1);
+    bool busy       = geoLoading || ctLoading;
+    bool ok         = m_beResult.valid;
+    if (ok) {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.10f, 0.55f, 0.18f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.14f, 0.65f, 0.24f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.08f, 0.45f, 0.14f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  1.0f,  1.0f,  1.0f));
+    }
+    if (busy) ImGui::BeginDisabled();
+    if (ImGui::Button(ctLoading ? "Calculating..." : "SET LOCATION & CALCULATE", ImVec2(-1, 0)))
+        ApplyLocationAndCalculate();
+    if (busy) ImGui::EndDisabled();
+    if (ok) ImGui::PopStyleColor(4);
+
+    // Detected place name — no label, centered, wrapped over up to 2 lines.
+    if (!m_obsName.empty()) {
+        float avail = ImGui::GetContentRegionAvail().x;
+        std::string line1 = m_obsName, line2;
+
+        if (ImGui::CalcTextSize(line1.c_str()).x > avail) {
+            size_t splitPos = line1.size();
+            while (splitPos > 0 &&
+                   ImGui::CalcTextSize(line1.substr(0, splitPos).c_str()).x > avail)
+                --splitPos;
+            size_t spacePos = line1.rfind(' ', splitPos);
+            if (spacePos != std::string::npos && spacePos > 0) splitPos = spacePos;
+
+            line2 = line1.substr(splitPos);
+            line1 = line1.substr(0, splitPos);
+            size_t s = line2.find_first_not_of(' ');
+            line2 = (s == std::string::npos) ? "" : line2.substr(s);
+
+            bool truncated2 = false;
+            while (line2.size() > 1 && ImGui::CalcTextSize(line2.c_str()).x > avail) {
+                line2.resize(line2.size() - 1);
+                truncated2 = true;
+            }
+            if (truncated2 && line2.size() > 3) line2.replace(line2.size() - 3, 3, "...");
+        }
+
+        auto centeredLine = [&](const std::string& s) {
+            if (s.empty()) return;
+            float tw  = ImGui::CalcTextSize(s.c_str()).x;
+            float cur = ImGui::GetCursorPosX();
+            ImGui::SetCursorPosX(cur + std::max(0.f, (avail - tw) * 0.5f));
+            ImGui::TextColored(kWhite2, "%s", s.c_str());
+        };
+        centeredLine(line1);
+        centeredLine(line2);
+    }
+
+    if (!m_gmapsStatusMsg.empty()) {
+        ImVec4 col = m_gmapsStatusIsErr ? ImVec4(0.95f, 0.30f, 0.25f, 1.f)
+                                        : ImVec4(0.55f, 0.85f, 0.55f, 1.f);
+        ImGui::TextColored(col, "%s", m_gmapsStatusMsg.c_str());
+    }
     ImGui::PopFont();
 
     // Totality zone status (moved from Col2 Calculate button area)
@@ -4830,8 +5550,8 @@ void App::RenderLocationSection() {
             ImGui::PushFont(m_fontMono);
             const char* msg =
                 !ct.apiOk    ? "network error"    :
-                !ct.valid    ? "OUTSIDE TOTALITY" :
-                ct.c2Ms > 0 ? "IN TOTALITY ZONE" : "OUTSIDE TOTALITY";
+                !ct.valid    ? "YOU ARE NOT IN TOTALITY ZONE!" :
+                ct.c2Ms > 0 ? "YOU ARE IN TOTALITY ZONE!" : "YOU ARE NOT IN TOTALITY ZONE!";
             const ImVec4& col =
                 !ct.apiOk    ? kDim3   :
                 !ct.valid    ? kRed2   :
@@ -4855,62 +5575,13 @@ void App::RenderTimeSection() {
     static const ImVec4 kBlue {0.45f, 0.75f, 1.00f, 1.0f};
     static const ImVec4 kCyan {0.40f, 1.00f, 0.80f, 1.0f};
 
-    ImGui::SeparatorText("TIME");
-
-    {
-        int iqpSt = m_iqpState.load();
-        bool loading = (iqpSt == 1);
-        if (loading) ImGui::BeginDisabled();
-        if (ImGui::Button(loading ? "Calculating..." : "Calculate contact times", ImVec2(-1, 0)))
-            TriggerIqpFetch();
-        if (loading) ImGui::EndDisabled();
-    }
+    // "Calculate contact times" moved next to "SET LOCATION" in
+    // RenderLocationSection (now merged under the "Time and Location" header).
 
     int64_t nowMs = UtcNowMs();
-
-    // ── 3 clocks in compact table ─────────────────────────────────────────
-    ImGui::PushFont(m_fontMono);
-    {
-        char buf[20]; FormatUtcHms(nowMs, buf, sizeof(buf));
-        ImGui::TextColored(kGray, "UTC "); ImGui::SameLine(36.f);
-        ImGui::TextColored(kGold, "%s", buf);
-    }
-
-    // Helper lambda: one TZ clock row with right-aligned gear button + popup
-    auto TzRow = [&](const char* label, std::string& tzIana, ImVec4 col,
-                     const char* btnId, const char* popupId) {
-        char timeBuf[12]; FormatLocalHms(nowMs, tzIana, timeBuf, sizeof(timeBuf));
-        int  ci = TzFindByIana(m_tzList, tzIana);
-        assert(ci >= 0 && ci < static_cast<int>(m_tzList.size()));
-        ImGui::TextColored(kGray, "%s", label); ImGui::SameLine(36.f);
-        ImGui::TextColored(col, "%s", timeBuf); ImGui::SameLine();
-        ImGui::TextColored(kDim, " %s", m_tzList[ci].code.c_str());
-        float gW = ImGui::CalcTextSize("[=]").x + ImGui::GetStyle().FramePadding.x * 2.f;
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - gW);
-        if (ImGui::SmallButton(btnId)) ImGui::OpenPopup(popupId);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(420, 0), ImVec2(420, 520));
-        if (ImGui::BeginPopup(popupId)) {
-            int ci2 = TzFindByIana(m_tzList, tzIana);
-            assert(m_tzList.size() <= 1024); // bounded: DB has 598 IANA zones
-            for (int i = 0; i < static_cast<int>(m_tzList.size()); ++i) {
-                bool sel = (i == ci2);
-                char entry[80];
-                snprintf(entry, sizeof(entry), "%-22s  %s",
-                         m_tzList[i].code.c_str(), m_tzList[i].iana.c_str());
-                if (ImGui::Selectable(entry, sel)) {
-                    tzIana = m_tzList[i].iana;
-                    SaveClockSettings();
-                    ImGui::CloseCurrentPopup();
-                }
-                if (sel) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndPopup();
-        }
-    };
-
-    TzRow("Home", m_homeTzIana, kBlue, "[=]##gh", "##tz_home_new");
-    TzRow("Loc ", m_eclTzIana,  kCyan, "[=]##gl", "##tz_loc_new");
-    ImGui::PopFont();
+    // UTC/Home/Loc clocks moved to the Sky View Simulator status bar
+    // (right of "PH=") — more horizontal room there, and it keeps this
+    // column short enough to avoid scrolling the timeline table below.
 
     ImGui::Spacing();
 
@@ -4940,27 +5611,34 @@ void App::RenderTimeSection() {
 
     ImGui::PushFont(m_fontMono);
     constexpr float kLblW  = 34.f;
-    constexpr float kDataW = 50.f;
-    if (ImGui::BeginTable("##ct_tbl", 5,
+    // Sized to fit exactly "12:34" (4 digits + colon) — the widest string
+    // FmtHM/FmtLoc ever produce for these four columns.
+    const float kDataW = ImGui::CalcTextSize("12:34").x + 6.f;
+    if (ImGui::BeginTable("##ct_tbl", 6,
             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_SizingFixedFit)) {
+        constexpr float kCdW = 150.f;   // "Xd HH:MM:SS.mmm" — widest countdown string
         ImGui::TableSetupColumn("##l", ImGuiTableColumnFlags_WidthFixed, kLblW);
         ImGui::TableSetupColumn("IQP", ImGuiTableColumnFlags_WidthFixed, kDataW);
         ImGui::TableSetupColumn("BE",  ImGuiTableColumnFlags_WidthFixed, kDataW);
         ImGui::TableSetupColumn("Loc", ImGuiTableColumnFlags_WidthFixed, kDataW);
         ImGui::TableSetupColumn("GE",  ImGuiTableColumnFlags_WidthFixed, kDataW);
+        ImGui::TableSetupColumn("T-",  ImGuiTableColumnFlags_WidthFixed, kCdW);
         ImGui::TableHeadersRow();
 
         bool loading = (iqpSt == 1);
-        struct CtRow { const char* lbl; int64_t iqp; int64_t be; int64_t ge; };
+        // Countdown source: IQP when available, else BE — same fallback the
+        // simulator status bar used before these countdowns moved here.
+        const ContactTimes& cdSrc = iqpCt.valid ? iqpCt : m_beResult;
+        struct CtRow { const char* lbl; int64_t iqp; int64_t be; int64_t ge; int64_t cd; };
         CtRow ctRows[] = {
-            { "C1",  iqpCt.c1Ms,  m_beResult.c1Ms,  m_geResult.c1Ms  },
-            { "C2",  iqpCt.c2Ms,  m_beResult.c2Ms,  m_geResult.c2Ms  },
-            { "Max", iqpCt.maxMs, m_beResult.maxMs, m_geResult.maxMs  },
-            { "C3",  iqpCt.c3Ms,  m_beResult.c3Ms,  m_geResult.c3Ms  },
-            { "C4",  iqpCt.c4Ms,  m_beResult.c4Ms,  m_geResult.c4Ms  },
-            { "Rise",sunriseMs,   sunriseMs,          -1               },
-            { "Set", sunsetMs,    sunsetMs,           -1               },
+            { "C1",  iqpCt.c1Ms,  m_beResult.c1Ms,  m_geResult.c1Ms,  cdSrc.c1Ms  },
+            { "C2",  iqpCt.c2Ms,  m_beResult.c2Ms,  m_geResult.c2Ms,  cdSrc.c2Ms  },
+            { "Max", iqpCt.maxMs, m_beResult.maxMs, m_geResult.maxMs, cdSrc.maxMs },
+            { "C3",  iqpCt.c3Ms,  m_beResult.c3Ms,  m_geResult.c3Ms,  cdSrc.c3Ms  },
+            { "C4",  iqpCt.c4Ms,  m_beResult.c4Ms,  m_geResult.c4Ms,  cdSrc.c4Ms  },
+            { "Rise",sunriseMs,   sunriseMs,          -1,             -1          },
+            { "Set", sunsetMs,    sunsetMs,           -1,             -1          },
         };
         static constexpr int kCtRowN = 7;
         static_assert(sizeof(ctRows)/sizeof(ctRows[0]) == kCtRowN);
@@ -4968,11 +5646,13 @@ void App::RenderTimeSection() {
         for (int ri = 0; ri < kCtRowN; ++ri) {
             const auto& r = ctRows[ri];
             ImGui::TableNextRow();
-            char i1[8], i2[8], i3[8], i4[8];
+            char i1[8], i2[8], i3[8], i4[8], i5[32];
             FmtHM(r.iqp,  i1, sizeof(i1));
             FmtHM(r.be,   i2, sizeof(i2));
             FmtLoc(r.iqp, i3, sizeof(i3));
             FmtHM(r.ge,   i4, sizeof(i4));
+            if (r.cd > 0) FormatCountdown(r.cd - nowMs, i5, sizeof(i5));
+            else          snprintf(i5, sizeof(i5), "--");
 
             ImGui::TableSetColumnIndex(0); ImGui::TextColored(kGray, "%s", r.lbl);
             ImGui::TableSetColumnIndex(1);
@@ -4983,6 +5663,7 @@ void App::RenderTimeSection() {
                 if (loading) ImGui::TextColored(kDim, "...");
                 else         ImGui::TextColored(kGray, "%s", i3);
             ImGui::TableSetColumnIndex(4); ImGui::TextColored(kDim,  "%s", i4);
+            ImGui::TableSetColumnIndex(5); ImGui::TextColored(kGold, "%s", i5);
         }
         ImGui::EndTable();
     }
@@ -4997,9 +5678,12 @@ void App::RenderHardwareSection() {
 
     bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
 
-    ImGui::SeparatorText("SERVER");
-
-    const ImVec2 btnSz(-1, 28);
+    // Three buttons side by side: status/connect | Test picture | Disconnect.
+    // Fixed 135px each.
+    constexpr float kBtnW = 135.0f;
+    auto TextW = [&](const char*) { return kBtnW; };
+    const ImVec2 btnSzMid  (kBtnW, 28);
+    const ImVec2 btnSzRight(kBtnW, 28);
 
     {
         bool srvRunning = false;
@@ -5012,7 +5696,7 @@ void App::RenderHardwareSection() {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.14f, 0.65f, 0.24f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.08f, 0.45f, 0.14f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  1.0f,  1.0f,  1.0f));
-            ImGui::Button("Cameras are connected", btnSz);
+            ImGui::Button("Camera connected", ImVec2(TextW("Camera connected"), 28));
             ImGui::PopStyleColor(4);
         } else if (m_connecting) {
             ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.65f, 0.38f, 0.05f, 1.0f));
@@ -5020,12 +5704,12 @@ void App::RenderHardwareSection() {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.55f, 0.32f, 0.04f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  1.0f,  1.0f,  1.0f));
             ImGui::BeginDisabled();
-            ImGui::Button("Connection in progress...", btnSz);
+            ImGui::Button("Connecting...", ImVec2(TextW("Connecting..."), 28));
             ImGui::EndDisabled();
             ImGui::PopStyleColor(4);
         } else {
             if (srvRunning) ImGui::BeginDisabled();
-            if (ImGui::Button("Connect cameras", btnSz)) {
+            if (ImGui::Button("Connect camera", ImVec2(TextW("Connect camera"), 28))) {
                 LogLine("user: Start TotalControlSRV");
                 if (TryLaunchDaemon()) {
                     m_connecting = true;
@@ -5039,8 +5723,9 @@ void App::RenderHardwareSection() {
         }
     }
 
+    ImGui::SameLine();
     if (!connected) ImGui::BeginDisabled();
-    if (ImGui::Button("Test picture", btnSz)) {
+    if (ImGui::Button("Test picture", btnSzMid)) {
         LogLine("user: take test picture");
         const char* req =
             "{\"cmd\":\"shoot\",\"drive\":\"single\","
@@ -5060,8 +5745,9 @@ void App::RenderHardwareSection() {
     }
     if (!connected) ImGui::EndDisabled();
 
+    ImGui::SameLine();
     if (!connected) ImGui::BeginDisabled();
-    if (ImGui::Button("Disconnect cameras", btnSz)) {
+    if (ImGui::Button("Disconnect", btnSzRight)) {
         if (m_seqRun.load()) { StopSeqThread(); m_guiSeqMode.store(GuiSeqMode::Idle); }
         LogLine("user: disconnect & quit SRV");
         (void)m_pipe.Send("{\"cmd\":\"quit\"}");
@@ -5072,8 +5758,6 @@ void App::RenderHardwareSection() {
     }
     if (!connected) ImGui::EndDisabled();
 
-    ImGui::Spacing();
-    ImGui::SeparatorText("CAMERAS");
     ImGui::Spacing();
     RenderCameraSection();
 }
@@ -5332,13 +6016,13 @@ void App::RenderSnapshotModal() {
         ImGui::TextUnformatted("Select snapshot to load onto the timeline:");
         ImGui::Separator();
 
-        ImGui::BeginChild("snaplist", ImVec2(420, 200), true);
+        ImGui::BeginChild("snaplist", ImVec2(800, 280), true);
         assert(m_snapList.size() <= 1024);  // bounded: no realistic user has >1024 snapshots
         for (int i = 0; i < static_cast<int>(m_snapList.size()); ++i) {
             const auto& s = m_snapList[i];
             char ts[32];
             FormatUtcHms(s.createdMs, ts, sizeof(ts));
-            std::string label = std::format("{} — {}", s.name, ts);
+            std::string label = std::format("{} - {}", s.name, ts);
             bool sel = (m_snapSel == i);
             if (ImGui::Selectable(label.c_str(), sel))
                 m_snapSel = i;
@@ -5402,7 +6086,21 @@ void App::RenderSnapshotModal() {
     // ── Save Timeline As modal ─────────────────────────────────────────────
     if (m_showSnapSaveAs) {
         ImGui::OpenPopup("Save Timeline As##snap");
-        m_snapNameBuf[0] = '\0';
+        // Suggest "<location> (lat, lon)" — still a plain editable field, so
+        // the user can correct/replace it freely. The coordinate suffix
+        // matters: tl_snapshots.name is UNIQUE and SaveSnapshot()
+        // overwrites-by-name on purpose (re-saving under an existing name is
+        // a deliberate update), but nearby coordinates often reverse-geocode
+        // to the *same* place name — without a differentiator, saves for
+        // slightly different positions under that name silently clobbered
+        // each other instead of accumulating as separate snapshots. 5
+        // decimals (~1 m precision) distinguishes even small position tweaks.
+        if (!m_obsName.empty()) {
+            snprintf(m_snapNameBuf, sizeof(m_snapNameBuf),
+                     "%s (%.5f, %.5f)", m_obsName.c_str(), m_obsLat, m_obsLon);
+        } else {
+            m_snapNameBuf[0] = '\0';
+        }
         m_showSnapSaveAs = false;
     }
     if (ImGui::BeginPopupModal("Save Timeline As##snap",
@@ -5562,7 +6260,7 @@ void App::RenderCamConfigWindows() {
         auto Row = [&](const char* key, const std::string& val) {
             ImGui::TextColored(kGray, "%s", key); ImGui::SameLine(90.f);
             if (online) ImGui::TextUnformatted(val.c_str());
-            else        ImGui::TextColored(kDim, "\xe2\x80\x94");  // —
+            else        ImGui::TextColored(kDim, "-");
         };
 
         Row("Model",   cc.model);
@@ -5665,8 +6363,6 @@ void App::RenderCamConfigWindows() {
 // ─── Menu bar ─────────────────────────────────────────────────────────────────
 
 void App::RenderMenuBar() {
-    static const ImVec4 kDim {0.45f, 0.45f, 0.50f, 1.0f};
-
     // ── File ──────────────────────────────────────────────────────────────
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("New Timeline", "Ctrl+N"))
@@ -5677,7 +6373,7 @@ void App::RenderMenuBar() {
             m_showSnapOpen = true;
         ImGui::Separator();
 
-        ImGui::MenuItem("Save Timeline",       "Ctrl+S", false, false); // future
+        ImGui::MenuItem("Save Timeline [FUTURE FUNCTION]", "Ctrl+S", false, false);
         if (ImGui::MenuItem("Save Timeline As\xc2\xb7\xc2\xb7\xc2\xb7", nullptr, false,
                             m_configDb.IsOpen() && !m_tracks.empty()))
             m_showSnapSaveAs = true;
@@ -5687,15 +6383,13 @@ void App::RenderMenuBar() {
             if (ImGui::MenuItem("TotalControl JSON\xc2\xb7\xc2\xb7\xc2\xb7"))
                 ExportTimelineJson();
             ImGui::Separator();
-            ImGui::Separator();
-            ImGui::TextColored(kDim, "  (future)");
-            ImGui::MenuItem("CSV\xc2\xb7\xc2\xb7\xc2\xb7",                    nullptr, false, false);
-            ImGui::MenuItem("SolarEclipseMaestro\xc2\xb7\xc2\xb7\xc2\xb7",    nullptr, false, false);
-            ImGui::MenuItem("EclipseWorkbench\xc2\xb7\xc2\xb7\xc2\xb7",       nullptr, false, false);
+            ImGui::MenuItem("CSV\xc2\xb7\xc2\xb7\xc2\xb7 [FUTURE FUNCTION]",                 nullptr, false, false);
+            ImGui::MenuItem("SolarEclipseMaestro\xc2\xb7\xc2\xb7\xc2\xb7 [FUTURE FUNCTION]", nullptr, false, false);
+            ImGui::MenuItem("EclipseWorkbench\xc2\xb7\xc2\xb7\xc2\xb7 [FUTURE FUNCTION]",    nullptr, false, false);
             ImGui::EndMenu();
         }
 
-        ImGui::MenuItem("Import from JSON\xc2\xb7\xc2\xb7\xc2\xb7", nullptr, false, false); // future
+        ImGui::MenuItem("Import from JSON\xc2\xb7\xc2\xb7\xc2\xb7 [FUTURE FUNCTION]", nullptr, false, false);
         ImGui::Separator();
 
         if (ImGui::MenuItem("Quit", "Alt+F4"))
@@ -5715,66 +6409,44 @@ void App::RenderMenuBar() {
             DuplicateSelectedBlock();
 
         ImGui::Separator();
-        ImGui::MenuItem("Undo", "Ctrl+Z", false, false); // future
-        ImGui::MenuItem("Redo", "Ctrl+Y", false, false); // future
+        ImGui::MenuItem("Undo [FUTURE FUNCTION]", "Ctrl+Z", false, false);
+        ImGui::MenuItem("Redo [FUTURE FUNCTION]", "Ctrl+Y", false, false);
         ImGui::EndMenu();
     }
 
-    // ── View ──────────────────────────────────────────────────────────────
-    if (ImGui::BeginMenu("View")) {
-        ContactTimes ct;
-        { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-        if (!ct.valid) ct = m_beResult;
-
-        if (ImGui::MenuItem("Full Eclipse", nullptr, false, ct.valid)) {
-            m_tlViewStart = ct.c1Ms - 5LL*60000;
-            m_tlViewEnd   = ct.c4Ms + 5LL*60000;
-        }
-        if (ImGui::MenuItem("Zoom to Totality", nullptr, false, ct.valid && ct.c2Ms>0)) {
-            m_tlViewStart = ct.c2Ms - 30000;
-            m_tlViewEnd   = ct.c3Ms + 30000;
-        }
-        if (ImGui::MenuItem("Zoom C2 \xc2\xb1 1 min", nullptr, false, ct.valid && ct.c2Ms>0)) {
-            m_tlViewStart = ct.c2Ms - 60000;
-            m_tlViewEnd   = ct.c2Ms + 60000;
+    // ── Photo Sequence ────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("Photo Sequence")) {
+        // Reset Photo Sequence — clears all blocks from every camera track.
+        if (ImGui::MenuItem("Reset Photo Sequence")) {
+            for (auto& tr : m_tracks) if (tr.IsCamera()) tr.blocks.clear();
+            m_tlDirty  = true;
+            m_selTrack = m_selBlock = -1;
+            m_lastResult = "Photo sequence reset";
+            LogLine("Menu: Reset Photo Sequence");
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Reset Zoom", nullptr, false, ct.valid)) {
-            m_tlViewStart = -1;
-            m_tlViewEnd   = -1;
-        }
+        // One picture per minute for partial phase: Single blocks every 1 min
+        // from C1-5min to C4+5min on the target camera track (skips C2-C3).
+        if (ImGui::MenuItem("One Picture Per Minute (Partial Phase)")) AddPhotoPreset();
+        // Bracket series every 3s across totality (C2-C3) on the target track.
+        if (ImGui::MenuItem("Add Brackets Photo Series for Total Phase (every 3s)"))
+            AddTotalityBracketPreset();
         ImGui::Separator();
-        if (ImGui::MenuItem("Style: Dark"))    ApplyStyleDark();
-        if (ImGui::MenuItem("Style: Classic")) ImGui::StyleColorsClassic();
-        if (ImGui::MenuItem("Style: Light"))   ImGui::StyleColorsLight();
+        ImGui::MenuItem("Validate Timeline [FUTURE FUNCTION]", nullptr, false, false);
+        ImGui::MenuItem("Auto-optimize [FUTURE FUNCTION]",     nullptr, false, false);
         ImGui::EndMenu();
     }
 
-    // ── Camera Config ─────────────────────────────────────────────────────
-    if (ImGui::BeginMenu("Camera Config")) {
-        if (m_camConfigs.empty()) {
-            ImGui::TextDisabled("No cameras registered");
-            ImGui::TextDisabled("Connect camera to discover");
+    // ── Audio Sequence ────────────────────────────────────────────────────
+    if (ImGui::BeginMenu("Audio Sequence")) {
+        // Reset Audio Sequence — clears all blocks from every audio track.
+        if (ImGui::MenuItem("Reset Audio Sequence")) {
+            for (auto& tr : m_tracks) if (tr.IsAudio()) tr.blocks.clear();
+            m_tlDirty  = true;
+            m_selTrack = m_selBlock = -1;
+            m_lastResult = "Audio sequence reset";
+            LogLine("Menu: Reset Audio Sequence");
         }
-        for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
-            const CamConfig& cc = m_camConfigs[ci];
-            bool online = false;
-            { std::lock_guard lk(m_camerasMutex);
-              for (const auto& cs : m_cameras)
-                  if (cs.guid == cc.guid) { online = true; break; } }
-            // \xe2\x97\x8f = ● (U+25CF), \xe2\x97\x8b = ○ (U+25CB)
-            std::string label = std::format("{}  {}  {}##camcfgmenu{}",
-                online ? "\xe2\x97\x8f" : "\xe2\x97\x8b",
-                cc.model, cc.guid, ci);
-            if (ImGui::MenuItem(label.c_str()))
-                m_showCamCfgWnd[ci] = true;
-        }
-        ImGui::EndMenu();
-    }
-
-    // ── Sequence ──────────────────────────────────────────────────────────
-    if (ImGui::BeginMenu("Sequence")) {
-        if (ImGui::MenuItem("Calculate Contacts")) TriggerIqpFetch();
         ImGui::Separator();
         // Load Audio Preset: scan eclipse_audio_XX/ dirs (2-char lang suffix).
         if (ImGui::BeginMenu("Load Audio Preset")) {
@@ -5799,39 +6471,6 @@ void App::RenderMenuBar() {
                 ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1.f), "(no eclipse_audio_XX/ dirs)");
             ImGui::EndMenu();
         }
-        ImGui::Separator();
-        // Add Photo Preset: Single blocks every 1 min from C1-5min to C4+5min on ★ track.
-        if (ImGui::MenuItem("Add Photo Preset")) AddPhotoPreset();
-        ImGui::Separator();
-        // Reset Audio Presets — clears DB, rescans, then reloads current preset.
-        if (ImGui::MenuItem("Reset Audio Presets")) {
-            // Detect current audio language from the first audio block on the timeline.
-            m_pendingAudioReload.clear();
-            for (const auto& tr : m_tracks) {
-                if (!tr.IsAudio() || tr.blocks.empty()) continue;
-                const std::string& af = tr.blocks[0].audioFile;
-                // Path format: "eclipse_audio_PL\filename.mp3" — dir part is 16 chars.
-                auto sl = af.find('\\');
-                if (sl == std::string::npos) sl = af.find('/');
-                if (sl == 16 && af.size() > 16) {
-                    m_pendingAudioReload = af.substr(14, 2);
-                    for (char& c : m_pendingAudioReload)
-                        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                }
-                break;
-            }
-            m_configDb.ClearAudioFileDurs();
-            { std::lock_guard lk(m_audioDurMutex); m_audioDurCache.clear(); }
-            m_audioScanProgress.store(0);
-            m_audioScanTotal.store(0);
-            ScanAudioFilesAsync();
-            m_lastResult = m_pendingAudioReload.empty()
-                ? "Audio presets reset — rescanning all eclipse_audio_XX dirs"
-                : std::format("Audio presets reset — will reload {} after scan", m_pendingAudioReload);
-        }
-        ImGui::Separator();
-        ImGui::MenuItem("Validate Timeline",   nullptr, false, false); // future
-        ImGui::MenuItem("Auto-optimize",       nullptr, false, false); // future
         ImGui::EndMenu();
     }
 
@@ -5839,6 +6478,25 @@ void App::RenderMenuBar() {
     if (ImGui::BeginMenu("Options")) {
         if (ImGui::MenuItem("API Keys..."))
             m_showOptions = true;
+
+        // Detected cameras — flattened here (was a "Camera Config" submenu).
+        ImGui::Separator();
+        if (m_camConfigs.empty()) {
+            ImGui::TextDisabled("No cameras registered");
+            ImGui::TextDisabled("Connect camera to discover");
+        }
+        for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
+            const CamConfig& cc = m_camConfigs[ci];
+            bool online = false;
+            { std::lock_guard lk(m_camerasMutex);
+              for (const auto& cs : m_cameras)
+                  if (cs.guid == cc.guid) { online = true; break; } }
+            std::string label = std::format("[{}]  {}  {}##camcfgmenu{}",
+                online ? "ON" : "OFF",
+                cc.model, cc.guid, ci);
+            if (ImGui::MenuItem(label.c_str()))
+                m_showCamCfgWnd[ci] = true;
+        }
         ImGui::EndMenu();
     }
 
@@ -5846,7 +6504,7 @@ void App::RenderMenuBar() {
     if (ImGui::BeginMenu("About")) {
         if (ImGui::MenuItem("About TotalControl"))
             m_showAbout = true;
-        if (ImGui::MenuItem("Open GitHub\xe2\x86\x97")) {
+        if (ImGui::MenuItem("Open GitHub")) {
             ShellExecuteW(nullptr, L"open",
                 L"https://github.com/mrmgrpl/TotalControl",
                 nullptr, nullptr, SW_SHOWNORMAL);
@@ -6021,6 +6679,7 @@ void App::RenderAboutModal() {
     ImGui::TextColored(kGray, "  NASA SDO i NOAA GOES-19 -- otwarte dane sloneczne");
     ImGui::TextColored(kGray, "  Zespol JPL SSD -- serwis efemerydy Horizons");
     ImGui::TextColored(kGray, "  Jean Meeus -- algorytmy astronomiczne ponadczasowe");
+    ImGui::TextColored(kGray, "  Open-Elevation API -- darmowa wysokosc n.p.m. z linku Google Maps");
 
     // ── Author ─────────────────────────────────────────────────────────────────
     ImGui::Spacing();
@@ -6088,8 +6747,9 @@ void App::OnFrame() {
     RenderOptionsWindow();
     if (m_configDb.IsOpen()) RenderSnapshotModal();
 
-    const float kLeftW = 300.0f;   // Left column: Eclipse/Location/Time/Hardware/Execute
-    const float kInspW = 270.0f;   // Right column: Inspector + Palette
+    const float kLeftW = 420.0f;   // Left column: Eclipse/Location/Time/Hardware/Execute
+                                    // (300 + ~120 for the T- countdown column in the TIME table)
+    const float kInspW = 220.0f;   // Right column: Inspector + Palette
     const float totalH = io.DisplaySize.y - menuH;
     const float totalW = io.DisplaySize.x;
 
@@ -6108,7 +6768,7 @@ void App::OnFrame() {
     // LEFT COLUMN — Eclipse / Location / Time / Hardware / Execute (270px)
     // ════════════════════════════════════════════════════════════════════════
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.06f, 0.07f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(3, 10));
     ImGui::BeginChild("##col_left", ImVec2(kLeftW, topH), false, 0);
     ImGui::PopStyleVar();
     RenderLeftColumn();
@@ -6134,7 +6794,7 @@ void App::OnFrame() {
     // ════════════════════════════════════════════════════════════════════════
     ImGui::SameLine(0, 0);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.06f, 0.075f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(3, 10));
     ImGui::BeginChild("##col_insp", ImVec2(kInspW, topH), false, 0);
     ImGui::PopStyleVar();
     RenderInspectorColumn();

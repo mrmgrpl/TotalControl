@@ -7,6 +7,8 @@
 #include "IqpClient.h"
 #include "BesselCalc.h"
 #include "EphClient.h"
+#include "ElevationClient.h"
+#include "GeocodeClient.h"
 #include <string>
 #include <array>
 #include <atomic>
@@ -169,13 +171,27 @@ private:
     int                        m_eclipseIdx = -1;
 
     // ── Observer location ─────────────────────────────────────────────────────
-    float m_obsLat  = 0.f;
-    float m_obsLon  = 0.f;
-    int   m_obsAltM = 0;
+    float       m_obsLat  = 0.f;
+    float       m_obsLon  = 0.f;
+    int         m_obsAltM = 0;
+    std::string m_obsName;   // region/city name, parsed from a Google Maps URL
 
     DmsCoord m_latDms, m_lonDms;
     void SyncDecimalToDms();
     void SyncDmsToDecimal();
+
+    // ── Set Location from Google Maps URL ───────────────────────────────────
+    char        m_gmapsUrlBuf[512] = {};
+    std::string m_gmapsStatusMsg;     // feedback shown under the SET LOCATION button
+    bool        m_gmapsStatusIsErr = false;
+    std::thread m_geoThread;
+    std::mutex  m_geoMutex;
+    double      m_geoElevM = 0.0;     // guarded by m_geoMutex
+    std::string m_geoNamePending;     // guarded by m_geoMutex; reverse-geocoded place name
+    std::atomic<int> m_geoState{0};   // 0=Idle 1=Loading 2=Ready(unconsumed) 3=Error
+    void ApplyGoogleMapsUrl();        // parses m_gmapsUrlBuf, updates lat/lon, kicks elevation+geocode fetch
+    void ApplyLocationAndCalculate(); // ApplyGoogleMapsUrl (if URL given) + TriggerIqpFetch, one click
+    void GeoElevationThreadProc(double lat, double lon); // fetches elevation AND reverse-geocodes name
 
     // ── Solar view ───────────────────────────────────────────────────────────
     void  RenderSolarView();
@@ -218,6 +234,29 @@ private:
     float              m_suviOpacity     = 1.0f;  // 0–1; < 0.05 = hidden (persisted to DB)
     std::string        m_suviChannel     = "Fe171"; // selected SUVI wavelength band (persisted to DB)
     bool               m_suviJustCleared = false; // set by TriggerSuviFetch, resets s_prevSrvN
+
+    // ── Moon texture (static NASA archive photo, fetched once) ───────────────
+    // images-assets.nasa.gov/.../GSFC_20171208_Archive_e001982 — cached locally
+    // as TotalControlMoon.jpg since this is a fixed archive image, not a live
+    // feed like SUVI; no periodic re-fetch.
+    void TriggerMoonFetch();
+    void MoonThreadProc();
+    void CreateMoonTexture();   // render thread only — uploads pending pixels to D3D11
+
+    std::vector<uint8_t> m_moonPending;              // decoded RGBA, guarded by m_moonMutex
+    int                  m_moonPendingW = 0, m_moonPendingH = 0;
+    float                m_moonPendingCx = 0.f, m_moonPendingCy = 0.f, m_moonPendingR = 1.f;
+    std::mutex           m_moonMutex;
+    std::atomic<bool>    m_moonNewData{false};
+    std::thread          m_moonThread;
+    std::atomic<bool>    m_moonFetching{false};
+
+    // Render-thread-owned (set only in CreateMoonTexture, read in RenderSolarView).
+    ID3D11ShaderResourceView* m_moonSrv    = nullptr;
+    int                       m_moonImgW   = 0, m_moonImgH = 0;
+    float                     m_moonDiscCx = 0.f, m_moonDiscCy = 0.f, m_moonDiscR = 1.f;
+
+    float m_moonOpacity = 1.0f;  // 0-1; < 0.05 = flat fallback disc (persisted to DB)
 
     // ── JPL Horizons ephemeris ────────────────────────────────────────────────
     void TriggerEphFetch();
@@ -267,6 +306,12 @@ private:
     // Playhead drag (grab triangle, hold, move)
     bool    m_tlPhDragging  = false;
 
+    // Timeline pan drag (grab "Contacts" strip above phase bar, hold, move)
+    bool    m_tlPanDragging      = false;
+    float   m_tlPanMouseX0       = 0.f;
+    int64_t m_tlPanStartViewMs   = 0;
+    int64_t m_tlPanStartViewDur  = 0;
+
     // ── Playhead ──────────────────────────────────────────────────────────────
     // Written by seqThread (during run) or main thread (drag / default init).
     // Read by render thread every frame. Atomic to avoid torn reads.
@@ -305,6 +350,14 @@ private:
     // BlockDurMs: member function (not static) so it can access m_calibCache.
     // camModel = track's cameraId; empty = use first available calibration.
     int64_t BlockDurMs(const TLBlock& b, std::string_view camModel = {}) const;
+
+    // Snap to Seconds: rounds so the OFFSET FROM THE NEAREST CONTACT
+    // (C1/C2/C3/C4) is a whole number of seconds — matching the Relative
+    // ruler row — not so atMs itself lands on a whole UTC second (contacts
+    // themselves have sub-second precision, e.g. C2=18:28:53.700).
+    // Falls back to rounding to the nearest whole UTC second when no
+    // contact times are available yet.
+    int64_t SnapMsToRelativeSecond(int64_t ms);
 
     // ── Execution log ────────────────────────────────────────────────────────
     // Sequence counter reset at each TEST RUN / RUN start.
@@ -376,6 +429,7 @@ private:
 
     // ── Photo preset ─────────────────────────────────────────────────────────
     void AddPhotoPreset();
+    void AddTotalityBracketPreset();
     int  m_presetTargetTrack = 0;  // camera track index that receives AddPhotoPreset blocks
 };
 

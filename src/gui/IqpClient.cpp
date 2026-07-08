@@ -280,7 +280,9 @@ std::string GetBeApiKey() {
 
 ContactTimes FetchContactTimes(const std::string& eclipseId,
                                double lat, double lon, int altM,
-                               int year, int month, int day) {
+                               [[maybe_unused]] int year,
+                               [[maybe_unused]] int month,
+                               [[maybe_unused]] int day) {
     assert(!eclipseId.empty());
     assert(lat   >= -90.0  && lat  <= 90.0);
     assert(lon   >= -180.0 && lon  <= 180.0);

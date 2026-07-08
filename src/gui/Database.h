@@ -73,7 +73,7 @@ public:
 
     // reference data queries
     std::vector<TzEntry>     LoadTimezones() const;
-    std::vector<EclipseEntry> LoadEclipses() const;
+    std::vector<EclipseEntry> LoadEclipses(int fromYear = 2026, int toYear = 2036) const;
     BesselianElements        LoadBesselianElements(int year, int month, int day) const;
 
     // timeline persistence (TotalControlConfig.db)
