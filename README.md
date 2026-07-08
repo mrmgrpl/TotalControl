@@ -13,54 +13,40 @@ totality 103.9s), but usable for any total eclipse.
 
 ## What it does
 
-TotalControl handles the two things that make or break eclipse photography:
+TotalControl addresses the two determining factors in eclipse photography:
 **timing** and **composition**.
 
-- **Local contact times, automatically.** Paste a Google Maps URL of your
-  observation site and TotalControl calculates the exact local moment each
-  phase of the eclipse begins and ends there.
-- **Multi-camera control.** Connect up to **four cameras simultaneously**,
-  each independently controlled, based on Sony's Camera Remote SDK — in
-  theory, every Sony Alpha camera supported by that SDK should work.
-- **A timeline you build once, calmly, weeks in advance** — not with
-  shaking hands and 30 seconds left before totality. Compose every single
-  shot ahead of time in one of three modes: **single frame**, **burst**, or
-  **bracketing sequence**. Each block is fully adjustable (shutter speed,
-  ISO, aperture) and fires exactly on the timing you set.
-- **Auto-generated sequences.** Common shot patterns — a time-lapse frame
-  every minute through the partial phase, or a full bracketing sequence for
-  totality itself — are generated as a baseline you can then customize:
-  delay blocks, delete what you don't need, insert new ones, shape it
-  around your own shot list.
-- **Earthshine calibration.** The long-exposure Earthshine shot (roughly
-  10–15s or longer) should be fired at the *exact* midpoint of totality,
-  when the corona is fully symmetric — TotalControl lets you calibrate this
-  shot's timing precisely. The bracketing sequence around it is where you
-  fire as many frames as your hardware allows, to catch Baily's beads and
-  the diamond ring at third contact.
-- **Voice-guided totality.** Load auto-generated voice track commands —
-  spoken cues that walk you through what to do during totality — so you can
-  actually *watch* the eclipse instead of tinkering with hardware or
-  composing shots in the moment.
-- **Sky View Simulator.** A virtual viewpoint matching your camera and
-  hardware, including focal length, so you can preview your exact
-  composition before ever standing at the site. Add multiple cameras, each
-  with a different focal length, pointing angle, and tracking target — a
-  long lens tracking the Sun (including solar-equator rotation angle)
-  alongside a wide/fisheye camera framing the horizon, umbra approach, and
-  landscape.
-- **Live feed overlay for on-site calibration.** Once connected to your
-  camera(s), a live feed from each camera is overlaid directly onto the
-  simulated sky. Stand at your location before the eclipse, compare the
-  live feed against the simulated Sun position, and immediately see whether
-  framing, leveling, or tracking is off — correct it on the spot instead of
-  discovering it too late during totality.
-- **Corona orientation matching.** Because solar wind propagation takes
-  time, the corona's current shape reflects activity from the preceding
-  24 hours up to a few hundred hours back. The simulator lets you rotate
-  the virtual camera to match the corona's actual currently-observed
-  orientation, so your framing during totality matches reality rather than
-  a geometric assumption.
+- **Automatic local contact times.** From a Google Maps URL of the
+  observation site, TotalControl computes the local time of each eclipse
+  phase (C1–C4) at that location.
+- **Multi-camera control.** Up to four cameras, each independently
+  controlled via Sony's Camera Remote SDK.
+- **Pre-planned timeline.** Every shot is composed in advance in one of
+  three modes — single frame, burst, or bracketing sequence. Each block
+  defines shutter speed, ISO, and aperture, and fires at its scheduled
+  time.
+- **Auto-generated sequences.** Baseline sequences (e.g. a one-frame-per-
+  minute time-lapse for the partial phase, or a full bracketing sequence
+  for totality) are generated automatically and can then be edited,
+  reordered, or extended.
+- **Earthshine calibration.** Times the long-exposure Earthshine shot
+  (~10–15s or longer) to the exact midpoint of totality, when the corona
+  is symmetric. The surrounding bracketing sequence maximizes frame count
+  around third contact for Baily's beads and the diamond ring.
+- **Voice-guided totality.** An optional spoken-cue audio track for the
+  totality sequence, generated automatically from the timeline.
+- **Sky View Simulator.** Renders the expected sky from the observation
+  viewpoint, matching each camera's focal length, pointing angle, and
+  tracking target — e.g. a long lens tracking the Sun (including
+  solar-equator rotation) alongside a wide/fisheye camera framing horizon
+  and landscape.
+- **Live feed overlay.** Overlays each connected camera's live feed onto
+  the simulated sky, so framing, leveling, and tracking can be verified
+  and corrected on-site before totality.
+- **Corona orientation matching.** Since the corona's shape reflects solar
+  wind activity from the preceding hours to days, the simulator can be
+  rotated to match the currently observed corona orientation for accurate
+  framing.
 
 ## License & support
 
