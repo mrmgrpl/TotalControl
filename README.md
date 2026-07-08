@@ -89,6 +89,15 @@ it — the earlier it's reported, the more likely it gets fixed in time.
 
 ## Requirements
 
+### To use (pre-built release)
+
+- Windows 10/11 x64
+- A Sony Alpha camera supported by the Camera Remote SDK
+- The USB driver included in the release package (`Driver/`) — nothing else
+  to install, see `Driver/INSTALL.md`
+
+### To build from source / modify the code
+
 - Windows 10/11 x64
 - CMake 4.3.3+
 - MSVC (Visual Studio 2026 / VS 18)
