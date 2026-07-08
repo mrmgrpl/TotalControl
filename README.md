@@ -4,7 +4,7 @@ Windows software built to control Sony Alpha series cameras — via Sony's offic
 Camera Remote SDK — for planning and executing the perfect solar eclipse photography
 sequence, in both space and time.
 
-**📺 Watch the intro video:** [https://youtu.be/rhCX8FMtpQg](https://youtu.be/rhCX8FMtpQg)
+**Watch the intro video:** [https://youtu.be/rhCX8FMtpQg](https://youtu.be/rhCX8FMtpQg)
 
 ![TotalControl — Mission Control GUI: Sky View Simulator with timeline, contact times, and multi-camera panel](docs/images/mission_control.png)
 
