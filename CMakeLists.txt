@@ -86,6 +86,14 @@ add_custom_command(TARGET TotalControlSRV POST_BUILD
     COMMENT "Kopiowanie CrSDK DLL -> output + CrAdapter/"
 )
 
+# Sterownik USB kamery Sony (libusbK) + instrukcja instalacji + licencje
+add_custom_command(TARGET TotalControlSRV POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/external/CrSDK_Driver/Driver"
+        "$<TARGET_FILE_DIR:TotalControlSRV>/Driver"
+    COMMENT "Copy USB device driver + INSTALL.md + licenses -> output/Driver"
+)
+
 # ─── TotalControlCLI.exe — thin CLI client (bez CrSDK) ───────────────────────
 add_executable(TotalControlCLI src/cli/main.cpp src/cli/cli.rc)
 
@@ -163,6 +171,8 @@ add_executable(TotalControlGUI WIN32
     src/gui/BesselCalc.cpp
     src/gui/EphClient.cpp
     src/gui/SdoClient.cpp
+    src/gui/ElevationClient.cpp
+    src/gui/GeocodeClient.cpp
     src/gui/gui.rc
 )
 

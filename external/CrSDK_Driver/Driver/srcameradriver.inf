@@ -1,0 +1,526 @@
+
+[Strings]
+DriverPackageDisplayName="Sony Remote Camera Driver"
+ManufacturerName="Sony Corporation"
+
+VendorName = "Sony Corporation"
+SourceName = "IE Install Disk"
+src.device1.name = "Sony Remote Control Camera"
+src.device1.id = "VID_054C&PID_0CCC"
+src.device1.guid = 1EC3985C-A341-4724-96B3-DB0D5CE52709
+src.device2.name = "Sony Remote Control Camera"
+src.device2.id = "VID_054C&PID_0C43"
+src.device2.guid = 18A73032-DA01-4D12-A8DD-2182CD690F4E
+src.device3.name = "Sony Remote Control Camera"
+src.device3.id = "VID_054C&PID_0D2B"
+src.device3.guid = 6DC1B412-14D1-40D8-831E-0BD5212CE780
+src.device4.name = "Sony Remote Control Camera"
+src.device4.id = "VID_054C&PID_0D18"
+src.device4.guid = 9D47F2B5-D6AC-4DB9-ACDC-6D2AC6F38E22
+src.device5.name = "Sony Remote Control Camera"
+src.device5.id = "VID_054C&PID_0D1C"
+src.device5.guid = 571854E4-20E8-45A8-91A6-FCDFC4DDA204
+src.device6.name = "Sony Remote Control Camera"
+src.device6.id = "VID_054C&PID_0D9F"
+src.device6.guid = 43137B7F-D3ED-4353-BAFF-D5F2FCA3CD25
+src.device7.name = "Sony Remote Control Camera"
+src.device7.id = "VID_054C&PID_0DA3"
+src.device7.guid = 83B70C84-54AE-427F-B3DC-4545893FB007
+src.device8.name = "Sony Remote Control Camera"
+src.device8.id = "VID_054C&PID_0D97"
+src.device8.guid = 36988ED5-BF8C-43BF-8F61-3DAE3700B84B
+src.device9.name = "Sony Remote Control Camera"
+src.device9.id = "VID_054C&PID_0DA7"
+src.device9.guid = AA13B778-B015-BEFA-BC54-84FAB6976690
+src.device10.name = "Sony Remote Control Camera"
+src.device10.id = "VID_054C&PID_0E08"
+src.device10.guid = CE9FC0C7-58BB-4BEF-A6E6-DD54A1A9F929
+src.device11.name = "Sony Remote Control Camera"
+src.device11.id = "VID_054C&PID_0E10"
+src.device11.guid = 66BDABEA-BA11-4C47-A8CF-A8C5C9E0B11D
+src.device12.name = "Sony Remote Control Camera"
+src.device12.id = "VID_054C&PID_0E0C"
+src.device12.guid = A50F229E-C9C5-4200-8196-60975FA8D91C
+src.device13.name = "Sony Remote Control Camera"
+src.device13.id = "VID_054C&PID_0E7C"
+src.device13.guid = ECBC733B-6668-4120-BB1A-493C0143EE38
+src.device14.name = "Sony Remote Control Camera"
+src.device14.id = "VID_054C&PID_0E74"
+src.device14.guid = BB7CAA8D-F172-420C-ACCD-4F6312111854
+src.device15.name = "Sony Remote Control Camera"
+src.device15.id = "VID_054C&PID_0E78"
+src.device15.guid = F4F6AC16-E4E8-4F18-B226-E75E51E46371
+src.device16.name = "Sony Remote Control Camera"
+src.device16.id = "VID_054C&PID_0E88"
+src.device16.guid = 300AB7C6-1F32-474B-BE57-603C4AB64721
+src.device17.name = "Sony Remote Control Camera"
+src.device17.id = "VID_054C&PID_0E8C"
+src.device17.guid = 7CD9C911-BF30-47D5-AC1D-B25D793D9DC8
+src.device18.name = "Sony Remote Control Camera"
+src.device18.id = "VID_054C&PID_0E90"
+src.device18.guid = DD4F131C-6533-4BAC-B3B1-D13D518C9033
+src.device19.name = "Sony Remote Control Camera"
+src.device19.id = "VID_054C&PID_0E80"
+src.device19.guid = 1D141BB3-CC9A-4033-99B9-DB268DF09B2E
+src.device20.name = "Sony Remote Control Camera"
+src.device20.id = "VID_054C&PID_0EE5"
+src.device20.guid = 70F3E2AC-BAF6-4F1F-A9F7-2D3D988CF3C2
+src.device21.name = "Sony Remote Control Camera"
+src.device21.id = "VID_054C&PID_0EE9"
+src.device21.guid = 78B72AF7-49BB-4C7E-99A8-DB3DC7E34F64
+src.device22.name = "Sony Remote Control Camera"
+src.device22.id = "VID_054C&PID_0EED"
+src.device22.guid = 054B59F2-A716-4A63-88FC-D80DD5A7143E
+src.device23.name = "Sony Remote Control Camera"
+src.device23.id = "VID_054C&PID_0EF1"
+src.device23.guid = DBD023AA-41EC-49EA-8A7E-5D8C4B6FAB37
+src.device24.name = "Sony Remote Control Camera"
+src.device24.id = "VID_054C&PID_0EF5"
+src.device24.guid = 22DB004F-705B-4A40-A7CF-2132319A7DFA
+src.device25.name = "Sony Remote Control Camera"
+src.device25.id = "VID_054C&PID_0EF9"
+src.device25.guid = F3810EC1-908D-4729-9CE4-1C882A7BC421
+src.device26.name = "Sony Remote Control Camera"
+src.device26.id = "VID_054C&PID_0EFD"
+src.device26.guid = 2B1DDE65-7289-4552-954E-9112C8CC4FD3
+src.device27.name = "Sony Remote Control Camera"
+src.device27.id = "VID_054C&PID_0F01"
+src.device27.guid = 0E806CEF-6DED-43C1-9E1E-D6932EF8D18A
+src.device28.name = "Sony Remote Control Camera"
+src.device28.id = "VID_054C&PID_0F05"
+src.device28.guid = 8A66E8CE-BFAF-455F-B9CF-393D195DF331
+src.device29.name = "Sony Remote Control Camera"
+src.device29.id = "VID_054C&PID_0F09"
+src.device29.guid = 75881355-763B-46EB-A46B-AD10781EE9D8
+src.device30.name = "Sony Remote Control Camera"
+src.device30.id = "VID_054C&PID_0F0D"
+src.device30.guid = 1FAD873C-970B-4018-B8AE-9D5A4B0F8A11
+src.device31.name = "Sony Remote Control Camera"
+src.device31.id = "VID_054C&PID_0F11"
+src.device31.guid = B410845D-2919-4003-B086-AC3D3CB1C433
+src.device32.name = "Sony Remote Control Camera"
+src.device32.id = "VID_054C&PID_0F46"
+src.device32.guid = F554638D-B2CF-4343-AE3E-A4D0077C7339
+src.device33.name = "Sony Remote Control Camera"
+src.device33.id = "VID_054C&PID_0F4A"
+src.device33.guid = A244D94B-8A60-4F53-ABC1-1ABCD819F028
+src.device34.name = "Sony Remote Control Camera"
+src.device34.id = "VID_054C&PID_0F4E"
+src.device34.guid = C43A1F79-8ABA-4378-B38D-9BDE2EF86A37
+src.device35.name = "Sony Remote Control Camera"
+src.device35.id = "VID_054C&PID_0F52"
+src.device35.guid = C959F06D-9626-4C2E-8F03-8C841C238833
+src.device36.name = "Sony Remote Control Camera"
+src.device36.id = "VID_054C&PID_0F56"
+src.device36.guid = E56622F5-45CD-4079-9794-95887CEA4F10
+src.device37.name = "Sony Remote Control Camera"
+src.device37.id = "VID_054C&PID_0F5A"
+src.device37.guid = 7003733E-AFB8-4C9B-8F0D-1AC6FD64622F
+src.device38.name = "Sony Remote Control Camera"
+src.device38.id = "VID_054C&PID_0F5E"
+src.device38.guid = 85C10B9A-27DE-48CE-8899-A377FD547817
+src.device39.name = "Sony Remote Control Camera"
+src.device39.id = "VID_054C&PID_0F62"
+src.device39.guid = 44A4D9CB-938E-4195-BF77-8B406ABD901C
+src.device40.name = "Sony Remote Control Camera"
+src.device40.id = "VID_054C&PID_0F66"
+src.device40.guid = 730B2ABA-D2BD-49A2-B632-93B7107A976D
+src.device41.name = "Sony Remote Control Camera"
+src.device41.id = "VID_054C&PID_0F6A"
+src.device41.guid = B2D8206F-3AB0-4784-B21C-66026CECB93A
+src.device42.name = "Sony Remote Control Camera"
+src.device42.id = "VID_054C&PID_0F6E"
+src.device42.guid = 7568D094-4AF5-4742-BB2B-61C16B7B814C
+src.device43.name = "Sony Remote Control Camera"
+src.device43.id = "VID_054C&PID_0F72"
+src.device43.guid = 3CAFE57C-D83E-4CE2-AC3B-77A75EE85994
+src.device44.name = "Sony Remote Control Camera"
+src.device44.id = "VID_054C&PID_0FCC"
+src.device44.guid = 8DD40846-216F-43EE-820D-A0E3BC034BE5
+src.device45.name = "Sony Remote Control Camera"
+src.device45.id = "VID_054C&PID_0FCD"
+src.device45.guid = BFF0B2F8-7B87-4C68-AA2F-08EF5BB108B9
+src.device46.name = "Sony Remote Control Camera"
+src.device46.id = "VID_054C&PID_0FD1"
+src.device46.guid = 110172C5-B234-45FC-9EA7-5A16BE554769
+src.device47.name = "Sony Remote Control Camera"
+src.device47.id = "VID_054C&PID_0FD2"
+src.device47.guid = 5B61973C-ACF9-4652-8EFA-38D85A9D0C8C
+src.device48.name = "Sony Remote Control Camera"
+src.device48.id = "VID_054C&PID_0FD6"
+src.device48.guid = D37E16EF-3F40-4313-B388-4462962CE737
+src.device49.name = "Sony Remote Control Camera"
+src.device49.id = "VID_054C&PID_0FD7"
+src.device49.guid = 8217B2C4-97DE-45D0-A3E6-8546D0A7221D
+src.device50.name = "Sony Remote Control Camera"
+src.device50.id = "VID_054C&PID_0FDB"
+src.device50.guid = 8B55723B-D6F9-4CE4-BE9C-035C6E9402DA
+src.device51.name = "Sony Remote Control Camera"
+src.device51.id = "VID_054C&PID_0FDC"
+src.device51.guid = 565CE60E-F273-4C01-AB1F-1ADC0079C35D
+src.device52.name = "Sony Remote Control Camera"
+src.device52.id = "VID_054C&PID_0FE0"
+src.device52.guid = 54D06FF5-48B2-4164-B5E0-C1061037DF94
+src.device53.name = "Sony Remote Control Camera"
+src.device53.id = "VID_054C&PID_0FE1"
+src.device53.guid = 6B77B435-2865-4037-AF64-1E37DA30FDA0
+src.device54.name = "Sony Remote Control Camera"
+src.device54.id = "VID_054C&PID_0FE5"
+src.device54.guid = 21D0601F-CE5E-47CE-A2DA-668418F79295
+src.device55.name = "Sony Remote Control Camera"
+src.device55.id = "VID_054C&PID_0FE6"
+src.device55.guid = A48A3727-6EF1-4D4B-86FD-FAC206702735
+src.device56.name = "Sony Remote Control Camera"
+src.device56.id = "VID_054C&PID_0FEB"
+src.device56.guid = 2336DD2A-D9E5-4D79-AB37-5F24E73254EF
+src.device57.name = "Sony Remote Control Camera"
+src.device57.id = "VID_054C&PID_0FF0"
+src.device57.guid = 59EBEF53-F078-4805-9D89-8556D25EA7E5
+src.device58.name = "Sony Remote Control Camera"
+src.device58.id = "VID_054C&PID_0FFD"
+src.device58.guid = EDB47FB6-A9BE-4E83-9B70-82287B65D82B
+src.device59.name = "Sony Remote Control Camera"
+src.device59.id = "VID_054C&PID_0FFE"
+src.device59.guid = BF8C6A48-345A-4213-8DBF-433D74A2287E
+src.device60.name = "Sony Remote Control Camera"
+src.device60.id = "VID_054C&PID_0FFF"
+src.device60.guid = 9E1E9AA7-C92F-498B-AA64-6DEC0D031290
+src.device61.name = "Sony Remote Control Camera"
+src.device61.id = "VID_054C&PID_1000"
+src.device61.guid = 64AAF4C9-8BE2-4C62-AB3E-78042B7E5CBE
+src.device62.name = "Sony Remote Control Camera"
+src.device62.id = "VID_054C&PID_1001"
+src.device62.guid = 431A0FF2-D9B7-4BE5-9435-484EAC7427BF
+src.device63.name = "Sony Remote Control Camera"
+src.device63.id = "VID_054C&PID_1002"
+src.device63.guid = 09A07ABB-BC08-4011-AA88-39D260DBE984
+src.device64.name = "Sony Remote Control Camera"
+src.device64.id = "VID_054C&PID_1003"
+src.device64.guid = 30B5DDDF-9186-489D-881C-CFD80A6E0EBC
+src.device65.name = "Sony Remote Control Camera"
+src.device65.id = "VID_054C&PID_1004"
+src.device65.guid = BC59CF6B-E98F-4111-BD93-B5A69F692452
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "libusbK Usb Devices"
+ClassGuid   = {ECFB0CFD-74C4-4f52-BBF7-343461CD72AC}
+Provider    = "libusbK"
+
+CatalogFile = srcameradriver.cat
+DriverVer   = 04/28/2014, 3.0.7.0
+
+DriverPackageDisplayName = "Sony Remote Camera Driver"
+
+[ClassInstall32]
+Addreg = LUsbK_Class_AddReg 
+
+[LUsbK_Class_AddReg]
+HKR,,,0,"libusbK Usb Devices"
+HKR,,Icon,,-20
+
+[Manufacturer]
+%VendorName% = LUsbK_DeviceGroup,NTX86,NTAMD64
+
+[LUsbK_DeviceGroup]
+%src.device1.name%=LUsbK_Device, USB\%src.device1.id%
+%src.device2.name%=LUsbK_Device, USB\%src.device2.id%
+%src.device3.name%=LUsbK_Device, USB\%src.device3.id%
+%src.device4.name%=LUsbK_Device, USB\%src.device4.id%
+%src.device5.name%=LUsbK_Device, USB\%src.device5.id%
+%src.device6.name%=LUsbK_Device, USB\%src.device6.id%
+%src.device7.name%=LUsbK_Device, USB\%src.device7.id%
+%src.device8.name%=LUsbK_Device, USB\%src.device8.id%
+%src.device9.name%=LUsbK_Device, USB\%src.device9.id%
+%src.device10.name%=LUsbK_Device, USB\%src.device10.id%
+%src.device11.name%=LUsbK_Device, USB\%src.device11.id%
+%src.device12.name%=LUsbK_Device, USB\%src.device12.id%
+%src.device13.name%=LUsbK_Device, USB\%src.device13.id%
+%src.device14.name%=LUsbK_Device, USB\%src.device14.id%
+%src.device15.name%=LUsbK_Device, USB\%src.device15.id%
+%src.device16.name%=LUsbK_Device, USB\%src.device16.id%
+%src.device17.name%=LUsbK_Device, USB\%src.device17.id%
+%src.device18.name%=LUsbK_Device, USB\%src.device18.id%
+%src.device19.name%=LUsbK_Device, USB\%src.device19.id%
+%src.device20.name%=LUsbK_Device, USB\%src.device20.id%
+%src.device21.name%=LUsbK_Device, USB\%src.device21.id%
+%src.device22.name%=LUsbK_Device, USB\%src.device22.id%
+%src.device23.name%=LUsbK_Device, USB\%src.device23.id%
+%src.device24.name%=LUsbK_Device, USB\%src.device24.id%
+%src.device25.name%=LUsbK_Device, USB\%src.device25.id%
+%src.device26.name%=LUsbK_Device, USB\%src.device26.id%
+%src.device27.name%=LUsbK_Device, USB\%src.device27.id%
+%src.device28.name%=LUsbK_Device, USB\%src.device28.id%
+%src.device29.name%=LUsbK_Device, USB\%src.device29.id%
+%src.device30.name%=LUsbK_Device, USB\%src.device30.id%
+%src.device31.name%=LUsbK_Device, USB\%src.device31.id%
+%src.device32.name%=LUsbK_Device, USB\%src.device32.id%
+%src.device33.name%=LUsbK_Device, USB\%src.device33.id%
+%src.device34.name%=LUsbK_Device, USB\%src.device34.id%
+%src.device35.name%=LUsbK_Device, USB\%src.device35.id%
+%src.device36.name%=LUsbK_Device, USB\%src.device36.id%
+%src.device37.name%=LUsbK_Device, USB\%src.device37.id%
+%src.device38.name%=LUsbK_Device, USB\%src.device38.id%
+%src.device39.name%=LUsbK_Device, USB\%src.device39.id%
+%src.device40.name%=LUsbK_Device, USB\%src.device40.id%
+%src.device41.name%=LUsbK_Device, USB\%src.device41.id%
+%src.device42.name%=LUsbK_Device, USB\%src.device42.id%
+%src.device43.name%=LUsbK_Device, USB\%src.device43.id%
+%src.device44.name%=LUsbK_Device, USB\%src.device44.id%
+%src.device45.name%=LUsbK_Device, USB\%src.device45.id%
+%src.device46.name%=LUsbK_Device, USB\%src.device46.id%
+%src.device47.name%=LUsbK_Device, USB\%src.device47.id%
+%src.device48.name%=LUsbK_Device, USB\%src.device48.id%
+%src.device49.name%=LUsbK_Device, USB\%src.device49.id%
+%src.device50.name%=LUsbK_Device, USB\%src.device50.id%
+%src.device51.name%=LUsbK_Device, USB\%src.device51.id%
+%src.device52.name%=LUsbK_Device, USB\%src.device52.id%
+%src.device53.name%=LUsbK_Device, USB\%src.device53.id%
+%src.device54.name%=LUsbK_Device, USB\%src.device54.id%
+%src.device55.name%=LUsbK_Device, USB\%src.device55.id%
+%src.device56.name%=LUsbK_Device, USB\%src.device56.id%
+%src.device57.name%=LUsbK_Device, USB\%src.device57.id%
+%src.device58.name%=LUsbK_Device, USB\%src.device58.id%
+%src.device59.name%=LUsbK_Device, USB\%src.device59.id%
+%src.device60.name%=LUsbK_Device, USB\%src.device60.id%
+%src.device61.name%=LUsbK_Device, USB\%src.device61.id%
+%src.device62.name%=LUsbK_Device, USB\%src.device62.id%
+%src.device63.name%=LUsbK_Device, USB\%src.device63.id%
+%src.device64.name%=LUsbK_Device, USB\%src.device64.id%
+%src.device65.name%=LUsbK_Device, USB\%src.device65.id%
+
+[LUsbK_DeviceGroup.NTX86]
+%src.device1.name%=LUsbK_Device, USB\%src.device1.id%
+%src.device2.name%=LUsbK_Device, USB\%src.device2.id%
+%src.device3.name%=LUsbK_Device, USB\%src.device3.id%
+%src.device4.name%=LUsbK_Device, USB\%src.device4.id%
+%src.device5.name%=LUsbK_Device, USB\%src.device5.id%
+%src.device6.name%=LUsbK_Device, USB\%src.device6.id%
+%src.device7.name%=LUsbK_Device, USB\%src.device7.id%
+%src.device8.name%=LUsbK_Device, USB\%src.device8.id%
+%src.device9.name%=LUsbK_Device, USB\%src.device9.id%
+%src.device10.name%=LUsbK_Device, USB\%src.device10.id%
+%src.device11.name%=LUsbK_Device, USB\%src.device11.id%
+%src.device12.name%=LUsbK_Device, USB\%src.device12.id%
+%src.device13.name%=LUsbK_Device, USB\%src.device13.id%
+%src.device14.name%=LUsbK_Device, USB\%src.device14.id%
+%src.device15.name%=LUsbK_Device, USB\%src.device15.id%
+%src.device16.name%=LUsbK_Device, USB\%src.device16.id%
+%src.device17.name%=LUsbK_Device, USB\%src.device17.id%
+%src.device18.name%=LUsbK_Device, USB\%src.device18.id%
+%src.device19.name%=LUsbK_Device, USB\%src.device19.id%
+%src.device20.name%=LUsbK_Device, USB\%src.device20.id%
+%src.device21.name%=LUsbK_Device, USB\%src.device21.id%
+%src.device22.name%=LUsbK_Device, USB\%src.device22.id%
+%src.device23.name%=LUsbK_Device, USB\%src.device23.id%
+%src.device24.name%=LUsbK_Device, USB\%src.device24.id%
+%src.device25.name%=LUsbK_Device, USB\%src.device25.id%
+%src.device26.name%=LUsbK_Device, USB\%src.device26.id%
+%src.device27.name%=LUsbK_Device, USB\%src.device27.id%
+%src.device28.name%=LUsbK_Device, USB\%src.device28.id%
+%src.device29.name%=LUsbK_Device, USB\%src.device29.id%
+%src.device30.name%=LUsbK_Device, USB\%src.device30.id%
+%src.device31.name%=LUsbK_Device, USB\%src.device31.id%
+%src.device32.name%=LUsbK_Device, USB\%src.device32.id%
+%src.device33.name%=LUsbK_Device, USB\%src.device33.id%
+%src.device34.name%=LUsbK_Device, USB\%src.device34.id%
+%src.device35.name%=LUsbK_Device, USB\%src.device35.id%
+%src.device36.name%=LUsbK_Device, USB\%src.device36.id%
+%src.device37.name%=LUsbK_Device, USB\%src.device37.id%
+%src.device38.name%=LUsbK_Device, USB\%src.device38.id%
+%src.device39.name%=LUsbK_Device, USB\%src.device39.id%
+%src.device40.name%=LUsbK_Device, USB\%src.device40.id%
+%src.device41.name%=LUsbK_Device, USB\%src.device41.id%
+%src.device42.name%=LUsbK_Device, USB\%src.device42.id%
+%src.device43.name%=LUsbK_Device, USB\%src.device43.id%
+%src.device44.name%=LUsbK_Device, USB\%src.device44.id%
+%src.device45.name%=LUsbK_Device, USB\%src.device45.id%
+%src.device46.name%=LUsbK_Device, USB\%src.device46.id%
+%src.device47.name%=LUsbK_Device, USB\%src.device47.id%
+%src.device48.name%=LUsbK_Device, USB\%src.device48.id%
+%src.device49.name%=LUsbK_Device, USB\%src.device49.id%
+%src.device50.name%=LUsbK_Device, USB\%src.device50.id%
+%src.device51.name%=LUsbK_Device, USB\%src.device51.id%
+%src.device52.name%=LUsbK_Device, USB\%src.device52.id%
+%src.device53.name%=LUsbK_Device, USB\%src.device53.id%
+%src.device54.name%=LUsbK_Device, USB\%src.device54.id%
+%src.device55.name%=LUsbK_Device, USB\%src.device55.id%
+%src.device56.name%=LUsbK_Device, USB\%src.device56.id%
+%src.device57.name%=LUsbK_Device, USB\%src.device57.id%
+%src.device58.name%=LUsbK_Device, USB\%src.device58.id%
+%src.device59.name%=LUsbK_Device, USB\%src.device59.id%
+%src.device60.name%=LUsbK_Device, USB\%src.device60.id%
+%src.device61.name%=LUsbK_Device, USB\%src.device61.id%
+%src.device62.name%=LUsbK_Device, USB\%src.device62.id%
+%src.device63.name%=LUsbK_Device, USB\%src.device63.id%
+%src.device64.name%=LUsbK_Device, USB\%src.device64.id%
+%src.device65.name%=LUsbK_Device, USB\%src.device65.id%
+
+[LUsbK_DeviceGroup.NTAMD64]
+%src.device1.name%=LUsbK_Device, USB\%src.device1.id%
+%src.device2.name%=LUsbK_Device, USB\%src.device2.id%
+%src.device3.name%=LUsbK_Device, USB\%src.device3.id%
+%src.device4.name%=LUsbK_Device, USB\%src.device4.id%
+%src.device5.name%=LUsbK_Device, USB\%src.device5.id%
+%src.device6.name%=LUsbK_Device, USB\%src.device6.id%
+%src.device7.name%=LUsbK_Device, USB\%src.device7.id%
+%src.device8.name%=LUsbK_Device, USB\%src.device8.id%
+%src.device9.name%=LUsbK_Device, USB\%src.device9.id%
+%src.device10.name%=LUsbK_Device, USB\%src.device10.id%
+%src.device11.name%=LUsbK_Device, USB\%src.device11.id%
+%src.device12.name%=LUsbK_Device, USB\%src.device12.id%
+%src.device13.name%=LUsbK_Device, USB\%src.device13.id%
+%src.device14.name%=LUsbK_Device, USB\%src.device14.id%
+%src.device15.name%=LUsbK_Device, USB\%src.device15.id%
+%src.device16.name%=LUsbK_Device, USB\%src.device16.id%
+%src.device17.name%=LUsbK_Device, USB\%src.device17.id%
+%src.device18.name%=LUsbK_Device, USB\%src.device18.id%
+%src.device19.name%=LUsbK_Device, USB\%src.device19.id%
+%src.device20.name%=LUsbK_Device, USB\%src.device20.id%
+%src.device21.name%=LUsbK_Device, USB\%src.device21.id%
+%src.device22.name%=LUsbK_Device, USB\%src.device22.id%
+%src.device23.name%=LUsbK_Device, USB\%src.device23.id%
+%src.device24.name%=LUsbK_Device, USB\%src.device24.id%
+%src.device25.name%=LUsbK_Device, USB\%src.device25.id%
+%src.device26.name%=LUsbK_Device, USB\%src.device26.id%
+%src.device27.name%=LUsbK_Device, USB\%src.device27.id%
+%src.device28.name%=LUsbK_Device, USB\%src.device28.id%
+%src.device29.name%=LUsbK_Device, USB\%src.device29.id%
+%src.device30.name%=LUsbK_Device, USB\%src.device30.id%
+%src.device31.name%=LUsbK_Device, USB\%src.device31.id%
+%src.device32.name%=LUsbK_Device, USB\%src.device32.id%
+%src.device33.name%=LUsbK_Device, USB\%src.device33.id%
+%src.device34.name%=LUsbK_Device, USB\%src.device34.id%
+%src.device35.name%=LUsbK_Device, USB\%src.device35.id%
+%src.device36.name%=LUsbK_Device, USB\%src.device36.id%
+%src.device37.name%=LUsbK_Device, USB\%src.device37.id%
+%src.device38.name%=LUsbK_Device, USB\%src.device38.id%
+%src.device39.name%=LUsbK_Device, USB\%src.device39.id%
+%src.device40.name%=LUsbK_Device, USB\%src.device40.id%
+%src.device41.name%=LUsbK_Device, USB\%src.device41.id%
+%src.device42.name%=LUsbK_Device, USB\%src.device42.id%
+%src.device43.name%=LUsbK_Device, USB\%src.device43.id%
+%src.device44.name%=LUsbK_Device, USB\%src.device44.id%
+%src.device45.name%=LUsbK_Device, USB\%src.device45.id%
+%src.device46.name%=LUsbK_Device, USB\%src.device46.id%
+%src.device47.name%=LUsbK_Device, USB\%src.device47.id%
+%src.device48.name%=LUsbK_Device, USB\%src.device48.id%
+%src.device49.name%=LUsbK_Device, USB\%src.device49.id%
+%src.device50.name%=LUsbK_Device, USB\%src.device50.id%
+%src.device51.name%=LUsbK_Device, USB\%src.device51.id%
+%src.device52.name%=LUsbK_Device, USB\%src.device52.id%
+%src.device53.name%=LUsbK_Device, USB\%src.device53.id%
+%src.device54.name%=LUsbK_Device, USB\%src.device54.id%
+%src.device55.name%=LUsbK_Device, USB\%src.device55.id%
+%src.device56.name%=LUsbK_Device, USB\%src.device56.id%
+%src.device57.name%=LUsbK_Device, USB\%src.device57.id%
+%src.device58.name%=LUsbK_Device, USB\%src.device58.id%
+%src.device59.name%=LUsbK_Device, USB\%src.device59.id%
+%src.device60.name%=LUsbK_Device, USB\%src.device60.id%
+%src.device61.name%=LUsbK_Device, USB\%src.device61.id%
+%src.device62.name%=LUsbK_Device, USB\%src.device62.id%
+%src.device63.name%=LUsbK_Device, USB\%src.device63.id%
+%src.device64.name%=LUsbK_Device, USB\%src.device64.id%
+%src.device65.name%=LUsbK_Device, USB\%src.device65.id%
+
+[LUsbK_Device.NT.HW]
+AddReg=LUsbK_Device_AddReg
+
+[LUsbK_Device.NTAMD64.HW]
+AddReg=LUsbK_Device_AddReg
+
+[LUsbK_Device_AddReg]
+HKR,,DeviceInterfaceGUIDs,0x10000,"{%src.device1.guid%, %src.device2.guid%, %src.device3.guid%, %src.device4.guid%, %src.device5.guid%, %src.device6.guid%, %src.device7.guid%, %src.device8.guid%, %src.device9.guid%, %src.device10.guid%, %src.device11.guid%, %src.device12.guid%, %src.device13.guid%, %src.device14.guid%, %src.device15.guid%, %src.device16.guid%, %src.device17.guid%, %src.device18.guid%, %src.device19.guid%, %src.device20.guid%, %src.device21.guid%, %src.device22.guid%, %src.device23.guid%, %src.device24.guid%, %src.device25.guid%, %src.device26.guid%, %src.device27.guid%, %src.device28.guid%, %src.device29.guid%, %src.device30.guid%, %src.device31.guid%, %src.device32.guid%, %src.device33.guid%, %src.device34.guid%, %src.device35.guid%, %src.device36.guid%, %src.device37.guid%, %src.device38.guid%, %src.device39.guid%, %src.device40.guid%, %src.device41.guid%, %src.device42.guid%, %src.device43.guid%, %src.device44.guid%, %src.device45.guid%, %src.device46.guid%, %src.device47.guid%, %src.device48.guid%, %src.device49.guid%, %src.device50.guid%, %src.device51.guid%, %src.device52.guid%, %src.device53.guid%, %src.device54.guid%, %src.device55.guid%, %src.device56.guid%, %src.device57.guid%, %src.device58.guid%, %src.device59.guid%, %src.device60.guid%, %src.device61.guid%, %src.device62.guid%, %src.device63.guid%, %src.device64.guid%, %src.device65.guid%}"
+
+HKR,,DeviceIdleEnabled,0x00010001,1
+
+HKR,,DefaultIdleState,0x00010001,0
+
+HKR,,DefaultIdleTimeout,0x00010001,5000
+
+HKR,,DeviceIdleIgnoreWakeEnable,0x00010001,0
+
+HKR,,UserSetDeviceIdleEnabled,0x00010001,0
+
+HKR,,SystemWakeEnabled,0x00010001,0
+
+[LUsbK_Device.NT.Services]
+Addservice=libusbK,2,LUsbK_AddService
+
+[LUsbK_Device.NTAMD64.Services]
+Addservice=libusbK,2,LUsbK_AddService
+
+[LUsbK_AddService]
+DisplayName="libusbK USB Driver 04/28/2014 - 3.0.7.0"
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\libusbK.sys
+AddReg=LUsbK_Driver_AddReg
+
+[LUsbK_Driver_AddReg]
+HKR,"Parameters","DebugLevel",0x10001,4
+
+[SourceDisksNames]
+1 = %SourceName%
+
+[SourceDisksFiles.x86]
+libusbK.sys	= 1,x86
+libusbK_x86.dll	= 1,x86
+WdfCoInstaller01009.dll = 1,x86
+
+[SourceDisksFiles.amd64]
+WdfCoInstaller01009.dll	= 1,amd64
+libusbK.sys			= 1,amd64
+libusbK.dll			= 1,amd64
+libusbK_x86.dll		= 1,x86
+
+[DestinationDirs]
+DefaultDestDir				= 12
+CoInstaller_CopyFiles		= 11
+libusb_files_sys		= 10,system32\drivers
+libusb_files_dll		= 10,system32
+libusb_files_dll_wow64	= 10,syswow64
+libusb_files_dll_x86	= 10,system32
+
+[libusb_files_sys]
+libusbK.sys
+
+[libusb_files_dll]
+libusbK.dll
+
+[libusb_files_dll_x86]
+libusbK.dll, libusbK_x86.dll
+
+[libusb_files_dll_wow64]
+libusbK.dll, libusbK_x86.dll
+
+[LUsbK_Device.NT]
+CopyFiles = libusb_files_sys, libusb_files_dll_x86
+
+[LUsbK_Device.NTAMD64]
+CopyFiles = libusb_files_sys, libusb_files_dll, libusb_files_dll_wow64
+
+; ========= WDF/CoInstaller section =============
+[LUsbK_Device.NT.CoInstallers]
+AddReg=CoInstaller_AddReg
+CopyFiles=CoInstaller_CopyFiles
+
+[LUsbK_Device.NTAMD64.CoInstallers]
+AddReg=CoInstaller_AddReg
+CopyFiles=CoInstaller_CopyFiles
+
+[CoInstaller_CopyFiles]
+WdfCoInstaller01009.dll
+
+[CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller01009.dll,WdfCoInstaller"
+
+[LUsbK_Device.NT.Wdf]
+KmdfService = libusbK, LUsbK_wdfsect
+
+[LUsbK_Device.NTAMD64.Wdf]
+KmdfService = libusbK, LUsbK_wdfsect
+
+[LUsbK_wdfsect]
+KmdfLibraryVersion=1.9

@@ -6,6 +6,8 @@ out/
 
 # Release binaries tracked explicitly
 !release/*.exe
+# Sony USB camera driver package — tracked explicitly (redistributable DLLs)
+!external/CrSDK_Driver/**/*.dll
 *.obj
 *.pdb
 *.ilk
