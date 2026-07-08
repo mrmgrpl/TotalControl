@@ -119,3 +119,9 @@ development details.
 
 Pre-built releases (GUI + server + CLI + camera USB driver) are available
 under [Releases](../../releases).
+
+## Acknowledgements
+
+Local and eclipse contact time calculations are powered by
+[besselianelements.com](https://www.besselianelements.com/) — many thanks
+for providing the API this project relies on.
