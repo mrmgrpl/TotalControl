@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <clocale>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -58,6 +59,11 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 // ─── WinMain ─────────────────────────────────────────────────────────────────
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    // JSON/config numbers always use '.' as the decimal separator. Without this,
+    // a Polish (or other comma-decimal) system locale makes std::stof/std::stod/
+    // sscanf("%f") stop parsing at the '.' — e.g. "0.3" silently becomes 0.0.
+    std::setlocale(LC_ALL, "C");
+
     // Single-instance check for GUI (optional — allow multiple GUI windows)
     // Create window class
     WNDCLASSEXW wc{};

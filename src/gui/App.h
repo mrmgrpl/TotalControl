@@ -430,6 +430,7 @@ private:
     // ── Photo preset ─────────────────────────────────────────────────────────
     void AddPhotoPreset();
     void AddTotalityBracketPreset();
+    void AddAllBracketVariantsPreset();
     int  m_presetTargetTrack = 0;  // camera track index that receives AddPhotoPreset blocks
 };
 

@@ -139,8 +139,12 @@ public:
     }
     void OnError(CrInt32u code) override { m_owner->Logf(L"[CB] Error 0x%08X", code); }
 
-    void OnPropertyChanged() override {}
-    void OnPropertyChangedCodes(CrInt32u, CrInt32u*) override {}
+    // Camera-initiated notification that one or more device properties changed —
+    // fires when a SetDeviceProperty write actually takes effect, and when
+    // MediaSLOT_WritingState flips writing→idle after a capture. SetPropAndVerify
+    // waits on this signal instead of blind-polling on a fixed cadence.
+    void OnPropertyChanged() override { SignalPropChange(); }
+    void OnPropertyChangedCodes(CrInt32u, CrInt32u*) override { SignalPropChange(); }
     void OnLvPropertyChanged() override {}
     void OnLvPropertyChangedCodes(CrInt32u, CrInt32u*) override {}
     void OnCompleteOperation(CrInt32u, SDK::CrOperationResultData*) override {}
@@ -194,6 +198,11 @@ private:
             }
         }
         return false;
+    }
+
+    void SignalPropChange() {
+        m_owner->m_propChangeGen.fetch_add(1, std::memory_order_relaxed);
+        m_owner->m_waitCv.notify_all();
     }
 };
 
@@ -396,24 +405,54 @@ bool CameraController::SetPropAndVerify(uint32_t code, uint32_t dataType, long l
         Logf(L"Skip %-26s = 0x%llX (cached)", desc ? desc : L"?", (unsigned long long)value);
         return true;
     }
+    assert(maxWaitMs > 0);
+    assert(code != 0);
+    static constexpr int kMaxAttempts = 64; // bounded loop — real bound is the deadline below
+    const auto start    = std::chrono::steady_clock::now();
+    const auto deadline = start + std::chrono::milliseconds(maxWaitMs);
+
     SetPropRaw(code, dataType, value, desc);
-    int steps = maxWaitMs / 200;
-    if (steps < 1) steps = 1;
-    for (int i = 0; i < steps; ++i) {
-        ::Sleep(200);
+
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
         uint64_t cur = 0;
         if (GetPropRaw(code, cur) &&
             static_cast<long long>(static_cast<uint32_t>(cur)) == value) {
-            if (i > 0) Logf(L"%-26s confirmed after %d × 200ms", desc ? desc : L"?", i + 1);
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            Logf(L"%-26s confirmed after %lldms (%d attempt%s)",
+                 desc ? desc : L"?", (long long)ms, attempt + 1, attempt ? L"s" : L"");
             m_propSetCache[code] = value;
             return true;
         }
-        if (steps > 2 && i == steps / 2)
-            SetPropRaw(code, dataType, value,
-                       (std::wstring(desc ? desc : L"?") + L"(retry)").c_str());
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline || m_shutdownReq.load()) break;
+
+        // Event-driven wait: the camera notifies OnPropertyChanged(Codes) the instant
+        // any property changes — including MediaSLOT_WritingState flipping writing to
+        // idle after the previous capture. Wake immediately on that signal instead of
+        // blind-polling on a fixed cadence; a 500ms cap is a safety net in case the
+        // notification never arrives (e.g. this specific write was silently dropped).
+        auto remaining = deadline - now;
+        auto step = remaining < std::chrono::milliseconds(500)
+                    ? remaining : std::chrono::milliseconds(500);
+        std::unique_lock<std::mutex> lk(m_waitMutex);
+        uint64_t seenGen = m_propChangeGen.load();
+        m_waitCv.wait_for(lk, step, [this, seenGen] {
+            return m_propChangeGen.load() != seenGen || m_shutdownReq.load();
+        });
+        lk.unlock();
+        if (m_shutdownReq.load()) break;
+
+        // Re-issue the write — the previous attempt may have been rejected
+        // (e.g. CrError busy) while the camera was still flushing the prior
+        // capture's buffer to card.
+        SetPropRaw(code, dataType, value,
+                   (std::wstring(desc ? desc : L"?") + L"(retry)").c_str());
     }
-    Logf(L"%-26s verify timeout (%dms)", desc ? desc : L"?", maxWaitMs);
-    return true;
+    Logf(L"%-26s verify timeout (%dms) — NOT confirmed, caller must not assume applied",
+         desc ? desc : L"?", maxWaitMs);
+    return false;
 }
 
 bool CameraController::SetProp(uint32_t code, uint32_t dataType, long long value,

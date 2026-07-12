@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <clocale>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -162,6 +163,11 @@ static BOOL WINAPI CtrlHandler(DWORD type) {
 
 // ─── main ─────────────────────────────────────────────────────────────────────
 int main() {
+    // JSON numbers always use '.' as the decimal separator. Without this, a
+    // Polish (or other comma-decimal) system locale makes std::stof/std::stod
+    // stop parsing at the '.' — e.g. "0.3" silently becomes 0.0 — corrupting
+    // bracket EV steps, f-number, shutter speed, and every other JSON float.
+    std::setlocale(LC_ALL, "C");
     SetConsoleOutputCP(CP_UTF8);
     _setmode(_fileno(stdout), _O_U8TEXT);
 

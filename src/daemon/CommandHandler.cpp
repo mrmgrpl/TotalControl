@@ -2,12 +2,28 @@
 #include "SequencerEngine.h"
 #include <algorithm>
 #include <cassert>
+#include <clocale>
 #include <ctime>
 #include <cwctype>
 #include <sstream>
 
 // CrSDK enums referenced by code only (no CrSDK headers needed here)
 // All raw property/command codes are plain integer literals.
+
+// DriveMode change verify budget. Measured on ILCE-7RM4A 2026-07-12 via a gap
+// sweep (calibration/arm_sweep_final.csv): the camera rejects DriveMode changes
+// while still clearing its buffer from the previous capture(s) — worst observed
+// case was ~5.3s for a single 9-shot bracket. The old 2000ms budget was well
+// under that, which is why DriveMode changes issued shortly after a capture
+// used to fail (arm_failed) even when simply given more time would have
+// succeeded.
+// KNOWN GAP: this budget is calibrated for a single bracket followed by an ARM
+// attempt, not sustained back-to-back identical brackets. Buffer-clear time
+// grows with accumulated shot count and does NOT reduce to total-shots-alone
+// (a single 9-shot burst clears slower than three 3-shot bursts totalling the
+// same 9 shots — see calibration/buffer_depletion_sweep.csv) — a long run of
+// identical brackets can exceed this budget and legitimately need more time.
+static constexpr int kDriveModeVerifyMs = 6000;
 
 namespace TotalControl {
 
@@ -564,6 +580,12 @@ static int FindCmd(const std::wstring& name) {
 // ─── Dispatcher ───────────────────────────────────────────────────────────────
 
 bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
+    // JSON numbers always use '.' as the decimal separator. CrSDK's Init()
+    // resets the process-wide C locale to the system default (e.g. Polish,
+    // comma-decimal) sometime after main()'s own setlocale(LC_ALL,"C") call —
+    // re-assert it per request so std::stof/stod on "0.3", "8.0", etc. never
+    // silently parse as 0 under a comma-decimal locale.
+    std::setlocale(LC_ALL, "C");
     std::wstring cmd = JStr(req, L"cmd");
 
     // ── quit ──────────────────────────────────────────────────────────────────
@@ -677,11 +699,17 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
         cam->SetPCRemotePriority();
 
+        // Tracks whether every exposure/drive property the camera was asked to
+        // change actually confirmed — SetShutterSpeed/SetPropAndVerify can now
+        // genuinely fail (busy flushing the previous capture's buffer) instead
+        // of silently proceeding with a stale value.
+        bool armed = true;
         if (JHas(req, L"mode"))  cam->SetExposureMode(JStr(req, L"mode").c_str());
         if (JHas(req, L"focus")) cam->SetFocusMode(JStr(req, L"focus").c_str());
         if (JHas(req, L"iso"))   cam->SetISO(JInt(req, L"iso"));
         if (JHas(req, L"f"))     cam->SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss"))    cam->SetShutterSpeed(JStr(req, L"ss").c_str());
+        if (JHas(req, L"ss") && !cam->SetShutterSpeed(JStr(req, L"ss").c_str()))
+            armed = false;
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
         // Resolve destination code to check cache before calling SDK
@@ -721,13 +749,23 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             else if (driveStr == L"cont-mid")      driveCode = 0x00010007; // CrDrive_Continuous_Mid      — confirmed ILCE-7RM4A
             else if (driveStr == L"cont-mid-live") driveCode = 0x00010008; // CrDrive_Continuous_Mid_Live
             else if (driveStr == L"cont-lo-live")  driveCode = 0x00010009; // CrDrive_Continuous_Lo_Live
-            cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
-                                  L"DriveMode(burst)", 2000);
+            if (!cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
+                                       L"DriveMode(burst)", kDriveModeVerifyMs))
+                armed = false;
+            if (!armed) {
+                resp = Err(L"arm_failed", L"shutter speed / drive mode not confirmed by camera");
+                return true;
+            }
             ok = cam->Shoot(&latency, timeout, count, /*holdForBurst=*/true);
         } else {
             // Single shot: if "drive":"single" specified, switch drive mode back from bracket
-            if (driveStr == L"single")
-                cam->SetPropAndVerify(0x010e, 0x0003, 0x00000001LL, L"DriveMode(single)", 2000);
+            if (driveStr == L"single" &&
+                !cam->SetPropAndVerify(0x010e, 0x0003, 0x00000001LL, L"DriveMode(single)", kDriveModeVerifyMs))
+                armed = false;
+            if (!armed) {
+                resp = Err(L"arm_failed", L"shutter speed / drive mode not confirmed by camera");
+                return true;
+            }
             ok = cam->Shoot(&latency, timeout);
         }
 
@@ -780,12 +818,17 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
         cam->SetPCRemotePriority();
 
+        // Tracks whether every exposure/drive property actually confirmed —
+        // see equivalent comment in the "shoot" handler above.
+        bool armed = true;
+
         // Apply optional exposure overrides
         if (JHas(req, L"mode"))  cam->SetExposureMode(JStr(req, L"mode").c_str());
         if (JHas(req, L"focus")) cam->SetFocusMode(JStr(req, L"focus").c_str());
         if (JHas(req, L"iso"))   cam->SetISO(JInt(req, L"iso"));
         if (JHas(req, L"f"))     cam->SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss"))    cam->SetShutterSpeed(JStr(req, L"ss").c_str());
+        if (JHas(req, L"ss") && !cam->SetShutterSpeed(JStr(req, L"ss").c_str()))
+            armed = false;
 
         // Set bracket order
         if (cam->SupportsProperty(0x01fd))
@@ -796,7 +839,12 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             resp = Err(L"not_supported", L"DriveMode not supported by this camera");
             return true;
         }
-        cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode, L"DriveMode", 2000);
+        if (!cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode, L"DriveMode", kDriveModeVerifyMs))
+            armed = false;
+        if (!armed) {
+            resp = Err(L"arm_failed", L"shutter speed / drive mode not confirmed by camera");
+            return true;
+        }
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
         cam->SetStoreDestination(store.c_str());
@@ -975,7 +1023,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             if (!EncodePropValue(0x010e, val, driveRaw)) {
                 resp = Err(L"invalid_value", (prop + L"=" + val).c_str()); return true;
             }
-            resp = cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode", 2000)
+            resp = cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode", kDriveModeVerifyMs)
                        ? Ok() : Err(L"set_failed");
             return true;
         }
@@ -1063,10 +1111,15 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
         ULONGLONG t0 = GetTickCount64();
 
+        // Tracks whether every exposure/drive property actually confirmed —
+        // see equivalent comment in the "shoot" handler above.
+        bool armed = true;
+
         cam->SetPCRemotePriority();
         if (JHas(req, L"iso"))  cam->SetISO(JInt(req, L"iso"));
         if (JHas(req, L"f"))    cam->SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss"))   cam->SetShutterSpeed(JStr(req, L"ss").c_str());
+        if (JHas(req, L"ss") && !cam->SetShutterSpeed(JStr(req, L"ss").c_str()))
+            armed = false;
 
         // Drive mode: bracket (ev+count) or direct drive string (single/burst)
         if (JHas(req, L"ev")) {
@@ -1081,17 +1134,23 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             const BracketEntry* br = FindBracket(ev10, count);
             if (br) {
                 uint32_t driveCode = single ? br->single_code : br->cont_code;
-                cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
-                                      L"DriveMode(arm-bracket)", 2000);
+                if (!cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
+                                           L"DriveMode(arm-bracket)", kDriveModeVerifyMs))
+                    armed = false;
             }
         } else if (JHas(req, L"drive")) {
             std::wstring driveStr = JStr(req, L"drive");
             long long driveRaw = 0;
-            if (EncodePropValue(0x010e, driveStr, driveRaw) && driveRaw != 0)
-                cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode(arm)", 2000);
+            if (EncodePropValue(0x010e, driveStr, driveRaw) && driveRaw != 0 &&
+                !cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode(arm)", kDriveModeVerifyMs))
+                armed = false;
         }
 
         int latMs = static_cast<int>(GetTickCount64() - t0);
+        if (!armed) {
+            resp = Err(L"arm_failed", L"shutter speed / drive mode not confirmed by camera");
+            return true;
+        }
         std::wostringstream ss;
         ss << L"\"latency_ms\":" << latMs;
         resp = Ok(ss.str());

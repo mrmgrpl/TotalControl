@@ -1370,6 +1370,12 @@ static int64_t ParseSsMs(const std::string& ss) {
 // Measured: 303 ms; conservative: 350 ms.
 static constexpr int64_t kCamOverheadMs = 350;
 
+// Shutter speed the bracket_calib table's lat_avg_ms/lat_max_ms values were
+// measured at (ss=1/125 => 8ms). BlockDurMs's ssExtra correction scales from
+// this baseline, so it must always match whatever ss the stored calibration
+// rows actually used (see BktCalibEntry::ss / SeedBuiltinCalib).
+static constexpr int64_t kCalibBaselineSsMs = 8;
+
 // Returns true if blocks a and b require an ARM command between them
 // (different drive mode, shutter speed, ISO, or f-stop).
 static bool BlockParamsDiffer(const TLBlock& a, const TLBlock& b) {
@@ -1381,13 +1387,28 @@ static bool BlockParamsDiffer(const TLBlock& a, const TLBlock& b) {
     return false;
 }
 
-// Conservative estimate of ARM overhead after block b fires (RAW write to card +
-// SetPropAndVerify(DriveMode) confirm). Derived from ILCE-7RM4A measurements:
-// 3-shot ~1900 ms, 5-shot ~2100 ms (capped). Single/Burst: ~2000 ms observed.
+// Conservative estimate of ARM overhead after block b fires — the LONGER of:
+//  (a) pure settings-change latency (SDK/USB round-trip when the camera isn't
+//      busy), and
+//  (b) camera-side buffer-clear time (DriveMode changes are rejected while the
+//      camera is still flushing the previous capture(s) to card).
+// Measured on ILCE-7RM4A 2026-07-12 via a gap sweep from 5000ms down to 250ms
+// per bracket count (calibration/arm_sweep_final.csv): for every count tested, (b) fully
+// dominates (a) — gap+confirm_ms converges to a near-constant total once the
+// gap drops below the true buffer-clear threshold, which is what these
+// per-count values are. Only 3/5/9 are covered: the Inspector's bracket-mode
+// dropdown never writes any other count, and the ILCE-7RM4A has no 7-shot
+// bracket mode on real hardware.
 static int64_t ArmEstMs(const TLBlock& b) {
     assert(b.type != BlockType::Audio);
-    if (b.type == BlockType::Bracket)
-        return std::min(2100LL, 1000LL + static_cast<int64_t>(b.count) * 300LL);
+    if (b.type == BlockType::Bracket) {
+        static constexpr int64_t kSettingsChangeMs = 300; // factor (a)
+        int64_t bufferClearMs;                            // factor (b)
+        if      (b.count <= 3) bufferClearMs = 4100;
+        else if (b.count <= 5) bufferClearMs = 4350;
+        else                   bufferClearMs = 5500; // 9-count and above
+        return std::max(kSettingsChangeMs, bufferClearMs);
+    }
     return 2000LL;
 }
 
@@ -1412,6 +1433,21 @@ int64_t App::SnapMsToRelativeSecond(int64_t ms) {
     return best + roundedOffset;
 }
 
+// Sum of per-shot exposure-time multipliers for a symmetric N-stop bracket
+// (order-independent: minus-to-plus vs zero-to-minus-to-plus sum to the same
+// total). An N-shot bracket at `evStep` EV spans stops -(N-1)/2 .. +(N-1)/2
+// around the base ss, e.g. a 9-shot 1EV bracket at ss=0.2s fires 3.2s, 1.6s,
+// 0.8s, 0.4s, 0.2s, 0.1s, 1/20, 1/40, 1/80 — sum multiplier 31.9375, not 9.
+static double BracketSumMultiplier(int count, double evStep) {
+    assert(count >= 1 && count % 2 == 1);        // kBrackets only defines odd counts
+    assert(evStep > 0.0 && evStep <= 5.0);        // widest supported step is 3.0ev
+    const int half = (count - 1) / 2;
+    double sum = 0.0;
+    for (int k = -half; k <= half; ++k)
+        sum += std::pow(2.0, k * evStep);
+    return sum;
+}
+
 int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
     assert(b.type == BlockType::Audio || !b.ss.empty());  // camera blocks must have a shutter speed
     assert(b.type != BlockType::Bracket || b.count >= 1); // bracket must have at least 1 shot
@@ -1422,6 +1458,10 @@ int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
     case BlockType::Single:
         return ssMs + kCamOverheadMs;
     case BlockType::Bracket: {
+        double evStep = 1.0;
+        try { evStep = std::stod(b.ev); } catch (...) {}
+        const double sumMul = BracketSumMultiplier(b.count, evStep);
+
         // Calibration lookup: prefer named model, fall back to first available.
         const std::map<std::pair<int,std::string>, int>* table = nullptr;
         if (!camModel.empty()) {
@@ -1433,14 +1473,18 @@ int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
         if (table) {
             auto jt = table->find({b.count, b.ev});
             if (jt != table->end()) {
-                // jt->second = lat_max_ms + 10 (10ms safety margin already included)
-                // For SS > calibration baseline (1/100 = 10ms): add per-shot SS cost.
-                int64_t ssExtra = (ssMs > 10LL) ? int64_t(b.count) * (ssMs - 10LL) : 0LL;
+                // jt->second = lat_avg_ms + 50, calibrated at ss=kCalibBaselineSsMs.
+                // Exposure time scales with the bracket's stop-multiplier sum, not with
+                // count alone — an N-shot 1EV bracket spans N stops of exposure time,
+                // not N x base-ss. Correction applies both above and below baseline.
+                int64_t ssExtra = static_cast<int64_t>(
+                    std::llround(sumMul * double(ssMs - kCalibBaselineSsMs)));
                 return jt->second + ssExtra;
             }
         }
-        // No calibration — fall back to formula
-        return int64_t(b.count) * (ssMs + kCamOverheadMs);
+        // No calibration — fall back to formula: per-shot overhead + summed exposure time.
+        return int64_t(b.count) * kCamOverheadMs
+             + static_cast<int64_t>(std::llround(sumMul * double(ssMs)));
     }
     case BlockType::Burst:
         return b.burstDurMs;
@@ -2284,6 +2328,72 @@ void App::AddTotalityBracketPreset() {
 
     m_tlDirty    = true;
     m_lastResult = std::format("Totality Brackets: {} blocks on track \"{}\"", count, trk.label);
+    LogLine(m_lastResult);
+}
+
+// Adds one Bracket block per entry in the Inspector's bracket-mode dropdown
+// (the same 16 ev/count combinations as `kBrk` in RenderInspectorColumn) —
+// a calibration/verification run to exercise every supported bracket variant.
+// Blocks are placed back-to-back: each starts 2s after the end of the
+// previous block's ARM (every consecutive pair has different ev/count, so
+// ARM always applies between them).
+void App::AddAllBracketVariantsPreset() {
+    assert(m_presetTargetTrack >= 0);
+    assert(m_presetTargetTrack < static_cast<int>(m_tracks.size()));  // rule 5: target track must exist
+
+    // Validate/fix target track — must be a camera track.
+    int ti = m_presetTargetTrack;
+    if (ti < 0 || ti >= static_cast<int>(m_tracks.size()) || m_tracks[ti].IsAudio()) {
+        ti = -1;
+        for (int i = 0; i < static_cast<int>(m_tracks.size()); ++i)
+            if (!m_tracks[i].IsAudio()) { ti = i; break; }
+        if (ti < 0) { m_lastResult = "All Bracket Variants: no camera track available"; return; }
+        m_presetTargetTrack = ti;
+    }
+
+    // Mirrors kBrk in RenderInspectorColumn — 16 valid modes matching CrSDK.
+    // 2.0ev / 3.0ev support x3 and x5 only (SDK limitation — no 9-pic).
+    struct BrkVariant { const char* ev; int count; };
+    static constexpr BrkVariant kVariants[] = {
+        {"0.3ev", 3}, {"0.3ev", 5}, {"0.3ev", 9},
+        {"0.5ev", 3}, {"0.5ev", 5}, {"0.5ev", 9},
+        {"0.7ev", 3}, {"0.7ev", 5}, {"0.7ev", 9},
+        {"1.0ev", 3}, {"1.0ev", 5}, {"1.0ev", 9},
+        {"2.0ev", 3}, {"2.0ev", 5},
+        {"3.0ev", 3}, {"3.0ev", 5},
+    };
+    static constexpr int kNumVariants = static_cast<int>(std::size(kVariants));
+    static_assert(kNumVariants == 16, "must mirror the Inspector's bracket-mode dropdown");
+    static constexpr int64_t kGapMs = 2000; // ARM-end -> next block start
+
+    TLTrack& trk = m_tracks[ti];
+    trk.blocks.clear();
+
+    int64_t startMs = m_tlPlayheadMs.load();
+    if (startMs < 0) startMs = UtcNowMs();
+
+    TLBlock prev;
+    int64_t atMs = startMs;
+    for (int i = 0; i < kNumVariants; ++i) {
+        TLBlock b;
+        b.type  = BlockType::Bracket;
+        b.ss    = "1/125";
+        b.iso   = 100;
+        b.fstop = "8.0";
+        b.ev    = kVariants[i].ev;
+        b.count = kVariants[i].count;
+
+        if (i > 0)
+            atMs = atMs + BlockDurMs(prev) + ArmEstMs(prev) + kGapMs;
+        b.atMs = atMs;
+
+        trk.blocks.push_back(b);
+        prev = b;
+    }
+
+    m_tlDirty    = true;
+    m_lastResult = std::format("All Bracket Variants: {} blocks on track \"{}\"",
+                                kNumVariants, trk.label);
     LogLine(m_lastResult);
 }
 
@@ -5851,7 +5961,7 @@ void App::LoadCalibCache() {
         assert(entries.size() <= 1024);
         auto& cm = m_calibCache[model];
         for (const auto& e : entries)
-            cm[{e.count, e.ev}] = e.latMaxMs + 10;
+            cm[{e.count, e.ev}] = e.latAvgMs + 50;
     }
     LogLine(std::format("Calibration: {} model(s) loaded into cache",
                         m_calibCache.size()));
@@ -5862,18 +5972,18 @@ void App::SeedBuiltinCalib() {
     static constexpr char kModel[] = "ILCE-7RM4A";
     if (!m_configDb.LoadCalibData(kModel).empty()) return; // already seeded
 
-    // Measured 2026-06-07: SS=1/100, ISO=100, f/8.0, 3 reps each.
+    // Measured 2026-07-12: SS=1/125, ISO=100, f/8.0, 10 reps each.
     // lat_max_ms / lat_avg_ms / lat_min_ms
     struct Row { int cnt; const char* ev; int mx; int av; int mn; };
     static constexpr Row kRows[] = {
-        {3,"0.3ev", 485,483,481}, {3,"0.5ev", 508,496,472},
-        {3,"0.7ev", 530,506,478}, {3,"1.0ev", 518,490,469},
-        {3,"2.0ev", 528,521,517}, {3,"3.0ev", 571,554,536},
-        {5,"0.3ev", 725,706,677}, {5,"0.5ev", 688,686,683},
-        {5,"0.7ev", 725,710,701}, {5,"1.0ev", 746,740,732},
-        {5,"2.0ev", 892,886,878}, {5,"3.0ev",1412,1383,1364},
-        {9,"0.3ev",1157,1150,1144},{9,"0.5ev",1177,1173,1170},
-        {9,"0.7ev",1248,1206,1179},{9,"1.0ev",1374,1367,1359},
+        {3,"0.3ev", 493,473,448}, {3,"0.5ev", 509,481,449},
+        {3,"0.7ev", 510,480,457}, {3,"1.0ev", 507,483,458},
+        {3,"2.0ev", 535,499,464}, {3,"3.0ev", 551,528,505},
+        {5,"0.3ev", 718,681,650}, {5,"0.5ev", 702,688,672},
+        {5,"0.7ev", 719,705,693}, {5,"1.0ev", 734,700,669},
+        {5,"2.0ev", 851,831,808}, {5,"3.0ev",1273,1243,1219},
+        {9,"0.3ev",1139,1118,1096},{9,"0.5ev",1165,1146,1127},
+        {9,"0.7ev",1197,1174,1146},{9,"1.0ev",1330,1303,1264},
     };
     static constexpr int kNumRows = static_cast<int>(std::size(kRows));
 
@@ -5891,8 +6001,8 @@ void App::SeedBuiltinCalib() {
         e.latMaxMs  = r.mx;
         e.latAvgMs  = r.av;
         e.latMinMs  = r.mn;
-        e.reps      = 3;
-        e.ss        = "1/100";
+        e.reps      = 10;
+        e.ss        = "1/125";
         e.createdMs = nowMs;
         entries.push_back(std::move(e));
     }
@@ -6431,6 +6541,10 @@ void App::RenderMenuBar() {
         // Bracket series every 3s across totality (C2-C3) on the target track.
         if (ImGui::MenuItem("Add Brackets Photo Series for Total Phase (every 3s)"))
             AddTotalityBracketPreset();
+        // One block per bracket-mode dropdown entry (16 ev/count variants) —
+        // calibration/verification run, 2s gap from ARM-end to next block.
+        if (ImGui::MenuItem("Add All Bracket Variants (calibration)"))
+            AddAllBracketVariantsPreset();
         ImGui::Separator();
         ImGui::MenuItem("Validate Timeline [FUTURE FUNCTION]", nullptr, false, false);
         ImGui::MenuItem("Auto-optimize [FUTURE FUNCTION]",     nullptr, false, false);

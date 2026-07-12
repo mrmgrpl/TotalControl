@@ -160,6 +160,7 @@ Each request = one JSON line + `\n`. Response = one JSON line + `\n`.
 {"cmd":"shoot","ss":"1/100","cam":"<guid>"}
 {"cmd":"shoot","count":10,"drive":"cont-hi-plus"}
 {"cmd":"bracket","ev":"1ev","count":5,"mode":"cont","ss":"1/100"}
+{"cmd":"arm","ss":"1/100","iso":100,"f":"8.0","ev":"1ev","count":5,"mode":"cont"}
 {"cmd":"status"}
 {"cmd":"status","cam":"<guid-prefix>"}
 {"cmd":"get","prop":"shutter_speed"}
@@ -255,14 +256,14 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 - `TotalControlGUI.log` — GUI, next to exe, append mode
 - `CameraController.cpp` → `OutputDebugStringW` (DebugView / VS debugger)
 
-## Current status (2026-06-29)
+## Current status (2026-07-12)
 
 | Module | Status |
 |---|---|
 | CMakeLists.txt | SRV + CLI + GUI; C++23; CMake 4.3.3; LANGUAGES C CXX |
 | CameraController | Init/Connect/Disconnect + WarmCache + property cache + multi-cam |
 | PipeServer | Working — named pipe, JSON Lines, persistent connection, multi-client |
-| CommandHandler | shoot/bracket/burst/movie/af/get/set/cmd/quit/list_cameras/seq_* |
+| CommandHandler | shoot/bracket/burst/arm/movie/af/get/set/cmd/quit/list_cameras/seq_* |
 | Multi-camera | Enumerate + Connect(guid) + routing by "cam":guid/index |
 | Graceful shutdown | SetConsoleCtrlHandler → RequestShutdown → Shutdown() |
 | Singleton mutex | `TotalControl_DaemonRunning` — SRV rejects second instance |
@@ -290,6 +291,15 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Card capacity display (shots/max/%)** | **DONE 2026-06-29** |
 | **GUI layout refactor — 3 kolumny** | **DONE 2026-06-30** |
 | **Burst block fix** | **DONE 2026-06-30** |
+| **BlockDurMs bracket-width fix (BracketSumMultiplier)** | **DONE 2026-07-12** |
+| **CrSDK property-change event wiring (OnPropertyChanged)** | **DONE 2026-07-12** |
+| **SetPropAndVerify — event-driven wait, honest false on timeout** | **DONE 2026-07-12** |
+| **CommandHandler — armed-check before Shoot() (shoot/bracket/arm)** | **DONE 2026-07-12** |
+| **Locale bug fix — CrSDK clobbers C locale, broke fractional EV parsing** | **DONE 2026-07-12** |
+| **"Add All Bracket Variants" calibration preset (Photo Sequence menu)** | **DONE 2026-07-12** |
+| **Bracket + ARM timing calibration (measured, not guessed)** | **DONE 2026-07-12** |
+| **CLI `arm` subcommand** | **DONE 2026-07-12** |
+| **Buffer-depletion model (repeated identical brackets)** | **IN PROGRESS — see Change log** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -599,6 +609,114 @@ Layout zmieniony z 4-kolumnowego na **3-kolumnowy**: Left(300px) | Center(auto) 
 - `isContinuousDrive = driveStr.contains("cont") || driveStr.contains("burst")` → wchodzi w ścieżkę burst niezależnie od count
 - Gdy `isContinuousDrive && count <= 1`: `count = 9999` (sentinel) → `Shoot(count=9999, holdForBurst=true)` trzyma migawkę przez pełny `timeout_ms = burstDurMs + 2000ms`
 
+## Change log
+
+### 2026-07-12 — Timeline accuracy, ARM race condition, and calibration
+
+Started from a bug report: GUI timeline blocks visibly shorter than the real
+camera sequence — the playhead lagged behind real time after every bracket.
+Root-caused and fixed in stages; each stage surfaced the next issue.
+
+**1. `BlockDurMs()` bracket-width formula (`App.cpp`)**
+The old formula scaled the ss-correction by `count` (`count × (ss − baseline)`),
+but an N-shot 1EV bracket spans N *stops* of exposure time, not N × base-ss —
+e.g. a 9-shot 1EV bracket at 0.2s base fires 3.2s, 1.6s, 0.8s, 0.4s, 0.2s, 0.1s,
+1/20, 1/40, 1/80 (sum ≈ 6.39s), not `9 × 0.2s = 1.8s`. Added
+`BracketSumMultiplier(count, evStep)` — sums `2^(k·ev)` over the bracket's
+symmetric stop range — and used it in place of the flat `count` multiplier.
+Verified against real hardware: old formula predicted 3094ms for a 9-shot/1EV/
+ss=1/5 bracket that actually took 7485–7693ms (2.4× under); new formula
+predicts 7452ms.
+
+**2. CrSDK busy-state race (`CameraController.cpp`)**
+Investigating why a fast automated benchmark occasionally shot the *wrong*
+exposure (silently) led to three findings:
+- `DeviceCallback::OnPropertyChanged/OnPropertyChangedCodes` were empty stubs —
+  the SDK already notifies the app the instant a property change is confirmed
+  (including media-writing-state going idle after a capture), but nothing was
+  listening. Now bumps an atomic generation counter and notifies a
+  `condition_variable`.
+- `SetPropAndVerify` polled on a fixed 200ms/3-attempt cadence instead of
+  waiting on that signal, and — critically — returned `true` even when the
+  verify loop timed out without ever confirming the value. Rewrote it to wait
+  on the property-change signal (500ms fallback cap per iteration, bounded to
+  64 attempts), retry the write on each wake, and return `false` on genuine
+  timeout so callers can no longer assume an unconfirmed property applied.
+- `CommandHandler`'s `shoot`/`bracket`/`arm` handlers ignored that return value
+  and fired the shutter regardless. Added an `armed` check in each handler:
+  on a real verify failure, they now return `{"ok":false,"err":"arm_failed"}`
+  instead of shooting on unconfirmed settings.
+
+**3. Locale bug — fractional EV brackets silently broken**
+The new "Add All Bracket Variants" preset (below) was the first thing to ever
+exercise EV values other than `1ev`, and every fractional one (`0.3ev`,
+`0.5ev`, `0.7ev`) failed with `unsupported_bracket`. Root cause: Sony's
+`SCRSDK::Init()` resets the process-wide C locale to the system default
+(Polish → comma decimal) sometime after `main()`'s own `setlocale(LC_ALL,"C")`
+call. `std::stof(L"0.3")` under a comma locale stops parsing at the `.` and
+silently returns `0.0` — `1.0ev`/`2.0ev`/`3.0ev` happened to still work because
+their integer part alone gives the right answer. Fixed by re-asserting
+`setlocale(LC_ALL,"C")` at the top of `CommandHandler::Handle()` (once per
+request, cheap, immune to whatever CrSDK does between calls) rather than only
+at process startup.
+
+**4. "Add All Bracket Variants" preset (`App.cpp`, Photo Sequence menu)**
+Adds one Bracket block per entry in the Inspector's bracket-mode dropdown (16
+ev/count combinations), 2s gap from each block's ARM-end to the next block's
+start — a one-click calibration/verification run exercising every supported
+bracket variant. This is what exposed bug #3 above.
+
+**5. Bracket duration + ARM timing calibration (measured, not guessed)**
+- Re-ran all 16 bracket variants × 10 reps (160 shots, `calibration/
+  bracket_calibration_10x.csv`) to get real mean/min/max/stddev per (count,ev).
+  `LoadCalibCache()` now caches `latAvgMs + 50` (was `latMaxMs + 10`) —
+  average + fixed margin instead of worst-observed-rep + margin, per explicit
+  request.
+- ARM-timing gap sweep (5000ms → 250ms per bracket count, `calibration/
+  arm_sweep_final.csv`): found `gap + confirm_ms` converges to a near-constant
+  total once the gap drops below the true buffer-clear threshold — i.e. this
+  *is* a measurement of real buffer-clear time, not noise. Measured floors:
+  count=3 → 4100ms, count=5 → 4350ms, count=9 → 5500ms (max+200ms margin).
+  `ArmEstMs()` rewritten as `max(settings-change≈300ms, buffer-clear[count])`
+  — replaces the old guess (`min(2100, 1000+count×300)`, which was under half
+  the real value for count=9). `kDriveModeVerifyMs` in `CommandHandler.cpp`
+  raised from a hardcoded 2000ms (at all 6 call sites) to 6000ms — the old
+  budget was shorter than the real buffer-clear time for a 9-shot bracket,
+  which was the actual cause of most `arm_failed` responses, not just tight
+  pacing.
+- Added a CLI `arm` subcommand (mirrors `bracket`; sets exposure/drive without
+  firing) — needed as a zero-shot probe for the timing sweeps, kept as a
+  general debugging tool.
+
+**6. Buffer-depletion model — in progress**
+Sweep of repeated *identical* brackets (`calibration/buffer_depletion_sweep.csv`,
+1029 shots) to find how buffer-clear time grows under sustained shooting
+(not just single-bracket-then-arm). Key finding: **total accumulated shot
+count alone does not predict clear time** — a single 9-shot burst clears
+slower than three 3-shot bursts totalling the same 9 shots (+13–28% at matched
+T). Bracket size has an effect independent of total shots. Fitted count=3's
+curve (9 points, T=3→60): flat ~4000ms up to T≈5, then linear at
+~160.5ms/shot. Count=9 (3 points only): same ~3200ms baseline, but a steeper
+~231.7ms/shot. Count=5 has no dedicated sweep yet (only the single-bracket
+N=1 anchor, ~4138ms). Not yet wired into `ArmEstMs()` — needs a per-count
+N-sweep (count=5 fully, count=9 more N-levels) before it can replace the
+current single-bracket-only model.
+
+<br>
+
+<details>
+<summary>Session data artifacts</summary>
+
+- `calibration/bracket_calibration_10x.csv` — 160 shots, all 16 bracket
+  variants × 10 reps, used to fix `LoadCalibCache()`.
+- `calibration/arm_sweep_final.csv` — 72 trials, gap sweep 5000→250ms ×
+  3 counts, used to fix `ArmEstMs()` and `kDriveModeVerifyMs`.
+- `calibration/buffer_depletion_sweep.csv` — 1029 shots, repeated-identical-
+  bracket sweep (count=3 primary, count=9 cross-validation); analysis above,
+  not yet applied to code.
+
+</details>
+
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
 IqpClient previously scraped `maps.besselianelements.com`. This has been REPLACED by a dedicated
@@ -658,6 +776,9 @@ Hand-written mini-parser (no external libraries). Three pitfalls encountered dur
 - GetGuid() empty for USB → GuidOrIdHex() fallback to GetId() as UTF-16LE
 - `GetTimeZoneSetting()` returns `0x8003` (CrError_Generic_NotSupported) for USB — camera time unavailable over USB; host UTC from `GetSystemTimePreciseAsFileTime()` is always available and sufficient for drift correction (compare with EXIF DateTimeOriginal)
 - `CrSlotStatus_OK = 0x0000` (card present), `CrSlotStatus_NoCard = 0x0001` — old wrong ordering produced false "no-card" with card present
+- `SCRSDK::Init()` resets the process-wide C locale to the system default (e.g. Polish → comma decimal) sometime after startup — any `std::stof`/`std::stod` on a JSON number after that point can silently misparse (`"0.3"` → `0.0`) unless the locale is re-asserted. `CommandHandler::Handle()` calls `setlocale(LC_ALL,"C")` on every request specifically because of this — don't remove it, and don't assume `main()`'s own startup `setlocale()` call is enough
+- `MediaSLOT1_WritingState`/`MediaSLOT2_WritingState` are not reliably populated by `GetDeviceProperties()`'s bulk snapshot over USB on the ILCE-7RM4A — reads as an empty string even mid-write. Don't use it to gate property changes; poll via `GetPropRaw` + retry instead (see `SetPropAndVerify`)
+- DriveMode changes are rejected (`err=0x8402`) while the camera is still clearing its capture buffer — this is a real, measurable delay (not just SDK/USB round-trip latency), see Change log 2026-07-12 and `calibration/arm_sweep_final.csv`. Don't assume a short fixed timeout is safe; it scales with recent shot count and bracket size
 
 ## Cleanup order (important)
 

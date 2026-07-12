@@ -166,6 +166,10 @@ private:
     std::atomic<bool>       m_shutdownReq   { false };
     std::atomic<int>        m_capturedCount { 0 };
     int                     m_capturedTarget { 1 };
+    // Bumped by OnPropertyChanged/OnPropertyChangedCodes on every camera-reported
+    // property change (incl. MediaSLOT_WritingState writing->idle). SetPropAndVerify
+    // waits on this generation counter instead of polling on a fixed cadence.
+    std::atomic<uint64_t>   m_propChangeGen { 0 };
 
     // Live view shared memory (SHM)
     HANDLE                  m_lvMapHandle   = nullptr;

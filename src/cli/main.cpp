@@ -295,6 +295,8 @@ static void Usage() {
         "                          [--count 3|5|9] [--mode single|cont] [--order minus|zero]\n"
         "                          [--ss 1/250] [--iso 200] [--f 2.8] [--store card|pc|both]\n"
         "                          [--timeout_ms 15000]\n"
+        "  TotalControlCLI arm [--ss 1/100] [--iso 100] [--f 8.0] [--ev 1ev --count 5 --mode cont]\n"
+        "                      [--drive single|cont-hi|...]  (sets exposure/drive without firing)\n"
         "  TotalControlCLI movie start|stop|toggle\n"
         "  TotalControlCLI af s1|s2|s1+s2|ael|awb|fel [up|down|press]\n"
         "  TotalControlCLI get <prop>\n"
@@ -411,6 +413,17 @@ int wmain(int argc, wchar_t* argv[]) {
         auto f     = Arg(args, "--f");     if (!f.empty())     req += ",\"f\":"     + f;
         auto store = Arg(args, "--store"); if (!store.empty()) req += ",\"store\":" + Q(store);
         auto tms   = Arg(args, "--timeout_ms"); if (!tms.empty()) req += ",\"timeout_ms\":" + tms;
+        req += "}";
+    }
+    else if (cmd == "arm") {
+        req = "{\"cmd\":\"arm\"";
+        auto ss    = Arg(args, "--ss");    if (!ss.empty())    req += ",\"ss\":"    + Q(ss);
+        auto iso   = Arg(args, "--iso");   if (!iso.empty())   req += ",\"iso\":"   + iso;
+        auto f     = Arg(args, "--f");     if (!f.empty())     req += ",\"f\":"     + f;
+        auto ev    = Arg(args, "--ev");    if (!ev.empty())    req += ",\"ev\":"    + Q(ev);
+        auto cnt   = Arg(args, "--count"); if (!cnt.empty())   req += ",\"count\":" + cnt;
+        auto mode  = Arg(args, "--mode");  if (!mode.empty())  req += ",\"mode\":"  + Q(mode);
+        auto drive = Arg(args, "--drive"); if (!drive.empty()) req += ",\"drive\":" + Q(drive);
         req += "}";
     }
     else if (cmd == "movie" && args.size() >= 2) {
@@ -612,6 +625,10 @@ int wmain(int argc, wchar_t* argv[]) {
         if (!lat.empty())  printf("latency_ms=%s\n", lat.c_str());
         if (!caps.empty()) printf("captures=%s\n", caps.c_str());
         if (!ev.empty())   printf("ev=%s\n", ev.c_str());
+    }
+    else if (cmd == "arm") {
+        std::string lat = JNum(resp, "latency_ms");
+        if (!lat.empty()) printf("latency_ms=%s\n", lat.c_str());
     }
     else if (cmd == "status") {
         auto ps = [&](const char* key) {
