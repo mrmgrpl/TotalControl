@@ -7192,7 +7192,7 @@ void App::RenderCloseConfirmModal() {
 
 // ─── Minimal markdown renderer (no external library — hand-written, project convention) ───
 // Supports: "# "/"## " headers (gold), "- "/"* " bullets, blank line = spacing. Everything
-// else is plain text. Good enough for WHATS_NEW.md; not a general-purpose markdown renderer.
+// else is plain text. Good enough for CHANGELOG.md; not a general-purpose markdown renderer.
 void App::RenderMarkdownBody(const std::string& md) {
     assert(!md.empty()); // caller checks emptiness before calling
     static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
@@ -7200,7 +7200,7 @@ void App::RenderMarkdownBody(const std::string& md) {
 
     size_t pos = 0;
     size_t lineCount = 0;
-    static constexpr size_t kMaxLines = 20000; // bounded loop (rule 2); WHATS_NEW.md is hand-edited
+    static constexpr size_t kMaxLines = 20000; // bounded loop (rule 2); CHANGELOG.md is hand-edited
     while (pos <= md.size() && lineCount < kMaxLines) {
         ++lineCount;
         size_t eol = md.find('\n', pos);
@@ -7372,7 +7372,7 @@ void App::RenderWhatsNewModal() {
 
     if (!m_whatsNewLoaded) {
         m_whatsNewLoaded = true; // attempt once per process; missing file just renders empty
-        std::wstring path = ExeDir() + L"\\WHATS_NEW.md";
+        std::wstring path = ExeDir() + L"\\CHANGELOG.md";
         std::ifstream f(path, std::ios::binary);
         if (f)
             m_whatsNewMd.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
@@ -7383,7 +7383,7 @@ void App::RenderWhatsNewModal() {
     ImGui::BeginChild("##whatsnew_body", ImVec2(0, -44.f), false, ImGuiWindowFlags_None);
     ImGui::PushFont(m_fontMono);
     if (m_whatsNewMd.empty())
-        ImGui::TextColored(kGray, "  (WHATS_NEW.md not found next to executable)");
+        ImGui::TextColored(kGray, "  (CHANGELOG.md not found next to executable)");
     else
         RenderMarkdownBody(m_whatsNewMd);
     ImGui::PopFont();

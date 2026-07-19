@@ -5,6 +5,7 @@ Camera Remote SDK — for planning and executing the perfect solar eclipse photo
 sequence, in both space and time.
 
 **Watch the intro video:** [https://youtu.be/rhCX8FMtpQg](https://youtu.be/rhCX8FMtpQg)
+**What's new:** see [CHANGELOG.md](CHANGELOG.md)
 
 ![TotalControl — Mission Control GUI: Sky View Simulator with timeline, contact times, and multi-camera panel](docs/images/mission_control.png)
 

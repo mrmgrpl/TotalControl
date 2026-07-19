@@ -1,7 +1,7 @@
 # Roadmap
 
 Pomysły i feature requesty zgłoszone przez beta testerów (korespondencja e-mail),
-jeszcze niezaimplementowane. Po wdrożeniu wpis przenosi się do `WHATS_NEW.md`
+jeszcze niezaimplementowane. Po wdrożeniu wpis przenosi się do `CHANGELOG.md`
 z kredytem dla zgłaszającego.
 
 Status: `proponowane` / `w trakcie` / `wstrzymane`
@@ -20,7 +20,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
 ---
 
 ## Focus viewer
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-20**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-20**
 - Typ: feature
 - Zgłosił: John Melson
 - Opis: podgląd/narzędzie do oceny ostrości (focus) na żywo.
@@ -62,7 +62,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
 - Typ: bug (weryfikacja fixa)
 - Zgłosił: John Melson (pierwotne zgłoszenie — Timeline pokazywał kamerę pod
   cudzą, zaszytą na sztywno nazwą modelu; **naprawione i przeniesione do
-  `WHATS_NEW.md` → 2026-07-19**)
+  `CHANGELOG.md` → 2026-07-19**)
 - Opis: sama poprawka (pozycyjne przypisanie kamera↔tor, sortowanie po GUID
   w SRV, dynamiczny przyrost liczby torów) jest zaimplementowana i
   zweryfikowana build+log+zrzutem ekranu na **1 fizycznej kamerze** — to
@@ -76,7 +76,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   tor pojawia się automatycznie przy podłączeniu dodatkowej kamery.
 
 ## Instrukcja "how-to" dla operatora: jak przygotować i podłączyć aparat
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: feature
 - Zgłosił: John Melson
 - Opis: John nie pamiętał, jak ustawić aparat przed połączeniem z aplikacją.
@@ -120,7 +120,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   bieżący stan połączenia (disconnect + reset) bez zamykania SRV/GUI.
 
 ## Network error przy geokodowaniu linku Google Maps (lokalizacja)
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19 (John
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19 (John
   Melson)** — patrz wyjaśnienie niżej
 - Typ: bug
 - Zgłosił: John Melson
@@ -156,7 +156,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   materiał od Johna po tej poprawce, żeby móc zdiagnozować sam "shoot failed".
 
 ## SRV.log obcina się przy każdym restarcie — niszczy dowody diagnostyczne
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: bug
 - Zgłosił: John Melson (namierzone podczas analizy jego logów, nie zgłoszone
   wprost przez niego)
@@ -177,7 +177,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   poprawce (patrz wpis wyżej).
 
 ## Wyjaśnić w UI, że lokalizację można wpisać też bezpośrednio jako współrzędne
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19 (Alessandro
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19 (Alessandro
   Pessi)**
 - Typ: feature
 - Zgłosił: Alessandro Pessi
@@ -216,7 +216,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   niespójność/błąd aplikacji.
 
 ## Nazwy kolumn w tabeli kontaktów niejasne (brak tooltipa/legendy)
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: feature (UI clarity)
 - Zgłosił: Alexandru Barbovschi
 - Opis: Alexandru nie rozumiał znaczenia nagłówków kolumn w tabeli kontaktów
@@ -239,7 +239,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   to zdiagnozować/naprawić.
 
 ## Stopka obrazu GOES-19 SUVI rozprasza uwagę
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: feature
 - Zgłosił: Alexandru Barbovschi
 - Opis: obraz Fe171 pobierany z NOAA CDN ma widoczną stopkę (data/źródło
@@ -307,7 +307,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   program ma rację.
 
 ## Jawny wybór modelu obliczeń — IQP vs Besselian Elements
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: feature
 - Zgłosił: Alexandru Barbovschi (kontekst: powyższa rozbieżność SEM/SEW)
 - Opis: zamiast (albo obok) biernego pokazywania obu kolumn IQP i BE w tabeli
@@ -342,7 +342,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   strefy; Primary=IQP → Loc = IQP + offset strefy.
 
 ## Zabezpieczenie przed przypadkowym zamknięciem GUI/SRV
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: feature
 - Zgłosił: Alexandru Barbovschi
 - Opis: przypadkowe zamknięcie TotalControlGUI lub TotalControlSRV podczas
@@ -381,7 +381,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   między nimi.
 
 ## "TotalControlCLI quit" nie zamyka faktycznie procesu SRV
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: bug
 - Zgłosił: Andrzej Nowak (znalezione przy okazji sesji 2026-07-19, podczas
   próby zbudowania projektu przy uruchomionym SRV)
@@ -400,7 +400,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   30s idle), następnie `tc quit` z osobnego procesu — proces SRV faktycznie
   zniknął z listy procesów mimo aktywnego drugiego klienta.
 ## Tooltips (on-hover) dla wszystkich pól interfejsu
-- Status: **naprawione i przeniesione do `WHATS_NEW.md` → 2026-07-19**
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: feature
 - Zgłosił: Andrzej Nowak (projekt)
 - Opis: dodano `ImGui::SetItemTooltip()`/`IsItemHovered()+SetTooltip()` na

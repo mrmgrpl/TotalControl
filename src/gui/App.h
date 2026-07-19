@@ -117,7 +117,7 @@ private:
     // ── Close confirmation guard ────────────────────────────────────────────
     bool m_showCloseConfirm = false; // WM_CLOSE deferred to this modal instead of closing immediately
     bool m_closeConfirmed   = false; // set true right before re-issuing the real close
-    std::string m_whatsNewMd;      // raw contents of WHATS_NEW.md, loaded lazily
+    std::string m_whatsNewMd;      // raw contents of CHANGELOG.md, loaded lazily
     bool        m_whatsNewLoaded = false;
 
     // ── BE REST API key (40 hex chars, stored in Config.db, never in source) ────
