@@ -156,6 +156,7 @@ static const PropDef kProps[] = {
     { L"aspect_ratio",      0x0111, 0x0002, true  },
     { L"picture_effect",    0x0112, 0x0003, true  },
     { L"focus_area",        0x0113, 0x0002, true  },
+    { L"focus_magnifier",   0x011d, 0x0004, true  },  // CrDeviceProperty_Focus_Magnifier_Setting (UInt64, see set/decode)
     { L"color_temp",        0x0115, 0x0002, true  },
     { L"lv_display_effect", 0x0118, 0x0002, true  },
     { L"store_dest",        0x0119, 0x0002, true  },
@@ -368,6 +369,16 @@ static std::wstring DecodePropValue(uint32_t code, uint64_t raw) {
         case 0x02: return L"minus-to-0-to-plus";
         default: swprintf_s(buf, L"0x%X", (unsigned)raw); return buf;
         }
+    case 0x011d: { // Focus_Magnifier_Setting — CrDataType_UInt64. Empirically
+                   // confirmed on ILCE-7RM4A 2026-07-20: bits[32:39] = ratio x10
+                   // (0x0A=x1.0, 0x3B=x5.9, 0x77=x11.9; 0 = magnifier disengaged);
+                   // bits[0:31] are other live camera state, preserved verbatim
+                   // on write (see EncodePropValue + the "set" handler special case).
+        unsigned ratio10 = static_cast<unsigned>((raw >> 32) & 0xFF);
+        if (ratio10 == 0) return L"off";
+        swprintf_s(buf, L"x%u.%u", ratio10 / 10, ratio10 % 10);
+        return buf;
+    }
     default:
         swprintf_s(buf, L"%llu", (unsigned long long)raw); return buf;
     }
@@ -457,6 +468,14 @@ static bool EncodePropValue(uint32_t code, const std::wstring& val, long long& o
         case 0x01fd: // BracketOrder
             if (val == L"minus-to-0-to-plus" || val == L"minus") { outRaw = 0x02; return true; }
             if (val == L"0-to-minus-to-plus" || val == L"zero")  { outRaw = 0x01; return true; }
+            break;
+        case 0x011d: // Focus_Magnifier_Setting — returns just the ratio x10 (bits
+                     // 32:39 of the real value); caller combines with the current
+                     // low 32 bits, see the "set" handler special case below.
+            if (val == L"off")   { outRaw = 0;   return true; }
+            if (val == L"x1.0")  { outRaw = 10;  return true; }
+            if (val == L"x5.9")  { outRaw = 59;  return true; }
+            if (val == L"x11.9") { outRaw = 119; return true; }
             break;
         }
         // Fallback: parse as decimal or hex integer
@@ -690,6 +709,27 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
                << L",\"host_time_iso\":\"" << hostIso << L"\"";
         }
 
+        resp = Ok(ss.str()); return true;
+    }
+
+    // ── dump_props ────────────────────────────────────────────────────────────
+    // Diagnostic: every property code+value the camera currently reports.
+    // Used to empirically identify undocumented CrDeviceProperty codes — not
+    // part of normal operation, only used for one-off hardware investigation.
+    if (cmd == L"dump_props") {
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
+        std::vector<std::pair<uint32_t, uint64_t>> props;
+        if (!cam->DumpAllProps(props)) { resp = Err(L"dump_failed"); return true; }
+        std::wostringstream ss;
+        ss << L"\"count\":" << props.size() << L",\"props\":[";
+        for (size_t i = 0; i < props.size(); ++i) {
+            if (i > 0) ss << L",";
+            wchar_t buf[64];
+            swprintf_s(buf, L"{\"code\":\"0x%04X\",\"val\":\"0x%llX\"}",
+                       props[i].first, (unsigned long long)props[i].second);
+            ss << buf;
+        }
+        ss << L"]";
         resp = Ok(ss.str()); return true;
     }
 
@@ -1024,6 +1064,22 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
                 resp = Err(L"invalid_value", (prop + L"=" + val).c_str()); return true;
             }
             resp = cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode", kDriveModeVerifyMs)
+                       ? Ok() : Err(L"set_failed");
+            return true;
+        }
+        if (prop == L"focus_magnifier") {
+            // Focus_Magnifier_Setting is a 40-bit compound value on this camera
+            // (see DecodePropValue comment) — bits[32:39] are the ratio we want
+            // to change, bits[0:31] are other live camera state that must be
+            // preserved on write (read-modify-write), not just guessed/zeroed.
+            long long ratio10;
+            if (!EncodePropValue(0x011d, val, ratio10)) {
+                resp = Err(L"invalid_value", (prop + L"=" + val).c_str()); return true;
+            }
+            uint64_t cur = 0;
+            cam->GetPropRaw(0x011d, cur); // best effort — 0 low bits if unavailable
+            uint64_t newVal = (static_cast<uint64_t>(ratio10) << 32) | (cur & 0xFFFFFFFFull);
+            resp = cam->SetProp(0x011d, 0x0004, static_cast<long long>(newVal), L"FocusMagnifier")
                        ? Ok() : Err(L"set_failed");
             return true;
         }

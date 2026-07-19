@@ -99,6 +99,10 @@ public:
     bool SetPropAndVerify(uint32_t code, uint32_t dataType, long long value,
                           const wchar_t* desc, int maxWaitMs = 2000);
     bool GetPropRaw(uint32_t code, uint64_t& outValue);
+    // Diagnostic: snapshot every property code+value the camera currently reports.
+    // Used to empirically identify undocumented property codes (see CommandHandler
+    // "dump_props") — not used on any hot path.
+    bool DumpAllProps(std::vector<std::pair<uint32_t, uint64_t>>& out);
 
     // ── Generic command ──────────────────────────────────────────────────────
     // cmdId = CrCommandId_*, param = CrCommandParam_Down/Up or slot number

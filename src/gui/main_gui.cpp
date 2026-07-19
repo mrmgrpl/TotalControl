@@ -27,7 +27,15 @@ static void CreateRenderTarget();
 static void CleanupRenderTarget();
 
 // ─── Window proc ─────────────────────────────────────────────────────────────
-static TotalControl::App* g_app = nullptr;
+static TotalControl::App* g_app  = nullptr;
+static HWND                g_hwnd = nullptr;
+
+// Re-issues WM_CLOSE after the user has confirmed the close-confirmation
+// modal — OnCloseRequest() will return true on this second pass, so
+// DestroyWindow() actually proceeds.
+void RequestRealWindowClose() {
+    if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+}
 
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
@@ -84,6 +92,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         1920, 1080,
         nullptr, nullptr,
         hInstance, nullptr);
+
+    g_hwnd = hWnd;
 
     if (!CreateDeviceD3D(hWnd)) {
         CleanupDeviceD3D();

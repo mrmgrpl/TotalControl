@@ -143,23 +143,43 @@ static std::vector<TotalControl::CameraController*>*   g_cams         = nullptr;
 static TotalControl::SequencerEngine*                  g_seq          = nullptr;
 static HANDLE                                          g_shutdownDone = nullptr;
 
+// CTRL_C_EVENT/CTRL_CLOSE_EVENT run on a dedicated OS-created thread (per
+// Win32 docs), so a blocking MessageBoxW() here is safe. CTRL_LOGOFF_EVENT/
+// CTRL_SHUTDOWN_EVENT are NOT confirmed — those represent the system already
+// tearing things down (user logging off / machine shutting down), where a
+// blocking dialog would be inappropriate and is likely to be skipped anyway.
+//
+// PITFALL: Windows only grants a console process a few seconds to react to
+// CTRL_CLOSE_EVENT before force-terminating it regardless of what the
+// handler is doing — this dialog protects against an accidental click/
+// keypress, not a "take your time" confirmation.
 static BOOL WINAPI CtrlHandler(DWORD type) {
     switch (type) {
     case CTRL_C_EVENT:
+    case CTRL_CLOSE_EVENT: {
+        int result = MessageBoxW(nullptr,
+            L"Close TotalControlSRV?\n\n"
+            L"Reconnecting to the cameras after this can take up to 60 seconds.",
+            L"Confirm close \xe2\x80\x94 TotalControlSRV",
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SYSTEMMODAL);
+        if (result != IDYES) return TRUE; // cancel — keep running
+        LogLine(L"Signal — shutdown confirmed by operator...");
+        break;
+    }
     case CTRL_BREAK_EVENT:
-    case CTRL_CLOSE_EVENT:
     case CTRL_LOGOFF_EVENT:
     case CTRL_SHUTDOWN_EVENT:
         LogLine(L"Signal — initiating shutdown...");
-        if (g_seq)  g_seq->Stop();
-        if (g_cams)
-            for (auto* c : *g_cams) c->RequestShutdown();
-        if (g_server) g_server->Stop();
-        if (g_shutdownDone) WaitForSingleObject(g_shutdownDone, 5000);
-        return TRUE;
+        break;
     default:
         return FALSE;
     }
+    if (g_seq)  g_seq->Stop();
+    if (g_cams)
+        for (auto* c : *g_cams) c->RequestShutdown();
+    if (g_server) g_server->Stop();
+    if (g_shutdownDone) WaitForSingleObject(g_shutdownDone, 5000);
+    return TRUE;
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────
@@ -178,12 +198,29 @@ int main() {
     if (GetConsoleMode(hOut, &dwMode))
         SetConsoleMode(hOut, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 
+    // Append, not truncate — beta testers routinely restart SRV several times
+    // while troubleshooting a connection problem, and a truncate-on-start log
+    // destroys the previous (possibly failing) session's evidence right when
+    // it's needed most. A "=== SRV start ===" separator (mirrors
+    // TotalControlGUI.log's convention) marks where each session begins.
     const std::wstring logPath = ExeDir() + L"TotalControlSRV.log";
-    g_logFile.open(logPath, std::ios::out | std::ios::trunc | std::ios::binary);
+    bool logExisted = false;
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        logExisted = GetFileAttributesExW(logPath.c_str(), GetFileExInfoStandard, &fad)
+                  && (fad.nFileSizeHigh > 0 || fad.nFileSizeLow > 0);
+    }
+    g_logFile.open(logPath, std::ios::out | std::ios::app | std::ios::binary);
     if (!g_logFile.is_open()) {
         ::OutputDebugStringW(L"WARN: cannot open log file\n");
     } else {
-        g_logFile.write("\xEF\xBB\xBF", 3);
+        if (!logExisted) g_logFile.write("\xEF\xBB\xBF", 3); // BOM only for a brand-new file
+        SYSTEMTIME st; GetLocalTime(&st);
+        wchar_t sep[64];
+        swprintf_s(sep, L"=== SRV start %04d-%02d-%02d %02d:%02d:%02d ===",
+                   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        g_logFile << WtoU8(sep) << "\n";
+        g_logFile.flush();
     }
 
     LogBanner(L"        _______      _        _  _____            _             _  ");

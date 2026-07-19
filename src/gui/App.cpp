@@ -24,6 +24,10 @@
 #include <fstream>
 #include <string_view>
 
+// Defined in main_gui.cpp — re-issues WM_CLOSE once the close-confirmation
+// modal has been accepted, so the window actually closes on the second pass.
+void RequestRealWindowClose();
+
 namespace TotalControl {
 
 // ─── Live View shared memory layout ──────────────────────────────────────────
@@ -705,6 +709,18 @@ void App::SuviThreadProc() {
         if (FAILED(hrc)) return result;
         for (size_t p = 0; p + 3 < px.size(); p += 4)
             px[p + 3] = std::max({ px[p], px[p+1], px[p+2] });
+        // NOAA burns a date/time stamp + logo into the bottom ~20px of the
+        // source image -- mask it via alpha instead of physically cropping,
+        // so the 1200x1200 canvas the SUVI ALIGNMENT calibration constants
+        // (m_suviHalfQ etc.) are calibrated against stays unchanged.
+        constexpr int kFooterRows = 20;
+        if (static_cast<int>(imgH) > kFooterRows) {
+            for (UINT y = imgH - kFooterRows; y < imgH; ++y) {
+                size_t rowStart = static_cast<size_t>(y) * imgW * 4;
+                for (UINT x = 0; x < imgW; ++x)
+                    px[rowStart + static_cast<size_t>(x) * 4 + 3] = 0;
+            }
+        }
         result.rgba = std::move(px);
         result.w = static_cast<int>(imgW);
         result.h = static_cast<int>(imgH);
@@ -1412,10 +1428,16 @@ static int64_t ArmEstMs(const TLBlock& b) {
     return 2000LL;
 }
 
+ContactTimes App::PrimaryContacts() {
+    ContactTimes iqp;
+    { std::lock_guard lk(m_iqpMutex); iqp = m_contacts; }
+    if (m_primaryContactSrc == 1)  // BE explicitly chosen as primary
+        return m_beResult.valid ? m_beResult : iqp;
+    return iqp.valid ? iqp : m_beResult;  // IQP primary (default)
+}
+
 int64_t App::SnapMsToRelativeSecond(int64_t ms) {
-    ContactTimes ct;
-    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-    if (!ct.valid) ct = m_beResult;
+    ContactTimes ct = PrimaryContacts();
 
     const int64_t cMs[4] = { ct.c1Ms, ct.c2Ms, ct.c3Ms, ct.c4Ms };
     int64_t best = -1, bestD = INT64_MAX;
@@ -2053,9 +2075,7 @@ void App::LoadAudioPreset(std::string_view lang) {
     assert(!lang.empty());
     assert(lang.size() <= 10);   // rule 5: lang is a short country code ("PL", "EN", …)
 
-    ContactTimes ct;
-    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-    if (!ct.valid) ct = m_beResult;
+    ContactTimes ct = PrimaryContacts();
     if (!ct.valid || ct.c2Ms <= 0) {
         m_lastResult = "Audio Preset: calculate contacts first (C2 required)";
         return;
@@ -2228,9 +2248,7 @@ void App::AddPhotoPreset() {
     assert(m_presetTargetTrack >= 0);
     assert(m_presetTargetTrack < static_cast<int>(m_tracks.size()));  // rule 5: target track must exist
 
-    ContactTimes ct;
-    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-    if (!ct.valid) ct = m_beResult;
+    ContactTimes ct = PrimaryContacts();
     if (!ct.valid || ct.c1Ms <= 0 || ct.c4Ms <= 0) {
         m_lastResult = "One Picture Per Minute: calculate contacts first (C1 and C4 required)";
         return;
@@ -2281,9 +2299,7 @@ void App::AddTotalityBracketPreset() {
     assert(m_presetTargetTrack >= 0);
     assert(m_presetTargetTrack < static_cast<int>(m_tracks.size()));  // rule 5: target track must exist
 
-    ContactTimes ct;
-    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-    if (!ct.valid) ct = m_beResult;
+    ContactTimes ct = PrimaryContacts();
     if (!ct.valid || ct.c2Ms <= 0 || ct.c3Ms <= 0) {
         m_lastResult = "Totality Brackets: calculate contacts first (C2 and C3 required)";
         return;
@@ -2498,6 +2514,11 @@ void App::RenderSequencerButtons() {
         StartSeqThread(GuiSeqMode::TestRunning);
         LogLine("Sequencer: TEST RUN started");
     }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(
+            "Plays the sequence in simulated time from the playhead position\n"
+            "(real time passes, but \"now\" = playhead, not the system clock)\n"
+            "-- for rehearsing without waiting for the real contacts.");
     ImGui::PopStyleColor(3);
     if (!canTestStart) ImGui::EndDisabled();
 
@@ -2523,6 +2544,10 @@ void App::RenderSequencerButtons() {
             LogLine("Sequencer: TEST reset to idle");
         }
     }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(
+            "Pauses TEST RUN -- playhead position is kept, a second click\n"
+            "returns to Idle.");
     ImGui::PopStyleColor(3);
     if (!canTestStop) ImGui::EndDisabled();
 
@@ -2540,6 +2565,10 @@ void App::RenderSequencerButtons() {
         LogLine("Sequencer: RUN started (production)");
         m_lastResult = "RUN started — real UTC timing";
     }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(
+            "Runs the sequence on real UTC time -- each block fires exactly\n"
+            "at its scheduled clock time.");
     ImGui::PopStyleColor(3);
     if (!canRun) ImGui::EndDisabled();
 
@@ -2556,6 +2585,8 @@ void App::RenderSequencerButtons() {
         LogLine("Sequencer: RUN stopped");
         m_lastResult = "RUN stopped";
     }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Stops the active RUN execution.");
     ImGui::PopStyleColor(3);
     if (!canStopRun) ImGui::EndDisabled();
 
@@ -2582,6 +2613,10 @@ void App::RenderSequencerButtons() {
         ImGui::PushStyleColor(ImGuiCol_Text,          kWhiteTxt);
         if (ImGui::Button(btnLbl.c_str(), ImVec2(-1, 30)))
             SaveCalibFromBuf(camModel);
+        ImGui::SetItemTooltip(
+            "Saves the bracket-timing samples measured during this run as the\n"
+            "calibrated latency for this camera model -- used afterward by\n"
+            "BlockDurMs()/ArmEstMs() instead of the generic formula.");
         ImGui::PopStyleColor(3);
     }
 
@@ -3159,18 +3194,31 @@ void App::RenderSolarView() {
     }
 
     // ── Moon disc — on top of SUVI and LV (Księżyc zakrywa Słońce) ───────────
-    // Textured NASA photo when available/enabled; flat disc as fallback.
-    // During totality always solid black, regardless of the texture.
+    // Textured NASA photo when available/enabled; solid black during the two
+    // partial phases (C1-C2 approaching, C3-C4 receding) instead of during
+    // totality itself (C2-C3), per Andrzej's explicit request 2026-07-19 —
+    // deliberately inverted from the more "astronomically obvious" choice.
     {
         if (m_moonNewData.load()) CreateMoonTexture();
 
         float dxM = moonX - cx, dyM = moonY - cy;
         float dist = sqrtf(dxM * dxM + dyM * dyM);
-        bool  isTotality     = (dist + sunR < moonR);
-        bool  moonTexVisible = !isTotality && m_moonOpacity >= 0.05f
+
+        ContactTimes ct = PrimaryContacts();
+        bool showBlackDisc;
+        if (ct.valid && ct.c1Ms > 0 && ct.c2Ms > 0 && ct.c3Ms > 0 && ct.c4Ms > 0) {
+            showBlackDisc = (simMs >= ct.c1Ms && simMs <  ct.c2Ms) ||
+                            (simMs >  ct.c3Ms && simMs <= ct.c4Ms);
+        } else {
+            // No contacts calculated yet — fall back to a geometric
+            // heuristic (moon fully covering the sun) so *something*
+            // sensible renders before "Calculate Contacts" has been run.
+            showBlackDisc = (dist + sunR < moonR);
+        }
+        bool moonTexVisible = !showBlackDisc && m_moonOpacity >= 0.05f
                             && m_moonSrv && m_moonImgW > 0 && m_moonImgH > 0;
 
-        if (isTotality) {
+        if (showBlackDisc) {
             dl->AddCircleFilled({moonX, moonY}, moonR, IM_COL32(0, 0, 0, 255));
             dl->AddCircle      ({moonX, moonY}, moonR, IM_COL32(110, 108, 104, 255), 0, 0.8f);
         } else if (moonTexVisible) {
@@ -3234,6 +3282,12 @@ void App::RenderSolarView() {
         float sx = lx + 9.f, sy = ly + 7.f;
         dl->AddCircle     ({sx, sy}, 3.f, IM_COL32(186,117,23,190), 0, 1.f);
         dl->AddCircleFilled({sx, sy}, 1.1f, IM_COL32(186,117,23,210));
+        // Draw-list label — no ImGui item, hit-test the mouse manually.
+        ImVec2 mp = ImGui::GetIO().MousePos;
+        if (mp.x >= lx - 2.f && mp.x <= sx + 6.f && mp.y >= ly - 2.f && mp.y <= sy + 6.f)
+            ImGui::SetTooltip(
+                "N-sun -- the Sun's north pole direction (position angle P from\n"
+                "celestial north).");
     }
 
     // ── Moon rotation axis + north pole marker ────────────────────────────────
@@ -3259,7 +3313,14 @@ void App::RenderSolarView() {
         // "N" label + small subscript moon-disc circle
         float lx = npx + mnx*4.f - 4.f, ly = npy + mny*4.f - 6.f;
         dl->AddText({lx, ly}, IM_COL32(80, 170, 230, 200), "N");
-        dl->AddCircle({lx + 9.f, ly + 7.f}, 3.f, IM_COL32(80, 170, 230, 160), 0, 1.f);
+        float mlx = lx + 9.f, mly = ly + 7.f;
+        dl->AddCircle({mlx, mly}, 3.f, IM_COL32(80, 170, 230, 160), 0, 1.f);
+        // Draw-list label — no ImGui item, hit-test the mouse manually.
+        ImVec2 mp = ImGui::GetIO().MousePos;
+        if (mp.x >= lx - 2.f && mp.x <= mlx + 6.f && mp.y >= ly - 2.f && mp.y <= mly + 6.f)
+            ImGui::SetTooltip(
+                "N-moon -- the Moon's north pole direction (position angle V from\n"
+                "celestial north). The Moon's disc turns solid black during totality.");
     }
 
     // ── C2 / C3 contact points on Moon limb — computed from relative motion ────
@@ -3312,8 +3373,14 @@ void App::RenderSolarView() {
         char zhint[24];
         snprintf(zhint, sizeof(zhint), "zoom %.1fx", m_solarZoom);
         ImVec2 ts = ImGui::CalcTextSize(zhint);
-        dl->AddText({ox+szW-ts.x-6.f, oy+szH-ts.y-4.f},
-                    IM_COL32(60,65,80,160), zhint);
+        ImVec2 zPos{ox+szW-ts.x-6.f, oy+szH-ts.y-4.f};
+        dl->AddText(zPos, IM_COL32(60,65,80,160), zhint);
+        // Draw-list text has no ImGui item to hang SetItemTooltip() on —
+        // hit-test the mouse against the text's own screen rect instead.
+        ImVec2 mp = ImGui::GetIO().MousePos;
+        if (mp.x >= zPos.x && mp.x <= zPos.x + ts.x &&
+            mp.y >= zPos.y && mp.y <= zPos.y + ts.y)
+            ImGui::SetTooltip("Current zoom level of the simulator view (mouse wheel, 0.2x-20x).");
     }
 
     dl->PopClipRect();
@@ -3324,41 +3391,51 @@ void App::RenderSolarView() {
     {
         static const ImVec4 kValWhite{0.88f, 0.88f, 0.90f, 1.0f};
 
-        auto Field = [&](const char* label, const char* fmt, auto&&... args) {
+        auto Field = [&](const char* label, const char* tip, const char* fmt, auto&&... args) {
             ImGui::TextColored(kGray, "%s", label);
             ImGui::SameLine(0, 4);
             ImGui::TextColored(kValWhite, fmt, args...);
+            if (tip) ImGui::SetItemTooltip("%s", tip);
             ImGui::SameLine(0, 25);
         };
 
         if (hasEph && sunEph.utc_ms > 0) {
             float rot = m_solarP - m_solarQ;
-            Field("P",   "%.1f\xc2\xb0", m_solarP);
-            Field("q",   "%.1f\xc2\xb0", m_solarQ);
-            Field("rot", "%.1f\xc2\xb0", rot);
-            Field("Alt", "%.1f\xc2\xb0", static_cast<float>(sunEph.alt_deg));
-            Field("Obs", "%.2f%%",       obscuration * 100.f);
+            Field("P", "Position angle of the Sun's north pole from celestial north\n"
+                       "(from the Sun's IAU pole) -- nearly constant during the eclipse\n"
+                       "(<0.1 deg/h).", "%.1f\xc2\xb0", m_solarP);
+            Field("q", "Parallactic angle -- how far \"zenith\" is rotated from celestial\n"
+                       "north, for this location/time/solar altitude.", "%.1f\xc2\xb0", m_solarQ);
+            Field("rot", "Effective field rotation from zenith (P-q) -- how much a camera\n"
+                         "frame with \"Apply P\" = true is rotated on the Solar Simulator.",
+                         "%.1f\xc2\xb0", rot);
+            Field("Alt", "Sun's altitude above the horizon, in degrees, for the current\nplayhead position.",
+                         "%.1f\xc2\xb0", static_cast<float>(sunEph.alt_deg));
+            Field("Obs", "Percentage of the Sun's disc obscured by the Moon at this moment\n"
+                         "(0%% = no eclipse, 100%% = totality/annularity).",
+                         "%.2f%%", obscuration * 100.f);
         } else if (m_ephFetching.load()) {
-            Field("EPH", "%s", "fetching...");
+            Field("EPH", nullptr, "%s", "fetching...");
         } else {
-            Field("P", "%.1f\xc2\xb0 (statyczny)", m_solarP);
+            Field("P", nullptr, "%.1f\xc2\xb0 (statyczny)", m_solarP);
         }
 
         int64_t nowMs = UtcNowMs();
         {
             char buf[20]; FormatUtcHms(nowMs, buf, sizeof(buf));
-            Field("UTC", "%s", buf);
+            Field("UTC", "Universal time from the host system clock -- the whole sequence\nis timed off this.", "%s", buf);
         }
 
         // One inline TZ clock: zone-name button (opens picker) + time.
         // idSuffix is a stable ImGui id ("##gh_sim") independent of the
         // visible zone code, which changes whenever the user picks a zone.
-        auto TzInline = [&](std::string& tzIana, const char* idSuffix, const char* popupId) {
+        auto TzInline = [&](std::string& tzIana, const char* idSuffix, const char* popupId, const char* tip) {
             char timeBuf[12]; FormatLocalHms(nowMs, tzIana, timeBuf, sizeof(timeBuf));
             int  ci = TzFindByIana(m_tzList, tzIana);
             assert(ci >= 0 && ci < static_cast<int>(m_tzList.size()));
             std::string btnLabel = m_tzList[ci].code + idSuffix;
             if (ImGui::SmallButton(btnLabel.c_str())) ImGui::OpenPopup(popupId);
+            ImGui::SetItemTooltip("%s\n\nClick to pick a different time zone (598 IANA zones, DST-aware).", tip);
             ImGui::SameLine(0, 4);
             ImGui::TextColored(kValWhite, "%s", timeBuf);
             ImGui::SameLine(0, 25);
@@ -3382,17 +3459,20 @@ void App::RenderSolarView() {
             }
         };
 
-        TzInline(m_homeTzIana, "##gh_sim", "##tz_home_sim");
-        TzInline(m_eclTzIana,  "##gl_sim", "##tz_loc_sim");
+        TzInline(m_homeTzIana, "##gh_sim", "##tz_home_sim", "Current time in your home time zone.");
+        TzInline(m_eclTzIana,  "##gl_sim", "##tz_loc_sim",  "Current local time at the eclipse observing location.");
 
         // PlayHead — always shown regardless of ephemeris availability.
         int64_t ph = m_tlPlayheadMs.load();
+        static const char* kPhTip =
+            "Current position of the Timeline playhead -- cyan when the\n"
+            "sequencer is running, amber when idle/paused.";
         if (ph > 0) {
             int64_t sv = ph / 1000;
-            Field("PlayHead", "%02d:%02d:%02d.%03d",
+            Field("PlayHead", kPhTip, "%02d:%02d:%02d.%03d",
                 (int)((sv/3600)%24), (int)((sv/60)%60), (int)(sv%60), (int)(ph%1000));
         } else {
-            Field("PlayHead", "%s", "--:--:--");
+            Field("PlayHead", kPhTip, "%s", "--:--:--");
         }
     }
 
@@ -3436,6 +3516,7 @@ void App::RenderInspectorColumn() {
             m_moonOpacity = moonPct / 100.f;
             m_configDb.SetSettingInt("moon_opacity_pct", moonPct);
         }
+        ImGui::SetItemTooltip("Opacity of the Moon's disc on the Solar Simulator -- purely\ncosmetic, doesn't affect any calculation.");
         ImGui::PopStyleColor(4);
     }
     ImGui::PopFont();
@@ -3450,6 +3531,7 @@ void App::RenderInspectorColumn() {
             m_suviOpacity = suviPct / 100.f;
             m_configDb.SetSettingInt("suvi_opacity_pct", suviPct);
         }
+        ImGui::SetItemTooltip("Opacity of the GOES-19 SUVI corona EUV image overlay on the Sun's disc.");
         ImGui::PopStyleColor(4);
     }
     ImGui::PopFont();
@@ -3471,6 +3553,7 @@ void App::RenderInspectorColumn() {
             TriggerSuviFetch();
         }
     }
+    ImGui::SetItemTooltip("GOES-19 SUVI imaging channel (currently only Fe171 -- 171A, upper\ncorona ~600,000 K -- is actually fetched).");
     ImGui::PopFont();
     ImGui::Spacing();
 
@@ -3478,10 +3561,13 @@ void App::RenderInspectorColumn() {
     bool suviChanged = false;
     ImGui::PushFont(m_fontMono);
     ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_disc", &m_suviHalfQ,       0.005f, 0.02f, "%8.4f")) suviChanged = true;
+    ImGui::SetItemTooltip("Scale of the solar disc on the SUVI image relative to the\nsimulator's Sun radius -- calibration for image alignment.");
     ImGui::SameLine(); ImGui::TextColored(kGray, "Scale");
     ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_foot", &m_suviFooterPx,    1.0f, 5.0f, "%8.4f")) suviChanged = true;
+    ImGui::SetItemTooltip("Vertical shift of the disc center (pixels in the original\n1200x1200 SUVI image) -- corrects source-image offset.");
     ImGui::SameLine(); ImGui::TextColored(kGray, "V-offset");
     ImGui::SetNextItemWidth(135); if (ImGui::InputFloat("##suvi_horz", &m_suviCorrRightPx, 1.0f, 5.0f, "%8.4f")) suviChanged = true;
+    ImGui::SetItemTooltip("Horizontal shift of the SUVI image (pixels in source-image\nspace) -- compensates for GOES-19 orbital drift.");
     ImGui::SameLine(); ImGui::TextColored(kGray, "H-offset");
     // "Vertical offset" (m_suviCorrUpPx) control intentionally removed from the
     // UI — variable and its use in SUVI positioning/persistence stay untouched.
@@ -3540,7 +3626,49 @@ void App::RenderInspectorColumn() {
                     }
                 }
             }
+            ImGui::SetItemTooltip(
+                "Live View blend for this camera: below 5%% turns the SHM video\n"
+                "stream off, above 5%% overlays the real camera image on the\n"
+                "simulator (0%% = pure model, 100%% = pure Live View) -- for a\n"
+                "final framing check before totality.");
             ImGui::PopStyleColor(4);
+
+            // Focus Magnifier — remote zoom for the Live View feed. The camera
+            // only auto-triggers this on its own when it senses a native lens's
+            // electronic focus ring turning; a passive/manual optic (telescope)
+            // never sends that signal, so this has to be driven remotely instead.
+            {
+                static constexpr const char* kFmLabels[4] = { "x Off", "x1.0", "x5.9", "x11.9" };
+                static constexpr const char* kFmValues[4] = { "off",   "x1.0", "x5.9", "x11.9" };
+                for (int lvl = 0; lvl <= 3; ++lvl) {
+                    if (lvl != 0) ImGui::SameLine(0, 4);
+                    bool active = (m_focusMagLevel[ci] == lvl);
+                    if (active) {
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(.20f,.45f,.65f,1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.25f,.55f,.78f,1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(.30f,.60f,.85f,1.f));
+                    }
+                    std::string btnId = std::format("{}##focusmag_{}_{}", kFmLabels[lvl], ci, lvl);
+                    if (ImGui::Button(btnId.c_str(), ImVec2(52, 0))) {
+                        auto res = m_pipe.SendRequest(std::format(
+                            R"({{"cmd":"set","prop":"focus_magnifier","val":"{}","cam":"{}"}})",
+                            kFmValues[lvl], ci));
+                        bool ok = res && JStr(*res, "ok") == "true";
+                        if (ok) m_focusMagLevel[ci] = lvl;
+                        LogLine(std::format("focus_magnifier set ci={} val={} -> {}",
+                                             ci, kFmValues[lvl], ok ? "ok" : "failed"));
+                    }
+                    if (active) ImGui::PopStyleColor(3);
+                }
+                ImGui::SameLine(0, 8);
+                ImGui::TextColored(kGray, "Focus Mag");
+                ImGui::SetItemTooltip(
+                    "Focus Magnifier zoom for this camera's Live View feed (Off/x1.0/x5.9/\n"
+                    "x11.9, ILCE-7RM4A menu values). Native Sony lenses trigger this\n"
+                    "automatically when the focus ring turns -- this control exists for\n"
+                    "passive/manual optics (e.g. a telescope) that never send that signal,\n"
+                    "so remote focus checking still works without touching the camera.");
+            }
             ImGui::Spacing();
         }
         if (nEnts == 0)
@@ -3554,12 +3682,12 @@ void App::RenderInspectorColumn() {
     ImGui::SeparatorText("ACTION LIBRARY");
     ImGui::Spacing();
 
-    struct PE { BlockType type; const char* name; ImU32 col; };
+    struct PE { BlockType type; const char* name; ImU32 col; const char* tip; };
     PE pal[] = {
-        {BlockType::Single,  "Single",  IM_COL32( 40,160, 70,255)},
-        {BlockType::Burst,   "Burst",   IM_COL32( 50,120,200,255)},
-        {BlockType::Bracket, "Bracket", IM_COL32(200,130, 30,255)},
-        {BlockType::Audio,   "Audio",   IM_COL32(140, 80,200,255)},
+        {BlockType::Single,  "Single",  IM_COL32( 40,160, 70,255), "One shot at a single exposure."},
+        {BlockType::Burst,   "Burst",   IM_COL32( 50,120,200,255), "Continuous-drive shooting held down for a set duration."},
+        {BlockType::Bracket, "Bracket", IM_COL32(200,130, 30,255), "A series of shots stepped across an EV range."},
+        {BlockType::Audio,   "Audio",   IM_COL32(140, 80,200,255), "Plays an MP3 (e.g. eclipse-phase announcement)."},
     };
 
     // 2×2 grid — half-width cells, two rows
@@ -3572,6 +3700,9 @@ void App::RenderInspectorColumn() {
         ImGui::PushID((int)pe.type);
         ImVec2 pos = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##pb", {palHW, 34.0f});
+        ImGui::SetItemTooltip(
+            "%s\n\nDrag onto a track on the Timeline to add a block of this type.",
+            pe.tip);
         bool hov = ImGui::IsItemHovered();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(pos, {pos.x+palHW, pos.y+34.f},
@@ -3636,6 +3767,9 @@ void App::RenderInspectorColumn() {
             ImGui::SetNextItemWidth(kFldW);
             ImGui::InputText("##type_ro", typeBuf, sizeof(typeBuf), ImGuiInputTextFlags_ReadOnly);
             ImGui::SameLine(); ImGui::TextColored(kGray, "Type");
+            ImGui::SetItemTooltip(
+                "Block type: Single / Burst / Bracket / Audio. Changed via the\n"
+                "Photo Sequence menu, not editable here directly.");
         }
 
         // UTC start time — read-only, same style as other fields
@@ -3649,6 +3783,9 @@ void App::RenderInspectorColumn() {
             ImGui::SetNextItemWidth(kFldW);
             ImGui::InputText("##at_ro", atBuf, sizeof(atBuf), ImGuiInputTextFlags_ReadOnly);
             ImGui::SameLine(); ImGui::TextColored(kGray, "Start UTC");
+            ImGui::SetItemTooltip(
+                "Absolute UTC time this block fires on the Timeline -- drag the\n"
+                "block on the timeline to change it.");
         }
 
         if (b.type != BlockType::Audio) {
@@ -3672,6 +3809,7 @@ void App::RenderInspectorColumn() {
                 }
                 ImGui::EndCombo();
             }
+            ImGui::SetItemTooltip("Shutter speed for this block -- set on the camera just before\nthe shot (ARM), if different from the previous block.");
             ImGui::SameLine(); ImGui::TextColored(kGray, "SS");
 
             // ISO combo — Sony standard values
@@ -3692,6 +3830,7 @@ void App::RenderInspectorColumn() {
                 }
                 ImGui::EndCombo();
             }
+            ImGui::SetItemTooltip("ISO sensitivity for this block.");
             ImGui::SameLine(); ImGui::TextColored(kGray, "ISO");
 
             // F-stop combo — Sony standard values
@@ -3711,6 +3850,7 @@ void App::RenderInspectorColumn() {
                 }
                 ImGui::EndCombo();
             }
+            ImGui::SetItemTooltip("Aperture (f-number) for this block.");
             ImGui::SameLine(); ImGui::TextColored(kGray, "f-number");
         }
 
@@ -3756,6 +3896,10 @@ void App::RenderInspectorColumn() {
                 }
                 ImGui::EndCombo();
             }
+            ImGui::SetItemTooltip(
+                "Frame count x EV step for the exposure bracket (16 variants\n"
+                "supported by the ILCE series) -- e.g. \"5x1.0ev\" = 5 frames,\n"
+                "1 EV apart.");
             ImGui::SameLine(); ImGui::TextColored(kGray, "Bracket");
         }
 
@@ -3786,6 +3930,7 @@ void App::RenderInspectorColumn() {
                 }
                 ImGui::EndCombo();
             }
+            ImGui::SetItemTooltip("Continuous-shooting drive mode: HI+/HI/MID/LO -- different\nframes-per-second rates.");
             ImGui::SameLine(); ImGui::TextColored(kGray, "Drive speed");
 
             ImGui::SetNextItemWidth(kFldW);
@@ -3798,6 +3943,7 @@ void App::RenderInspectorColumn() {
                 b.burstDurMs = int32_t(ds * 1000.f);
                 m_tlDirty = true;
             }
+            ImGui::SetItemTooltip("How long to hold the shutter down in continuous-drive mode (seconds).");
             ImGui::SameLine(); ImGui::TextColored(kGray, "Burst duration");
 
             // Informational: estimated frame count
@@ -3876,6 +4022,7 @@ void App::RenderInspectorColumn() {
             } else {
                 s_audScanned = false;
             }
+            ImGui::SetItemTooltip("MP3 file to play in this block (e.g. eclipse-phase announcements).");
             ImGui::SameLine(); ImGui::TextColored(kGray, "File");
 
             // Duration (auto-detected from MP3 on file select)
@@ -3885,6 +4032,7 @@ void App::RenderInspectorColumn() {
                 ImGui::SetNextItemWidth(kFldW);
                 ImGui::InputText("##aud_dur_ro", durBuf, sizeof(durBuf), ImGuiInputTextFlags_ReadOnly);
                 ImGui::SameLine(); ImGui::TextColored(kGray, "Duration");
+                ImGui::SetItemTooltip("Length of the selected audio file, in ms (probed via MCI when\nthe audio library is scanned).");
             }
 
             // Scan status — shown while AudioScanThreadProc is active or after
@@ -3908,11 +4056,16 @@ void App::RenderInspectorColumn() {
             snprintf(lbuf, sizeof(lbuf), "%s", b.label.c_str());
             if (ImGui::InputText("##lbl", lbuf, sizeof(lbuf))) { b.label = lbuf; m_tlDirty = true; }
             ImGui::SameLine(); ImGui::TextColored(kGray, "Label");
+            ImGui::SetItemTooltip("Custom name for this block, shown on the Timeline and in the log --\npurely descriptive, doesn't affect execution.");
         }
 
         bool prevSnap = b.snapToPrev;
         ImGui::PushStyleColor(ImGuiCol_Text, kGray);
         ImGui::Checkbox("Snap to previous##snp", &b.snapToPrev);
+        ImGui::SetItemTooltip(
+            "Block starts exactly when the previous block on the same track\n"
+            "ends (plus ARM time, if settings change) -- instead of holding a\n"
+            "fixed UTC time.");
         ImGui::PopStyleColor();
         if (b.snapToPrev != prevSnap) {
             if (b.snapToPrev && m_selBlock > 0) {
@@ -3932,6 +4085,10 @@ void App::RenderInspectorColumn() {
         bool secSnap = b.snapToSec;
         ImGui::PushStyleColor(ImGuiCol_Text, kGray);
         ImGui::Checkbox("Snap to Seconds##sns", &b.snapToSec);
+        ImGui::SetItemTooltip(
+            "Rounds the block's start time so its offset from the nearest\n"
+            "contact lands on a whole second -- makes \"every 10s\" style\n"
+            "planning easier.");
         ImGui::PopStyleColor();
         if (b.snapToSec && !secSnap && b.atMs >= 0) {
             b.atMs = SnapMsToRelativeSecond(b.atMs);
@@ -4022,9 +4179,7 @@ void App::RenderTimelineBottom() {
     ImGui::SeparatorText("TIMELINE");
     float y = ImGui::GetCursorScreenPos().y;   // baseline BELOW the separator
 
-    ContactTimes ct;
-    { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
-    if (!ct.valid) ct = m_beResult;
+    ContactTimes ct = PrimaryContacts();
 
     if (!ct.valid) {
         ImGui::SetCursorScreenPos({winPos.x + kLabelW + 8.f, y + 8.f});
@@ -4797,6 +4952,7 @@ App::App() {
         m_suviOpacity = m_configDb.GetSettingInt("suvi_opacity_pct", 100) / 100.f;
         m_suviChannel = m_configDb.GetSetting("suvi_channel", "Fe171");
         m_moonOpacity = m_configDb.GetSettingInt("moon_opacity_pct", 100) / 100.f;
+        m_primaryContactSrc = m_configDb.GetSettingInt("primary_contact_src", 0);
 
         LogLine(std::format("Config DB: home={}  ecl={}  obs={:.4f},{:.4f} {}m",
                             m_homeTzIana, m_eclTzIana, m_obsLat, m_obsLon, m_obsAltM));
@@ -4949,10 +5105,13 @@ App::~App() {
     m_suviSrvs.clear();
     if (m_moonSrv) { m_moonSrv->Release(); m_moonSrv = nullptr; }
 
-    if (m_pipe.GetState() == PipeClient::State::Connected) {
-        (void)m_pipe.Send("{\"cmd\":\"quit\"}");
+    // Deliberately does NOT send "quit" to SRV here — SRV is a persistent
+    // daemon that keeps the (slow, ~60s to reconnect) camera connection alive
+    // independently of the GUI. Closing the GUI should not kill it; only the
+    // explicit "Disconnect" button does that. Just drop this client's pipe
+    // connection so SRV can keep serving whoever else connects.
+    if (m_pipe.GetState() == PipeClient::State::Connected)
         m_pipe.Disconnect();
-    }
     LogLine("=== TotalControlGUI exit ===");
 }
 
@@ -5188,10 +5347,11 @@ void App::RenderCameraSection() {
 
         // Renders one parameter row across all 4 camera columns; getValue maps
         // a connected camera's status to (display text, colour).
-        auto Row = [&](const char* label, auto&& getValue) {
+        auto Row = [&](const char* label, const char* tip, auto&& getValue) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::TextColored(kGray, "%s", label);
+            ImGui::SetItemTooltip("%s", tip);
             for (int ci = 0; ci < kMaxCamTracks; ++ci) {
                 ImGui::TableSetColumnIndex(ci + 1);
                 const CamStatus* s = CamAt(ci);
@@ -5201,7 +5361,9 @@ void App::RenderCameraSection() {
             }
         };
 
-        Row("Batt", [&](const CamStatus& s) -> std::pair<std::string, ImVec4> {
+        Row("Batt", "Battery percentage and level (color: green/yellow/orange/red\n"
+                    "at 3/4, 1/2, 1/4 thresholds); \"U\" = powered/charging via USB.",
+            [&](const CamStatus& s) -> std::pair<std::string, ImVec4> {
             ImVec4 batCol = kGreen;
             std::string_view lvl = s.batteryLevel;
             if      (lvl.find("1/4") != std::string_view::npos) { batCol = kRed;    }
@@ -5213,12 +5375,18 @@ void App::RenderCameraSection() {
             return { buf, batCol };
         });
 
-        Row("Mode",  [&](const CamStatus& s) { return std::pair{ s.mode.empty()  ? "?" : s.mode,  kWhite }; });
-        Row("SS",    [&](const CamStatus& s) { return std::pair{ s.ss.empty()    ? "?" : s.ss,    kWhite }; });
-        Row("ISO",   [&](const CamStatus& s) { return std::pair{ s.iso ? std::to_string(s.iso) : "?", kWhite }; });
-        Row("f/",    [&](const CamStatus& s) { return std::pair{ s.fnum.empty()  ? "?" : s.fnum,  kWhite }; });
-        Row("Focus", [&](const CamStatus& s) { return std::pair{ s.focus.empty() ? "?" : s.focus, kWhite }; });
-        Row("Drive", [&](const CamStatus& s) { return std::pair{ s.drive.empty() ? "?" : s.drive, kWhite }; });
+        Row("Mode", "Camera exposure mode (e.g. M = Manual). Set on the camera itself,\nnot in this app.",
+            [&](const CamStatus& s) { return std::pair{ s.mode.empty()  ? "?" : s.mode,  kWhite }; });
+        Row("SS", "Shutter speed currently set on the camera.",
+            [&](const CamStatus& s) { return std::pair{ s.ss.empty()    ? "?" : s.ss,    kWhite }; });
+        Row("ISO", "ISO sensitivity currently set on the camera.",
+            [&](const CamStatus& s) { return std::pair{ s.iso ? std::to_string(s.iso) : "?", kWhite }; });
+        Row("f/", "Aperture (f-number) currently set on the camera.",
+            [&](const CamStatus& s) { return std::pair{ s.fnum.empty()  ? "?" : s.fnum,  kWhite }; });
+        Row("Focus", "Focus mode (e.g. MF = Manual Focus).",
+            [&](const CamStatus& s) { return std::pair{ s.focus.empty() ? "?" : s.focus, kWhite }; });
+        Row("Drive", "Shutter drive mode (single / continuous / bracket) -- raw SDK code,\nnot always human-readable.",
+            [&](const CamStatus& s) { return std::pair{ s.drive.empty() ? "?" : s.drive, kWhite }; });
 
         // Cards — remaining/max (shots) and % free when max is known
         auto CardVal = [&](const std::string& status, int remaining, int maxRem)
@@ -5237,11 +5405,14 @@ void App::RenderCameraSection() {
             ImVec4 col = (status == "ok") ? kGreen : kRed;
             return { buf, col };
         };
-        Row("C1", [&](const CamStatus& s) { return CardVal(s.slot1Status, s.slot1Remaining, s.slot1MaxRem); });
-        Row("C2", [&](const CamStatus& s) { return CardVal(s.slot2Status, s.slot2Remaining, s.slot2MaxRem); });
+        Row("C1", "Memory card slot 1: remaining/maximum shots (%) and card status.\n\"reading...\" = SDK hasn't returned a value yet after connecting.",
+            [&](const CamStatus& s) { return CardVal(s.slot1Status, s.slot1Remaining, s.slot1MaxRem); });
+        Row("C2", "Memory card slot 2: remaining/maximum shots (%) and card status.",
+            [&](const CamStatus& s) { return CardVal(s.slot2Status, s.slot2Remaining, s.slot2MaxRem); });
 
         // Last shoot latency — full stack (SDK + USB + shutter + confirm)
-        Row("Shot", [&](const CamStatus& s) -> std::pair<std::string, ImVec4> {
+        Row("Shot", "Latency of the last shutter release, in ms (full stack: SDK + USB +\nshutter + confirmation) -- color: green <500ms, yellow <1500ms, red above.",
+            [&](const CamStatus& s) -> std::pair<std::string, ImVec4> {
             if (s.lastShotMs < 0) return { "-", kDim };
             char buf[16]; snprintf(buf, sizeof(buf), "%d ms", s.lastShotMs);
             ImVec4 col = s.lastShotMs < 500 ? kGreen : s.lastShotMs < 1500 ? kYellow : kRed;
@@ -5274,6 +5445,18 @@ static void FormatCountdown(int64_t diffMs, char* buf, int len) {
 }
 
 // ─── Eclipse selector rendering ───────────────────────────────────────────────
+
+// Shared HH:MM:SS.mmm formatter for UTC contact-time values — used by both
+// the ECLIPSE section's GE contact-times table and the TIME section's
+// IQP/BE/Loc contact-times table.
+static void FormatContactHms(int64_t ms, char* buf, int len) {
+    if (ms <= 0) { snprintf(buf, len, "--:--:--.---"); return; }
+    int64_t s   = ms / 1000;
+    int     mmm = static_cast<int>(ms % 1000);
+    snprintf(buf, len, "%02d:%02d:%02d.%03d",
+             static_cast<int>((s/3600)%24), static_cast<int>((s/60)%60),
+             static_cast<int>(s%60), mmm);
+}
 
 void App::RenderEclipseSection() {
     static const ImVec4 kGray  { 0.40f, 0.40f, 0.45f, 1.0f };
@@ -5340,6 +5523,9 @@ void App::RenderEclipseSection() {
             }
             ImGui::EndCombo();
         }
+        ImGui::SetItemTooltip(
+            "Pick an eclipse from the 11,898-entry database (Besselian\n"
+            "elements, NASA/Espenak).");
 
         // Remaining columns need a valid selection
         if (m_eclipseIdx < 0 || m_eclipseIdx >= static_cast<int>(m_eclipses.size())) {
@@ -5370,6 +5556,9 @@ void App::RenderEclipseSection() {
             ImGui::SetNextItemWidth(-1);
             ImGui::InputText("##ecl_type", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
             ImGui::PopStyleColor(2);
+            ImGui::SetItemTooltip(
+                "Eclipse type at Greatest Eclipse -- Total / Annular / Partial /\n"
+                "Hybrid, per the Besselian elements.");
         }
 
         // ── Col 2: Duration at GE ────────────────────────────────────────────
@@ -5381,6 +5570,9 @@ void App::RenderEclipseSection() {
             ImGui::SetNextItemWidth(-1);
             ImGui::InputText("##ecl_dur", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
             ImGui::PopStyleColor();
+            ImGui::SetItemTooltip(
+                "Maximum duration of totality/annularity at the point of\n"
+                "Greatest Eclipse -- not at your location, where it can be shorter.");
         }
 
         // ── Col 3: GE location ───────────────────────────────────────────────
@@ -5394,9 +5586,66 @@ void App::RenderEclipseSection() {
             ImGui::SetNextItemWidth(-1);
             ImGui::InputText("##ecl_geo", coordBuf, sizeof(coordBuf), ImGuiInputTextFlags_ReadOnly);
             ImGui::PopStyleColor();
+            ImGui::SetItemTooltip(
+                "Coordinates of the Greatest Eclipse point -- maximum duration\n"
+                "of totality, usually NOT the same as your observing location.");
         }
 
         ImGui::EndTable();
+    }
+
+    // ── GE contact times (UTC) — time of C1/C2/Max/C3/C4 at the point of
+    // greatest eclipse itself (location-independent for this eclipse, unlike
+    // the observer-location IQP/BE/Loc columns in the TIME section table) ──
+    if (m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size())) {
+        ImGui::Spacing();
+        // Stretch sizing: divides the panel's actual available width evenly
+        // across the 5 columns, so this table always fits the left panel's
+        // current width instead of overflowing/clipping at a hardcoded guess.
+        if (ImGui::BeginTable("##ecl_ge_tbl", 5,
+                               ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                               ImGuiTableFlags_SizingStretchSame)) {
+            static const char* kGeLbl[5] = { "GE C1", "GE C2", "GE MAX", "GE C3", "GE C4" };
+            static const char* kGeTip[5] = {
+                "First contact -- the Moon's disc first touches the Sun\n(partial eclipse begins).",
+                "Second contact -- totality/annularity begins.",
+                "Greatest eclipse -- point of maximum obscuration.",
+                "Third contact -- totality/annularity ends.",
+                "Fourth contact -- the Moon's disc leaves the Sun\n(partial eclipse ends).",
+            };
+            for (int ci = 0; ci < 5; ++ci)
+                ImGui::TableSetupColumn(kGeLbl[ci], ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+            for (int ci = 0; ci < 5; ++ci) {
+                ImGui::TableSetColumnIndex(ci);
+                ImGui::PushStyleColor(ImGuiCol_Text, kWhite);
+                ImGui::TableHeader(ImGui::TableGetColumnName(ci));
+                ImGui::PopStyleColor();
+                ImGui::SetItemTooltip("%s", kGeTip[ci]);
+            }
+            ImGui::TableNextRow();
+            const int64_t geVals[5] = { m_geResult.c1Ms, m_geResult.c2Ms, m_geResult.maxMs,
+                                         m_geResult.c3Ms, m_geResult.c4Ms };
+            for (int ci = 0; ci < 5; ++ci) {
+                char buf[16];
+                // Centiseconds (2 digits), not milliseconds (3) — one character
+                // shorter, so this stretch-sized table's last column stops
+                // clipping its final digit against the panel edge.
+                int64_t ms = geVals[ci];
+                if (ms <= 0) {
+                    snprintf(buf, sizeof(buf), "--:--:--.--");
+                } else {
+                    int64_t s  = ms / 1000;
+                    int     cs = static_cast<int>((ms % 1000) / 10);
+                    snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%02d",
+                             static_cast<int>((s/3600)%24), static_cast<int>((s/60)%60),
+                             static_cast<int>(s%60), cs);
+                }
+                ImGui::TableSetColumnIndex(ci);
+                ImGui::TextColored(kGray, "%s", buf);
+            }
+            ImGui::EndTable();
+        }
     }
 
     ImGui::PopStyleVar();
@@ -5559,7 +5808,8 @@ void App::RenderLocationSection() {
     auto DmsRow = [&](const char* label, DmsCoord& dms, int maxDeg,
                       const char* posLabel, const char* negLabel,
                       const char* idD, const char* idM,
-                      const char* idSW, const char* idSF) {
+                      const char* idSW, const char* idSF,
+                      const char* tip) {
         bool t = false;
         int secW = static_cast<int>(dms.sec);
         int secF = static_cast<int>(std::lround((dms.sec - static_cast<float>(secW)) * 100.f));
@@ -5582,6 +5832,7 @@ void App::RenderLocationSection() {
             dms.pos = !dms.pos; t = true;
         }
         ImGui::SameLine(0, 6); ImGui::TextColored(kGray, "%s", label);
+        ImGui::SetItemTooltip("%s", tip);
         if (t) {
             dms.deg = std::clamp(dms.deg, 0, maxDeg);
             dms.min = std::clamp(dms.min, 0, 59);
@@ -5593,14 +5844,68 @@ void App::RenderLocationSection() {
         }
     };
 
-    // One coordinate per line, trailing label — Latitude, then Longitude.
-    DmsRow("Latitude",  m_latDms, 90,  "N##latn", "S##latn", "##latd", "##latm", "##latsw", "##latsf");
-    DmsRow("Longitude", m_lonDms, 180, "E##lone", "W##lone", "##lond", "##lonm", "##lonsw", "##lonsf");
+    // Both coordinates on one line, trailing label each — Latitude, Longitude.
+    DmsRow("Latitude",  m_latDms, 90,  "N##latn", "S##latn", "##latd", "##latm", "##latsw", "##latsf",
+           "Observer latitude (degrees/minutes/seconds). Edit directly, or\n"
+           "paste a Google Maps link below to fill it automatically.");
+    ImGui::SameLine(0, 14);
+    DmsRow("Longitude", m_lonDms, 180, "E##lone", "W##lone", "##lond", "##lonm", "##lonsw", "##lonsf",
+           "Observer longitude (degrees/minutes/seconds).");
 
     ImGui::SetNextItemWidth(100.f);
     ImGui::InputInt("##obs_alt", &m_obsAltM, 0);
     if (ImGui::IsItemDeactivatedAfterEdit()) SaveObserverSettings();
     ImGui::SameLine(0, 6); ImGui::TextColored(kGray, "Altitude");
+    ImGui::SetItemTooltip(
+        "Observer altitude above sea level (meters). Auto-filled from the\n"
+        "Open-Elevation API after pasting a Google Maps link (the link itself\n"
+        "does not contain altitude) -- can be overridden manually.");
+
+    // ── Explicit primary-engine choice — drives Timeline generation + T- ────
+    // IQP and BE are two independent calculation engines; neither is silently
+    // "more correct" -- this makes the choice of which one drives generated
+    // Timeline blocks and the countdown explicit instead of always biasing
+    // toward IQP.
+    ImGui::SameLine(0, 18);
+    bool priIqp = (m_primaryContactSrc == 0);
+    if (ImGui::RadioButton("IQP##pri", priIqp) && !priIqp) {
+        m_primaryContactSrc = 0;
+        m_configDb.SetSettingInt("primary_contact_src", 0);
+    }
+    ImGui::SetItemTooltip(
+        "IQP -- dedicated REST API operated by the besselianelements.com\n"
+        "team, queried live for this eclipse/location. Generally the more\n"
+        "accurate of the two engines (accounts for more factors than the\n"
+        "simplified Besselian elements below). Requires a free API key\n"
+        "(Options menu). Source: besselianelements.com\n"
+        "\n"
+        "Selecting it makes IQP the primary source for Timeline generation\n"
+        "(One Picture Per Minute, Totality Brackets, audio presets, Snap to\n"
+        "Seconds) and the T- countdown -- falls back to the local Besselian\n"
+        "model if IQP isn't available.");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("BE##pri", !priIqp) && priIqp) {
+        m_primaryContactSrc = 1;
+        m_configDb.SetSettingInt("primary_contact_src", 1);
+    }
+    ImGui::SetItemTooltip(
+        "BE -- \"Besselian Elements\" model, computed locally from this\n"
+        "eclipse's Besselian polynomial coefficients (Fred Espenak / NASA\n"
+        "GSFC dataset, 11,898 eclipses), using the algorithms from Jean\n"
+        "Meeus, \"Elements of Solar Eclipses\" (1989), following Greg\n"
+        "Miller's public-domain reference implementation\n"
+        "(celestialprogramming.com/apps/SolarEclipseViewer/eclipse.js).\n"
+        "Always available, no API key needed.\n"
+        "\n"
+        "NOTE: this model uses a smooth, perfectly circular lunar limb --\n"
+        "it does NOT apply lunar libration / limb-profile corrections\n"
+        "(mountains and valleys on the Moon's edge), so C2/C3 can be off\n"
+        "by roughly 1-2 seconds versus limb-corrected tools. C1/C4/Max are\n"
+        "much less sensitive to this and should stay closely in agreement.\n"
+        "\n"
+        "Use this model if you can't obtain an IQP API key.");
+    ImGui::SameLine();
+    ImGui::TextColored(kGray, "Choose prediction model");
 
     ImGui::PopStyleVar();
     ImGui::PopFont();
@@ -5637,6 +5942,10 @@ void App::RenderLocationSection() {
     ImGui::SetNextItemWidth(-1.f);
     ImGui::InputTextWithHint("##gmaps_url", "Paste Google Maps URL",
                               m_gmapsUrlBuf, sizeof(m_gmapsUrlBuf));
+    ImGui::SetItemTooltip(
+        "Paste a Google Maps link to auto-fill Latitude/Longitude (and\n"
+        "altitude via Open-Elevation). You can also just type coordinates\n"
+        "directly in the fields above -- no link needed.");
 
     // One button does both: parse the URL (if given) then calculate contact
     // times for the resulting (or unchanged) location. Turns green (same
@@ -5654,6 +5963,10 @@ void App::RenderLocationSection() {
     if (busy) ImGui::BeginDisabled();
     if (ImGui::Button(ctLoading ? "Calculating..." : "SET LOCATION & CALCULATE", ImVec2(-1, 0)))
         ApplyLocationAndCalculate();
+    ImGui::SetItemTooltip(
+        "Compute contact times C1-C4 for the current location: through the\n"
+        "IQP API (if a key is set in Options) and the local Besselian model\n"
+        "as comparison/fallback.");
     if (busy) ImGui::EndDisabled();
     if (ok) ImGui::PopStyleColor(4);
 
@@ -5710,7 +6023,7 @@ void App::RenderLocationSection() {
             { std::lock_guard lk(m_iqpMutex); ct = m_contacts; }
             ImGui::PushFont(m_fontMono);
             const char* msg =
-                !ct.apiOk    ? "network error"    :
+                !ct.apiOk    ? "To get IQP timings, set an API key in the Options menu" :
                 !ct.valid    ? "YOU ARE NOT IN TOTALITY ZONE!" :
                 ct.c2Ms > 0 ? "YOU ARE IN TOTALITY ZONE!" : "YOU ARE NOT IN TOTALITY ZONE!";
             const ImVec4& col =
@@ -5721,6 +6034,10 @@ void App::RenderLocationSection() {
             float avail = ImGui::GetContentRegionAvail().x;
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - textW) * 0.5f);
             ImGui::TextColored(col, "%s", msg);
+            ImGui::SetItemTooltip(
+                "Whether the current location falls inside the path of\n"
+                "totality/annularity, per the computed contact times (C2\n"
+                "existing means totality reaches this location).");
             ImGui::PopFont();
         }
     }
@@ -5746,7 +6063,7 @@ void App::RenderTimeSection() {
 
     ImGui::Spacing();
 
-    // ── Contact comparison table: IQP | BE | Loc | GE ────────────────────
+    // ── Contact comparison table: IQP | BE | Loc (GE moved to ECLIPSE section) ──
     int  iqpSt = m_iqpState.load();
     ContactTimes iqpCt;
     { std::lock_guard lk(m_iqpMutex); iqpCt = m_contacts; }
@@ -5760,46 +6077,67 @@ void App::RenderTimeSection() {
     int64_t sunriseMs = FindSunAltCrossing(true);
     int64_t sunsetMs  = FindSunAltCrossing(false);
 
-    auto FmtHM = [](int64_t ms, char* buf, int len) {
-        if (ms <= 0) { snprintf(buf, len, "--:--"); return; }
-        int64_t s = ms / 1000;
-        snprintf(buf, len, "%02d:%02d", (int)((s/3600)%24), (int)((s/60)%60));
-    };
     auto FmtLoc = [&](int64_t ms, char* buf, int len) {
         int64_t shifted = (ms > 0) ? ms + int64_t(offH) * 3600000LL : -1;
-        FmtHM(shifted, buf, len);
+        FormatContactHms(shifted, buf, len);
     };
 
     ImGui::PushFont(m_fontMono);
     constexpr float kLblW  = 34.f;
-    // Sized to fit exactly "12:34" (4 digits + colon) — the widest string
-    // FmtHM/FmtLoc ever produce for these four columns.
-    const float kDataW = ImGui::CalcTextSize("12:34").x + 6.f;
-    if (ImGui::BeginTable("##ct_tbl", 6,
+    // Sized to fit "12:34:56.789" (HH:MM:SS.mmm) — the widest string
+    // FormatContactHms/FmtLoc ever produce for these columns.
+    const float kDataW = ImGui::CalcTextSize("12:34:56.789").x - 1.f;
+    if (ImGui::BeginTable("##ct_tbl", 5,
             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_SizingFixedFit)) {
-        constexpr float kCdW = 150.f;   // "Xd HH:MM:SS.mmm" — widest countdown string
+        constexpr float kCdW = 144.f;   // "Xd HH:MM:SS.mmm" — widest countdown string
         ImGui::TableSetupColumn("##l", ImGuiTableColumnFlags_WidthFixed, kLblW);
         ImGui::TableSetupColumn("IQP", ImGuiTableColumnFlags_WidthFixed, kDataW);
         ImGui::TableSetupColumn("BE",  ImGuiTableColumnFlags_WidthFixed, kDataW);
         ImGui::TableSetupColumn("Loc", ImGuiTableColumnFlags_WidthFixed, kDataW);
-        ImGui::TableSetupColumn("GE",  ImGuiTableColumnFlags_WidthFixed, kDataW);
         ImGui::TableSetupColumn("T-",  ImGuiTableColumnFlags_WidthFixed, kCdW);
-        ImGui::TableHeadersRow();
+        // Manual header row (not TableHeadersRow()) so each column name can
+        // carry its own tooltip explaining what it means and where it's from.
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+        static const char* kColTip[5] = {
+            nullptr,
+            "Contact times from the dedicated IQP REST API (besselianelements.com)\n"
+            "-- higher-accuracy model, requires an API key set in Options.",
+            "Contact times from the local Besselian-elements model (Meeus/Miller)\n"
+            "-- always available, no API key needed.",
+            "The Primary engine's contact times (see the IQP/BE choice above),\n"
+            "shifted into the eclipse's local time zone (the other columns are\n"
+            "UTC). Rise/Set have no engine and always show local time.",
+            "Countdown to the next upcoming contact (C1/C2/Max/C3/C4) -- uses\n"
+            "whichever engine is set as Primary above, falling back to the\n"
+            "other one if unavailable.",
+        };
+        for (int ci = 0; ci < 5; ++ci) {
+            ImGui::TableSetColumnIndex(ci);
+            ImGui::TableHeader(ImGui::TableGetColumnName(ci));
+            if (kColTip[ci]) ImGui::SetItemTooltip("%s", kColTip[ci]);
+        }
 
         bool loading = (iqpSt == 1);
-        // Countdown source: IQP when available, else BE — same fallback the
-        // simulator status bar used before these countdowns moved here.
-        const ContactTimes& cdSrc = iqpCt.valid ? iqpCt : m_beResult;
-        struct CtRow { const char* lbl; int64_t iqp; int64_t be; int64_t ge; int64_t cd; };
+        // Countdown source: whichever engine the user picked as primary
+        // (falls back to the other if the chosen one isn't valid yet).
+        const ContactTimes cdSrc = PrimaryContacts();
+        struct CtRow { const char* lbl; int64_t iqp; int64_t be; int64_t cd; const char* tip; };
         CtRow ctRows[] = {
-            { "C1",  iqpCt.c1Ms,  m_beResult.c1Ms,  m_geResult.c1Ms,  cdSrc.c1Ms  },
-            { "C2",  iqpCt.c2Ms,  m_beResult.c2Ms,  m_geResult.c2Ms,  cdSrc.c2Ms  },
-            { "Max", iqpCt.maxMs, m_beResult.maxMs, m_geResult.maxMs, cdSrc.maxMs },
-            { "C3",  iqpCt.c3Ms,  m_beResult.c3Ms,  m_geResult.c3Ms,  cdSrc.c3Ms  },
-            { "C4",  iqpCt.c4Ms,  m_beResult.c4Ms,  m_geResult.c4Ms,  cdSrc.c4Ms  },
-            { "Rise",sunriseMs,   sunriseMs,          -1,             -1          },
-            { "Set", sunsetMs,    sunsetMs,           -1,             -1          },
+            { "C1",  iqpCt.c1Ms,  m_beResult.c1Ms,  cdSrc.c1Ms,
+              "First contact -- the Moon's disc first touches the Sun\n(partial eclipse begins)." },
+            { "C2",  iqpCt.c2Ms,  m_beResult.c2Ms,  cdSrc.c2Ms,
+              "Second contact -- totality/annularity begins." },
+            { "Max", iqpCt.maxMs, m_beResult.maxMs, cdSrc.maxMs,
+              "Greatest eclipse -- point of maximum obscuration." },
+            { "C3",  iqpCt.c3Ms,  m_beResult.c3Ms,  cdSrc.c3Ms,
+              "Third contact -- totality/annularity ends." },
+            { "C4",  iqpCt.c4Ms,  m_beResult.c4Ms,  cdSrc.c4Ms,
+              "Fourth contact -- the Moon's disc leaves the Sun\n(partial eclipse ends)." },
+            { "Rise",sunriseMs,   sunriseMs,          -1,
+              "Sunrise at the observer's location on the eclipse date." },
+            { "Set", sunsetMs,    sunsetMs,           -1,
+              "Sunset at the observer's location on the eclipse date." },
         };
         static constexpr int kCtRowN = 7;
         static_assert(sizeof(ctRows)/sizeof(ctRows[0]) == kCtRowN);
@@ -5807,15 +6145,18 @@ void App::RenderTimeSection() {
         for (int ri = 0; ri < kCtRowN; ++ri) {
             const auto& r = ctRows[ri];
             ImGui::TableNextRow();
-            char i1[8], i2[8], i3[8], i4[8], i5[32];
-            FmtHM(r.iqp,  i1, sizeof(i1));
-            FmtHM(r.be,   i2, sizeof(i2));
-            FmtLoc(r.iqp, i3, sizeof(i3));
-            FmtHM(r.ge,   i4, sizeof(i4));
+            char i1[16], i2[16], i3[16], i5[32];
+            FormatContactHms(r.iqp, i1, sizeof(i1));
+            FormatContactHms(r.be,  i2, sizeof(i2));
+            // Loc follows the primary-source selection (r.cd), not IQP
+            // unconditionally -- Rise/Set have no primary (r.cd == -1) and
+            // fall back to r.iqp, which for those rows already equals be.
+            FmtLoc(r.cd > 0 ? r.cd : r.iqp, i3, sizeof(i3));
             if (r.cd > 0) FormatCountdown(r.cd - nowMs, i5, sizeof(i5));
             else          snprintf(i5, sizeof(i5), "--");
 
             ImGui::TableSetColumnIndex(0); ImGui::TextColored(kGray, "%s", r.lbl);
+            ImGui::SetItemTooltip("%s", r.tip);
             ImGui::TableSetColumnIndex(1);
                 if (loading) ImGui::TextColored(kDim, "...");
                 else         ImGui::TextColored(kBlue, "%s", i1);
@@ -5823,8 +6164,7 @@ void App::RenderTimeSection() {
             ImGui::TableSetColumnIndex(3);
                 if (loading) ImGui::TextColored(kDim, "...");
                 else         ImGui::TextColored(kGray, "%s", i3);
-            ImGui::TableSetColumnIndex(4); ImGui::TextColored(kDim,  "%s", i4);
-            ImGui::TableSetColumnIndex(5); ImGui::TextColored(kGold, "%s", i5);
+            ImGui::TableSetColumnIndex(4); ImGui::TextColored(kGold, "%s", i5);
         }
         ImGui::EndTable();
     }
@@ -5840,8 +6180,11 @@ void App::RenderHardwareSection() {
     bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
 
     // Three buttons side by side: status/connect | Test picture | Disconnect.
-    // Fixed 135px each.
-    constexpr float kBtnW = 135.0f;
+    // Evenly split across the available width (not a hardcoded guess) so
+    // they fill the left section instead of leaving trailing dead space.
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float gap   = ImGui::GetStyle().ItemSpacing.x;
+    const float kBtnW = (avail - gap * 2.f) / 3.f;
     auto TextW = [&](const char*) { return kBtnW; };
     const ImVec2 btnSzMid  (kBtnW, 28);
     const ImVec2 btnSzRight(kBtnW, 28);
@@ -5858,6 +6201,7 @@ void App::RenderHardwareSection() {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.08f, 0.45f, 0.14f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  1.0f,  1.0f,  1.0f));
             ImGui::Button("Camera connected", ImVec2(TextW("Camera connected"), 28));
+            ImGui::SetItemTooltip("All detected Sony cameras are connected via CrSDK.");
             ImGui::PopStyleColor(4);
         } else if (m_connecting) {
             ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.65f, 0.38f, 0.05f, 1.0f));
@@ -5866,6 +6210,8 @@ void App::RenderHardwareSection() {
             ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  1.0f,  1.0f,  1.0f));
             ImGui::BeginDisabled();
             ImGui::Button("Connecting...", ImVec2(TextW("Connecting..."), 28));
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Starting TotalControlSRV.exe and connecting to cameras...");
             ImGui::EndDisabled();
             ImGui::PopStyleColor(4);
         } else {
@@ -5880,6 +6226,12 @@ void App::RenderHardwareSection() {
                     LogLine(m_lastResult);
                 }
             }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(
+                    "Launches TotalControlSRV.exe (if not already running) and connects\n"
+                    "to all detected Sony cameras via CrSDK. The camera must already be\n"
+                    "set to remote-control mode (M/Manual, RAW, MF, USB: Camera Control\n"
+                    "by PC) before connecting.");
             if (srvRunning) ImGui::EndDisabled();
         }
     }
@@ -5904,6 +6256,11 @@ void App::RenderHardwareSection() {
             LogLine(m_lastResult);
         }
     }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(
+            "Fires one test shot with fixed parameters (1/8000s, ISO 100, f/8)\n"
+            "regardless of the camera's current settings -- verifies the\n"
+            "connection/shutter, not the current exposure.");
     if (!connected) ImGui::EndDisabled();
 
     ImGui::SameLine();
@@ -5917,6 +6274,8 @@ void App::RenderHardwareSection() {
         m_lastResult = "Server stopped.";
         LogLine("SRV quit sent");
     }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Disconnects all cameras and stops TotalControlSRV.exe.");
     if (!connected) ImGui::EndDisabled();
 
     ImGui::Spacing();
@@ -6417,14 +6776,16 @@ void App::RenderCamConfigWindows() {
 
         // ── Detected parameters (read-only) ─────────────────────────────────
         ImGui::SeparatorText("Detected Parameters");
+        ImGui::SetItemTooltip("Live camera parameters -- same source as the CAMERA STATUS table\nin the left column.");
 
-        auto Row = [&](const char* key, const std::string& val) {
+        auto Row = [&](const char* key, const std::string& val, const char* tip = nullptr) {
             ImGui::TextColored(kGray, "%s", key); ImGui::SameLine(90.f);
             if (online) ImGui::TextUnformatted(val.c_str());
             else        ImGui::TextColored(kDim, "-");
+            if (tip) ImGui::SetItemTooltip("%s", tip);
         };
 
-        Row("Model",   cc.model);
+        Row("Model",   cc.model, "Camera model and unique identifier -- recorded once on first\ndetection, never change afterward.");
         Row("GUID",    cc.guid);
         if (online) {
             // Battery bar + percent
@@ -6476,12 +6837,21 @@ void App::RenderCamConfigWindows() {
             m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP,
                                      cc.trackMode, cc.horizonAltDeg, cc.horizonAzDeg);
         }
+        ImGui::SetItemTooltip(
+            "Focal length of the lens on this camera (mm) -- drives the frame\n"
+            "outline drawn in the Solar Simulator; 0 = no frame. Free text, so\n"
+            "zoom ranges like \"100-400\" are also accepted.");
         ImGui::SameLine(); ImGui::TextColored(kGray, "mm");
 
         ImGui::TextColored(kGray, "Apply P");  ImGui::SameLine(90.f);
         if (ImGui::Checkbox("##applyP_cfg", &cc.applyP))
             m_configDb.SaveCamConfig(cc.guid, cc.model, cc.focalMm, cc.applyP,
                                      cc.trackMode, cc.horizonAltDeg, cc.horizonAzDeg);
+        ImGui::SetItemTooltip(
+            "Whether this camera's frame outline rotates with the field angle\n"
+            "(P-q) in the Solar Simulator (true = frame follows sky rotation,\n"
+            "e.g. an equatorially-mounted telescope) or stays horizontal\n"
+            "(false, e.g. a tripod with no field-rotation tracking).");
         ImGui::SameLine();
         ImGui::TextColored(kDim, cc.applyP ? "corona (P rotation)" : "horizontal (landscape)");
 
@@ -6491,9 +6861,16 @@ void App::RenderCamConfigWindows() {
         {
             bool changed = false;
             int  tm      = static_cast<int>(cc.trackMode);
-            changed |= ImGui::RadioButton("Sun##tm",     &tm, 0); ImGui::SameLine();
-            changed |= ImGui::RadioButton("Moon##tm",    &tm, 1); ImGui::SameLine();
+            changed |= ImGui::RadioButton("Sun##tm",     &tm, 0);
+            ImGui::SetItemTooltip("Frame outline follows the Sun's position in the sky.");
+            ImGui::SameLine();
+            changed |= ImGui::RadioButton("Moon##tm",    &tm, 1);
+            ImGui::SetItemTooltip("Frame outline follows the Moon's position in the sky.");
+            ImGui::SameLine();
             changed |= ImGui::RadioButton("Horizon##tm", &tm, 2);
+            ImGui::SetItemTooltip(
+                "Frame outline stays fixed at a manually-set Alt/Az -- drag it on\n"
+                "the Solar Simulator to set the position.");
             if (changed) {
                 CamTrackMode newMode = static_cast<CamTrackMode>(tm);
                 // Switching TO Horizon: seed from last known Sun position so
@@ -6554,7 +6931,7 @@ void App::RenderMenuBar() {
         ImGui::Separator();
 
         if (ImGui::MenuItem("Quit", "Alt+F4"))
-            PostQuitMessage(0);
+            m_showCloseConfirm = true; // same confirmation path as the window's X button
 
         ImGui::EndMenu();
     }
@@ -6671,6 +7048,8 @@ void App::RenderMenuBar() {
             m_showAbout = true;
         if (ImGui::MenuItem("What's New"))
             m_showWhatsNew = true;
+        if (ImGui::MenuItem("Camera Setup"))
+            m_showCameraSetup = true;
         if (ImGui::MenuItem("Open GitHub")) {
             ShellExecuteW(nullptr, L"open",
                 L"https://github.com/mrmgrpl/TotalControl",
@@ -6688,7 +7067,17 @@ void App::RenderOptionsWindow() {
     assert(true); // invariant: always callable; m_showOptions guards early-out
     if (!m_showOptions) return;
 
-    ImGui::SetNextWindowSize(ImVec2(460, 220), ImGuiCond_FirstUseEver);
+    static const char* kLongestLine =
+        "No key:   C1-C4 times from local Besselian model (green column).";
+
+    ImGui::PushFont(m_fontMono);
+    // Size the window to fit the longest line with no horizontal clipping and
+    // no scrollbar, then apply a 16:9 aspect ratio on top of that width.
+    const float kWinW = ImGui::CalcTextSize(kLongestLine).x + 40.f;
+    const float kWinH = kWinW * 9.f / 16.f;
+    ImGui::PopFont();
+
+    ImGui::SetNextWindowSize(ImVec2(kWinW, kWinH), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
 
@@ -6703,8 +7092,8 @@ void App::RenderOptionsWindow() {
     ImGui::PushFont(m_fontMono);
 
     // ── IQP API Key ────────────────────────────────────────────────────────────
-    ImGui::TextColored(kGold, "IQP API Key  (besselianelements.com)");
-    ImGui::TextColored(kGray, "40-char hex key -- contact the besselianelements.com team to obtain one:");
+    ImGui::TextColored(kGold, "IQP API Key");
+    ImGui::TextColored(kGray, "40-char hex key -- contact the team to obtain one:");
     ImGui::TextColored(kLink, "  https://www.besselianelements.com/");
     ImGui::TextColored(kGray, "No key:   C1-C4 times from local Besselian model (green column).");
     ImGui::TextColored(kGray, "With key: C1-C4 times from IQP API automatically (blue column).");
@@ -6714,12 +7103,18 @@ void App::RenderOptionsWindow() {
     ImGuiInputTextFlags keyFlags = m_beKeyVisible
         ? ImGuiInputTextFlags_None
         : ImGuiInputTextFlags_Password;
-    ImGui::SetNextItemWidth(310.f);
+    ImGui::SetNextItemWidth(-160.f);   // stretch to fill width, leaving room for the two buttons
     bool edited = ImGui::InputText("##be_api_key", m_beApiKeyBuf,
                                    sizeof(m_beApiKeyBuf), keyFlags);
+    ImGui::SetItemTooltip(
+        "API key to besselianelements.com (40-char hex) -- without a key the\n"
+        "app computes contacts only with the local Besselian model (BE); with\n"
+        "a key it also fetches the more accurate IQP result for comparison.\n"
+        "Stored only locally in TotalControlConfig.db, never in the repo/code.");
     ImGui::SameLine();
     if (ImGui::Button(m_beKeyVisible ? "Hide" : "Show"))
         m_beKeyVisible = !m_beKeyVisible;
+    ImGui::SetItemTooltip("Reveal/mask the entered API key on screen.");
     ImGui::SameLine();
     if (ImGui::Button("Apply")) {
         std::string newKey = m_beApiKeyBuf;
@@ -6727,22 +7122,72 @@ void App::RenderOptionsWindow() {
         if (m_configDb.IsOpen())
             m_configDb.SetSetting("be_api_key", newKey.c_str());
     }
+    ImGui::SetItemTooltip("Save the key and use it starting with the next \"Calculate contact times\".");
     (void)edited; // InputText result not needed here — Apply is explicit
 
-    // Live status: which API will be used on next Calculate Contacts
+    // Live status: which source will actually be used on next Calculate Contacts.
+    // A key present means the dedicated IQP REST API is used (not "BE" — the
+    // local Besselian model is precisely the *fallback* used when there's no key).
     std::string activeKey = GetBeApiKey();
     if (!activeKey.empty()) {
         ImGui::TextColored(kGreen,
-            "  BE REST API active  (%s...)",
+            "  IQP REST API active  (%s...)",
             activeKey.substr(0, 8).c_str());
     } else {
         ImGui::TextColored(kGray,
-            "  Classic IQP API (maps.besselianelements.com)");
+            "  No key set - using local Besselian model (BE)");
     }
 
     assert(true); // postcondition: all controls rendered
     ImGui::PopFont();
     ImGui::End();
+}
+
+// ─── Close confirmation ───────────────────────────────────────────────────────
+// Guards against an accidental window-close (X button / Alt+F4) during the
+// eclipse — WM_CLOSE is deferred here instead of closing immediately
+// (see App::OnCloseRequest / main_gui.cpp WndProc).
+void App::RenderCloseConfirmModal() {
+    assert(!m_closeConfirmed || !m_showCloseConfirm); // never both at once
+    if (!m_showCloseConfirm) return;
+
+    ImGui::OpenPopup("Close TotalControl?");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("Close TotalControl?", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize))
+        return;
+
+    ImGui::PushFont(m_fontMono);
+    bool connected = (m_pipe.GetState() == PipeClient::State::Connected);
+    ImGui::TextUnformatted("Close TotalControl GUI?");
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.80f, 1.0f),
+        "Restarting the GUI takes about 5 seconds.");
+    if (connected)
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.20f, 1.0f),
+            "The camera server keeps running -- it is NOT closed by this.");
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const float btnW = ImGui::CalcTextSize("Close TotalControl").x + 24.f;
+    if (ImGui::Button("Cancel", ImVec2(btnW, 0))) {
+        m_showCloseConfirm = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.55f, 0.12f, 0.10f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.16f, 0.14f, 1.0f));
+    if (ImGui::Button("Close TotalControl", ImVec2(btnW, 0))) {
+        m_showCloseConfirm = false;
+        m_closeConfirmed   = true;
+        ImGui::CloseCurrentPopup();
+        RequestRealWindowClose();
+    }
+    ImGui::PopStyleColor(2);
+    ImGui::PopFont();
+    ImGui::EndPopup();
 }
 
 // ─── Minimal markdown renderer (no external library — hand-written, project convention) ───
@@ -6954,6 +7399,75 @@ void App::RenderWhatsNewModal() {
     ImGui::EndPopup();
 }
 
+// ─── Camera Setup how-to (About menu -> Camera Setup) ─────────────────────────
+// USB Connection Mode step + per-series label table sourced from Sony's own
+// Imaging Edge documentation (see link rendered below) -- confirms this
+// setting genuinely is model-dependent, resolving the open question from
+// John Melson's original "how do I set this up" report (see ROADMAP.md).
+void App::RenderCameraSetupModal() {
+    assert(true); // invariant: always callable; m_showCameraSetup guards early-out
+    if (!m_showCameraSetup) return;
+    ImGui::OpenPopup("Camera Setup");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+
+    if (!ImGui::BeginPopupModal("Camera Setup", &m_showCameraSetup,
+                                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize))
+        return;
+
+    static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
+    static const ImVec4 kGray {0.55f, 0.55f, 0.60f, 1.0f};
+    static const ImVec4 kLink {0.45f, 0.75f, 1.00f, 1.0f};
+
+    ImGui::PushFont(m_fontMono);
+    ImGui::TextColored(kGold, "Before connecting");
+    ImGui::TextColored(kGray, "  On the camera, perform the following settings:");
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  1. Exposure mode:       M  (Manual)");
+    ImGui::TextColored(kGray, "  2. Image quality:       RAW");
+    ImGui::TextColored(kGray, "  3. Focus mode:          MF  (Manual Focus)");
+    ImGui::TextColored(kGray, "  4. USB Connection Mode: MENU -> Setup -> [USB] ->");
+    ImGui::TextColored(kGray, "       [USB Connection Mode] -> select the \"Remote");
+    ImGui::TextColored(kGray, "       Shoot\" option (exact label varies by model --");
+    ImGui::TextColored(kGray, "       see table below)");
+    ImGui::TextColored(kGray, "  5. Connect the USB cable to the computer.");
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  Then click \"Connect camera\" in the SERVER section.");
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextColored(kGold, "\"USB Connection Mode\" label by camera series");
+    ImGui::TextColored(kGray, "  ILCE-1M2/1/9M3, ILCE-7SM3/7RM5/7M4:  \"Remote Shooting\"");
+    ImGui::TextColored(kGray, "  ILCE-7CR/7CM2/6700, ZV-1F/1M2:  \"Remote Shoot (PC Remote)\"");
+    ImGui::TextColored(kGray, "  ILCE-7RM6/7M5, DSC-RX10M5:  \"Remote Shoot/Trn.\"");
+    ImGui::TextColored(kGray, "  Other models: check your camera's manual for the");
+    ImGui::TextColored(kGray, "  equivalent \"remote shooting\" USB mode.");
+    ImGui::Spacing();
+    ImGui::TextColored(kGray, "  Wi-Fi-capable cameras: disconnect from any paired");
+    ImGui::TextColored(kGray, "  smartphone first.");
+    ImGui::Spacing();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kLink);
+    if (ImGui::MenuItem("Source: support.d-imaging.sony.co.jp (Sony Imaging Edge)"))
+        ShellExecuteW(nullptr, L"open",
+            L"https://support.d-imaging.sony.co.jp/app/imagingedge/en/instruction/4_1_connection.php",
+            nullptr, nullptr, SW_SHOWNORMAL);
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    float btnW = 80.f;
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - btnW) * 0.5f);
+    if (ImGui::Button("Close", ImVec2(btnW, 0)))
+        m_showCameraSetup = false;
+    ImGui::PopFont();
+
+    ImGui::EndPopup();
+}
+
 // ─── Main frame ───────────────────────────────────────────────────────────────
 
 void App::OnFrame() {
@@ -6997,11 +7511,28 @@ void App::OnFrame() {
     // ── About + Options + snapshot modals ────────────────────────────────
     RenderAboutModal();
     RenderWhatsNewModal();
+    RenderCameraSetupModal();
     RenderOptionsWindow();
+    RenderCloseConfirmModal();
     if (m_configDb.IsOpen()) RenderSnapshotModal();
 
-    const float kLeftW = 420.0f;   // Left column: Eclipse/Location/Time/Hardware/Execute
-                                    // (300 + ~120 for the T- countdown column in the TIME table)
+    // Left column width: sized to fit RenderTimeSection's ##ct_tbl (label +
+    // 3 HH:MM:SS.mmm data columns + Xd HH:MM:SS.mmm countdown column) plus a
+    // fixed chrome allowance for borders/cell padding and the child window's
+    // vertical scrollbar (content is taller than the panel), minus an 88px
+    // trim (2026-07-19 feedback: panel was wider than needed in practice).
+    assert(m_fontMono != nullptr);
+    ImGui::PushFont(m_fontMono);
+    const float kCtDataW  = ImGui::CalcTextSize("12:34:56.789").x - 1.f;
+    const float kMargin9  = ImGui::CalcTextSize("123456789").x;
+    ImGui::PopFont();
+    constexpr float kCtLblW  = 34.f;
+    constexpr float kCtCdW   = 144.f;
+    constexpr float kCtChrome = 40.f;   // table borders + per-column cell padding
+    constexpr float kCtTrim   = 88.f;   // manual trim per feedback
+    const float kScrollbarW  = ImGui::GetStyle().ScrollbarSize;
+    const float kLeftW = kCtLblW + 3.f * kCtDataW + kCtCdW + kCtChrome
+                       + kMargin9 + kScrollbarW - kCtTrim;
     const float kInspW = 220.0f;   // Right column: Inspector + Palette
     const float totalH = io.DisplaySize.y - menuH;
     const float totalW = io.DisplaySize.x;
@@ -7091,7 +7622,11 @@ void App::OnFrame() {
     }
 }
 
-bool App::OnCloseRequest() { return true; }
+bool App::OnCloseRequest() {
+    if (m_closeConfirmed) return true;   // second pass, after user confirmed
+    m_showCloseConfirm = true;           // defer to the modal, block this close
+    return false;
+}
 
 // ─── Daemon launch ────────────────────────────────────────────────────────────
 

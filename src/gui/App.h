@@ -91,7 +91,9 @@ private:
     void RenderMenuBar();
     void RenderAboutModal();
     void RenderWhatsNewModal();      // separate modal, opened via About menu -> What's New
+    void RenderCameraSetupModal();   // separate modal, opened via About menu -> Camera Setup
     void RenderOptionsWindow();      // floating Options window (API keys, etc.)
+    void RenderCloseConfirmModal();  // "close TotalControl?" guard against accidental exit
     void RenderSequencerButtons();   // TEST RUN / STOP / RUN / STOP RUN in Col1
     void RenderLeftColumn();         // new single 270px left column
     void RenderLocationSection();    // observer DMS + totality status
@@ -108,9 +110,13 @@ private:
     void DuplicateSelectedBlock();
     static void ApplyStyleDark();
     void RenderMarkdownBody(const std::string& md); // minimal # / ## / "- " renderer
-    bool m_showAbout    = false;
-    bool m_showWhatsNew = false;
-    bool m_showOptions  = false;
+    bool m_showAbout       = false;
+    bool m_showWhatsNew    = false;
+    bool m_showCameraSetup = false;
+    bool m_showOptions     = false;
+    // ── Close confirmation guard ────────────────────────────────────────────
+    bool m_showCloseConfirm = false; // WM_CLOSE deferred to this modal instead of closing immediately
+    bool m_closeConfirmed   = false; // set true right before re-issuing the real close
     std::string m_whatsNewMd;      // raw contents of WHATS_NEW.md, loaded lazily
     bool        m_whatsNewLoaded = false;
 
@@ -287,6 +293,10 @@ private:
     ContactTimes       m_contacts;
     ContactTimes       m_beResult;
     ContactTimes       m_geResult;   // BesselCalc at eclipse GE lat/lon
+    // Explicit user choice of which engine drives Timeline generation and the
+    // T- countdown (falls back to the other if the chosen one is invalid) --
+    // 0 = IQP, 1 = BE. Persisted as "primary_contact_src" in Config.db.
+    int                m_primaryContactSrc = 0;
     std::atomic<int>   m_iqpState{0};  // 0=Idle 1=Loading 2=Ready 3=Error
     float              m_iqpFetchedLat = 1e9f;
     float              m_iqpFetchedLon = 1e9f;
@@ -364,6 +374,13 @@ private:
     // contact times are available yet.
     int64_t SnapMsToRelativeSecond(int64_t ms);
 
+    // Snapshots m_contacts (thread-safe) and returns whichever engine the
+    // user picked as "primary" (m_primaryContactSrc), falling back to the
+    // other engine if the chosen one isn't valid yet. Used everywhere
+    // Timeline generation / countdowns need a single, explicit answer
+    // instead of biasing toward IQP silently.
+    ContactTimes PrimaryContacts();
+
     // ── Execution log ────────────────────────────────────────────────────────
     // Sequence counter reset at each TEST RUN / RUN start.
     // Written by main thread (StartSeqThread), incremented by seqThread.
@@ -414,6 +431,15 @@ private:
     // rendered in RenderSolarView as alpha-blended quad matching camera FOV rect.
     bool   m_lvEnabled[kMaxCamTracks] = {};       // derived: true when m_lvOpacity[ci] >= 0.05
     float  m_lvOpacity[kMaxCamTracks] = {};       // per-camera opacity 0–1 (persisted to DB)
+
+    // Focus Magnifier (CrDeviceProperty_Focus_Magnifier_Setting) — needed because
+    // the camera only auto-triggers its live-view zoom when it senses a native
+    // lens's electronic focus ring turning. Passive/manual optics (e.g. a
+    // telescope) never send that signal, so this has to be set remotely instead.
+    // Confirmed on real hardware (ILCE-7RM4A, 2026-07-20). Button index into
+    // RenderSolarView's kFmLabels/kFmValues: 0=Off / 1=x1.0 / 2=x5.9 / 3=x11.9
+    // — see CommandHandler.cpp DecodePropValue for the raw wire encoding.
+    int    m_focusMagLevel[kMaxCamTracks] = { 1, 1, 1, 1 };
 
     struct LvFrame { std::vector<uint8_t> rgba; int w = 0, h = 0; };
     LvFrame                         m_lvPending[kMaxCamTracks];

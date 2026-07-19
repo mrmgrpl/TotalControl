@@ -461,6 +461,20 @@ bool CameraController::SetProp(uint32_t code, uint32_t dataType, long long value
     return SetPropRaw(code, dataType, value, desc ? desc : L"SetProp");
 }
 
+bool CameraController::DumpAllProps(std::vector<std::pair<uint32_t, uint64_t>>& out) {
+    out.clear();
+    if (!m_connected || m_deviceHandle == 0) return false;
+    auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
+    if (SDK::GetDeviceProperties(h, &props, &num) != 0 || !props) return false;
+    out.reserve(static_cast<size_t>(num));
+    for (CrInt32 i = 0; i < num; ++i)
+        out.emplace_back(static_cast<uint32_t>(props[i].GetCode()),
+                          static_cast<uint64_t>(props[i].GetCurrentValue()));
+    SDK::ReleaseDeviceProperties(h, props);
+    return true;
+}
+
 bool CameraController::GetPropRaw(uint32_t code, uint64_t& out) {
     if (!m_connected) return false;
     auto h    = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);

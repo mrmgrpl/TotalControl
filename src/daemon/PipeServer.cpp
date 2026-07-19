@@ -71,7 +71,10 @@ void PipeServer::Run() {
 
 // ── Client handler (runs in detached worker thread) ───────────────────────────
 // Reads JSON Lines from pipe, invokes handler under m_handlerMtx (serialised),
-// writes JSON response. Exits when client disconnects or handler returns false.
+// writes JSON response. Exits when client disconnects; a handler returning
+// false (e.g. "quit") also stops the whole server, not just this client —
+// otherwise the accept loop in Run() keeps the process alive as long as any
+// other client (e.g. the GUI's persistent connection) stays connected.
 void PipeServer::ServeClient(HANDLE pipe) {
     assert(pipe != INVALID_HANDLE_VALUE);
     assert(pipe != nullptr);
@@ -121,7 +124,10 @@ void PipeServer::ServeClient(HANDLE pipe) {
                        static_cast<DWORD>(respU8.size()), &written, nullptr))
             break; // client disconnected during write
 
-        if (!continueRunning) break; // handler requested quit (e.g. "quit" command)
+        if (!continueRunning) {
+            Stop(); // full shutdown requested — unblocks Run()'s accept loop too
+            break;
+        }
     }
 
     FlushFileBuffers(pipe);
