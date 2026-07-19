@@ -1,0 +1,22 @@
+conte = document.getElementById('cont_OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx');enlace = document.getElementById('spa_OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx');anchor = document.getElementById('a_OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx');var url = anchor.href;var ua = navigator.userAgent.toLowerCase();check = function(r) {
+  return r.test(ua);
+};isWebKit = check(/webkit/);isGecko = !isWebKit && check(/gecko/);var text = '';if (isGecko) {
+  text = encodeURI(anchor.text);
+}
+else {
+  text = encodeURI(anchor.innerText);
+}
+
+enlace.style.cssText = 'font:normal 10px/12px Tahoma, Arial, Helvetica, serif; color:#333; padding:0 0 3px; text-decoration: none;';
+conte.style.cssText = 'width:280px;';
+elem = document.createElement('iframe');
+elem.id = 'OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx';
+elem.src = 'https://widget.meteocity.com/OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx/';
+elem.style.border = 'none';
+elem.allowTransparency = true;
+elem.style.overflow = 'hidden';
+elem.scrolling = 'no';
+elem.name = 'frame';
+elem.height = '60';
+elem.width = '280';
+conte.insertBefore(elem, enlace);

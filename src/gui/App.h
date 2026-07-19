@@ -90,6 +90,7 @@ private:
     void RenderTimelineBottom();
     void RenderMenuBar();
     void RenderAboutModal();
+    void RenderWhatsNewModal();      // separate modal, opened via About menu -> What's New
     void RenderOptionsWindow();      // floating Options window (API keys, etc.)
     void RenderSequencerButtons();   // TEST RUN / STOP / RUN / STOP RUN in Col1
     void RenderLeftColumn();         // new single 270px left column
@@ -106,8 +107,12 @@ private:
     void DeleteSelectedBlock();
     void DuplicateSelectedBlock();
     static void ApplyStyleDark();
+    void RenderMarkdownBody(const std::string& md); // minimal # / ## / "- " renderer
     bool m_showAbout    = false;
+    bool m_showWhatsNew = false;
     bool m_showOptions  = false;
+    std::string m_whatsNewMd;      // raw contents of WHATS_NEW.md, loaded lazily
+    bool        m_whatsNewLoaded = false;
 
     // ── BE REST API key (40 hex chars, stored in Config.db, never in source) ────
     char m_beApiKeyBuf[48] = {};   // InputText buffer; 40 chars + null

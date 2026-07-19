@@ -1,0 +1,880 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html lang="en-US">
+
+<head>
+ <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+ <meta http-equiv="Window-target" content="_top">
+ <meta http-equiv="Author" content="Xavier Jubier">
+ <meta http-equiv="Content-Language" content="en">
+<!--[if IE]>
+ <meta http-equiv="X-UA-Compatible" content="IE=edge">
+<![endif]-->
+
+ <meta name="copyright" content="1991-2025 by Xavier M. Jubier">
+ <meta name="expires" content="never">
+ <meta name="revisit-after" content="7 days">
+ <meta name="robots" content="index,follow">
+ <meta name="author" content="Xavier Jubier">
+ <meta name="MSSmartTagsPreventParsing" content="true">
+ <meta name="subject" content="'Solar Eclipse Exposure and Field of View Calculator'">
+ <meta name="rating" content="general">
+ <meta name="keywords" content="solar, eclipse, calculator, time, exposure, shutter, speed, aperture, field, view, sun, Jubier">
+ <meta name="description" content="Solar Eclipse Calculator for determining the time exposure and field of view by Xavier Jubier">
+
+ <link rel="shortcut icon" href="http://xjubier.free.fr/favicon.ico" type="image/x-icon">
+ <link rel="icon" href="http://xjubier.free.fr/favicon.ico" type="image/ico">
+ <link rel="home" href="http://xjubier.free.fr/en/index_en.html">
+ <link rel="index" href="http://xjubier.free.fr/en/site_pages/sitemap.html">
+ <link rel="alternate" href="http://xjubier.free.fr/en/index.xml" type="application/rss+xml" title="RSS 2.0">
+
+ <script language="JavaScript" type="text/javascript" src="../../javascript/EclipseExposureCalculator.js"></script>
+ <script src="http://www.googletagmanager.com/gtag/js?id=G-TKGCRDT1Y8" async></script>
+ <script language="JavaScript" type="text/javascript" src="../../javascript/Analytics4Tracking.js"></script>
+ <script language="JavaScript" type="text/javascript" src="../../javascript/AnalyticsTracking.js"></script>
+
+ <link rel="stylesheet" href="../../styles/commonprivate.css" type="text/css">
+
+ <title>Solar Eclipse Time Exposure Calculator - Xavier Jubier</title>
+</head>
+
+<body onload="CalcExposure('en');">
+
+<!-- V&eacute;rification du support de JavaScript -->
+<noscript>
+ <div class="jsError">
+  ERROR<br><br>
+  Javascript isn&rsquo;t activated or your browser does not support Javascript<br><br>
+  You cannot browse this web page and site correctly before activating Javascript in the browser prefs
+ </div>
+</noscript>
+
+ <table border="0" cellspacing="0" cellpadding="2" style="border-left: solid 1px black; border-top: solid 1px black; border-right: solid 1px black; border-bottom: solid 1px black; background-color: white;">
+  <tr valign="top">
+   <td>
+<!-- La barre des chevrons -->
+    <table border="0" cellspacing="0" cellpadding="5" style="border-bottom: solid 1px lightgrey;" width="100%">
+     <tr>
+      <td class="Chevrons" align="left" valign="middle" nowrap>
+       <a href="../index_en.html" class="Chevrons" title="Travel Landscape Eclipse Xavier Jubier">Home</a>&nbsp;&gt;&nbsp;<a href="eclipses.html" class="Chevrons" title="Eclipses">Eclipses</a>&nbsp;&gt;&nbsp;<a href="Solar_Eclipses.html" class="Chevrons">Solar Eclipses</a>&nbsp;&gt;&nbsp;Solar Eclipse Time Exposure Calculator
+      </td>
+      <td class="Language" align="right" valign="middle" nowrap>
+       <a href="../../site_pages/SolarEclipseExposure.html" class="Language" title="Page en Fran&ccedil;ais"><img src="../../images/Flag_France.gif" width="26" height="16" border="0" title="Fran&ccedil;ais" alt="Drapeau Langue" style="vertical-align: middle;">Fran&ccedil;ais</a>
+      </td>
+     </tr>
+    </table>
+<!-- Calculatrice -->
+    <table border="0" cellspacing="2" cellpadding="2" width="100%">
+     <tr>
+      <td>
+       <h1 align="center">Shutter Speed Calculator for Solar Eclipses (v1.0.2)</h1>
+      </td>
+     </tr>
+     <tr>
+      <td>
+       <div align="center">
+       <center>
+       <table border="0" cellspacing="1" cellpadding="4">
+        <tr style="background-color: #666699;">
+         <td colspan="2" style="font-size: 8pt; text-align: center; font-weight: bold;" nowrap>
+          Altitude of the Sun
+         </td>
+         <td style="font-size: 8pt; text-align: center; font-weight: bold;" nowrap>
+          Elevation of the Observer
+         </td>
+         <td rowspan="21" width="4" style="background-color: #FFFFFF;">
+          &nbsp;
+         </td>
+         <td rowspan="21" style="background-color: #FFFFFF;">
+          <div align="center" style="text-align: center; margin: -5px;">
+          <center>
+          <table border="0" cellspacing="1" cellpadding="4" style="background-color: #EEEEFF;">
+           <tr style="background-color: #666699;">
+            <td colspan="4" style="font-size: 8pt; text-align: center; font-weight: bold;" nowrap>
+             Miscellaneous Camera Information
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Sensor Type&nbsp;:
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <select name="Sensor" id="Sensor" size="1" onchange="SensorSetRes('en');">
+              <option value="FX" selected>Full-Frame</option>
+              <option value="NkAPSC">Nikon APS-C</option>
+              <option value="SoAPSC">Sony APS-C</option>
+              <option value="PeAPSC">Pentax APS-C</option>
+              <option value="CaAPSC">Canon APS-C</option>
+              <option value="CaAPSH">Canon APS-H</option>
+              <option value="Micro43">Micro 4/3</option>
+              <option value="1inch">1&quot;</option>
+              <option value="35mm">35mm Film</option>
+             </select>
+            </td>
+            <td align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Effective MPix&nbsp;:
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <select name="MPix" id="MPix" size="1" onchange="CameraInfos('en');">
+              <option value="0">--</option>
+              <option value="6">6</option>
+              <option value="8">8</option>
+              <option value="10">10</option>
+              <option value="12" selected>12</option>
+              <option value="15">15</option>
+              <option value="16">16</option>
+              <option value="18">18</option>
+              <option value="21">21</option>
+              <option value="24">24</option>
+              <option value="36">36</option>
+              <option value="42">42</option>
+              <option value="46">46</option>
+              <option value="50">50</option>
+             </select>
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Lens Focal Length&nbsp;:
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <select name="FL" id="FL" size="1" onchange="CameraInfos('en');">
+              <option value="18" selected>18mm</option>
+              <option value="200">200mm</option>
+              <option value="300">300mm</option>
+              <option value="400">400mm</option>
+              <option value="500">500mm</option>
+              <option value="600">600mm</option>
+              <option value="800">800mm</option>
+              <option value="1000">1000mm</option>
+              <option value="1200">1200mm</option>
+              <option value="1500">1500mm</option>
+              <option value="2000">2000mm</option>
+             </select>
+             &nbsp;DX<input type="checkbox" name="DX" id="DX" value="" style="font-weight: bold;" onchange="CameraInfos('en');" title="Tick if DX lens is attached to the camera body">
+            </td>
+            <td align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Effective Focal Length&nbsp;:
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <div id="EFL" style="font-size: 8pt;"></div>
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td colspan="2">
+             &nbsp;
+            </td>
+            <td rowspan="4" colspan="2" align="center" style="text-align: center; vertical-align: center;">
+             <div id="slideImage" style="width: auto; height: 157px; text-align: center; vertical-align: center;"></div>
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td align="right" style="font-size: 8pt; font-weight: bold; text-align: right;" nowrap>
+             Field of View&nbsp;:
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <div id="FoV" style="font-size: 10pt; font-weight: bold;"></div>
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td align="right" style="font-size: 8pt; font-weight: bold; text-align: right;" nowrap>
+             Exposure Limit&nbsp;:<br>
+             (without tracking)&nbsp;&nbsp;
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <div id="MaxExp" style="font-size: 10pt; font-weight: bold;"></div>
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td colspan="2">
+             &nbsp;
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td colspan="4" class="eclipseworldatlasleft">
+             <hr width="30" align="left" style="text-align: left;">
+             Eclipse pictures courtesy of <a href="http://joecali.net/eclipses/" rel="nofollow" target="_blank" class="eclipseworldatlas">Joe Cali</a> and <a href="http://www.zam.fme.vutbr.cz/~druck/eclipse/" rel="nofollow" target="_blank" class="eclipseworldatlas">Miloslav Druckm&uuml;ller</a>
+            </td>
+           </tr>
+           <tr style="background-color: #666699;">
+            <td colspan="4" style="font-size: 8pt; text-align: center; font-weight: bold;" nowrap>
+             Sampling
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Body&nbsp;:
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <select name="Body" id="Body" size="1" onchange="CameraSampling('en');">
+              <option value="NkD6">Nikon D6</option>
+              <option value="NkD5">Nikon D5</option>
+              <option value="NkD4s">Nikon D4s</option>
+              <option value="NkD4">Nikon D4</option>
+              <option value="NkD3X">Nikon D3X</option>
+              <option value="NkD3s">Nikon D3s</option>
+              <option value="NkD3">Nikon D3</option>
+              <option value="NkD850" selected>Nikon D850</option>
+              <option value="NkD810">Nikon D810/D810A</option>
+              <option value="NkD800">Nikon D800/D800E</option>
+              <option value="NkD780">Nikon D780</option>
+              <option value="NkD750">Nikon D750</option>
+              <option value="NkD700">Nikon D700</option>
+              <option value="NkD610">Nikon D610</option>
+              <option value="NkD600">Nikon D600</option>
+              <option value="NkD500">Nikon D500</option>
+              <option value="NkD300s">Nikon D300s</option>
+              <option value="NkD300s">Nikon D300</option>
+              <option value="NkD7500">Nikon D7500</option>
+              <option value="NkD7200">Nikon D7200</option>
+              <option value="NkD7100">Nikon D7100</option>
+              <option value="NkD7000">Nikon D7000</option>
+              <option value="NkD200">Nikon D200</option>
+              <option value="NkD90">Nikon D90</option>
+              <option value="NkD80">Nikon D80</option>
+              <option value="NkD5600">Nikon D5600</option>
+              <option value="NkD5500">Nikon D5500</option>
+              <option value="NkD5300">Nikon D5300</option>
+              <option value="NkD5200">Nikon D5200</option>
+              <option value="NkD5100">Nikon D5100</option>
+              <option value="NkD5000">Nikon D5000</option>
+              <option value="NkD3400">Nikon D3400</option>
+              <option value="NkD3300">Nikon D3300</option>
+              <option value="NkD3200">Nikon D3200</option>
+              <option value="NkD3100">Nikon D3100</option>
+              <option value="NkD3000">Nikon D3000</option>
+              <option value="NkD50">Nikon D60</option>
+              <option value="NkD50">Nikon D50</option>
+              <option value="NkD40x">Nikon D40x</option>
+              <option value="NkD40">Nikon D40</option>
+              <option value="NkD2Xs">Nikon D2Xs</option>
+              <option value="NkD2X">Nikon D2X</option>
+              <option value="NkD2Hs">Nikon D2Hs</option>
+              <option value="NkD2H">Nikon D2H</option>
+              <option value="NkD100">Nikon D100</option>
+              <option value="NkD70s">Nikon D70s</option>
+              <option value="NkD70">Nikon D70</option>
+              <option value="NkZ9">Nikon Z9</option>
+              <option value="NkZ8">Nikon Z8</option>
+              <option value="NkZ7">Nikon Z7/Z7 II</option>
+              <option value="NkZ6">Nikon Z6/Z6 II</option>
+              <option value="NkZ5">Nikon Z5</option>
+              <option value="NkZ50">Nikon Z50</option>
+              <option value="NkZfc">Nikon Zfc</option>
+              <option value="-" disabled>-</option>
+              <option value="Ca1DC">Canon 1D C</option>
+              <option value="Ca1DXmkIII">Canon 1D X MarkIII</option>
+              <option value="Ca1DXmkII">Canon 1D X MarkII</option>
+              <option value="Ca1DX">Canon 1D X</option>
+              <option value="Ca1DsmkIII">Canon 1Ds MarkIII</option>
+              <option value="Ca5DsR">Canon 5DsR</option>
+              <option value="Ca5Ds">Canon 5Ds</option>
+              <option value="Ca5DmkIV">Canon 5D MarkIV</option>
+              <option value="Ca5DmkIII">Canon 5D MarkIII</option>
+              <option value="Ca5DmkII">Canon 5D MarkII</option>
+              <option value="Ca1DsmkII">Canon 1Ds MarkII</option>
+              <option value="Ca5D">Canon 5D</option>
+              <option value="Ca1Ds">Canon 1Ds</option>
+              <option value="Ca1DmkIIN">Canon 1D MarkIIN</option>
+              <option value="Ca1DmkII">Canon 1D MarkII</option>
+              <option value="Ca1D">Canon 1D</option>
+              <option value="Ca1DmkIV">Canon 1D MarkIV</option>
+              <option value="Ca6DmkII">Canon 6D MarkII</option>
+              <option value="Ca6D">Canon 6D</option>
+              <option value="Ca7DmkII">Canon 7D MarkII</option>
+              <option value="Ca7D">Canon 7D</option>
+              <option value="Ca90D">Canon 90D</option>
+              <option value="Ca80D">Canon 80D</option>
+              <option value="Ca70D">Canon 70D</option>
+              <option value="Ca77D">Canon 77D</option>
+              <option value="Ca760D">Canon 760D</option>
+              <option value="Ca850D">Canon 850D</option>
+              <option value="Ca800D">Canon 800D</option>
+              <option value="Ca750D">Canon 750D</option>
+              <option value="Ca700D">Canon 700D</option>
+              <option value="Ca650D">Canon 650D</option>
+              <option value="Ca60Da">Canon 60Da</option>
+              <option value="Ca60D">Canon 60D</option>
+              <option value="Ca600D">Canon 600D</option>
+              <option value="Ca550D">Canon 550D</option>
+              <option value="Ca50D">Canon 50D</option>
+              <option value="Ca500D">Canon 500D</option>
+              <option value="Ca450D">Canon 450D</option>
+              <option value="Ca40D">Canon 40D</option>
+              <option value="Ca400D">Canon 400D</option>
+              <option value="Ca250D">Canon 250D</option>
+              <option value="Ca200D">Canon 200D</option>
+              <option value="Ca100D">Canon 100D</option>
+              <option value="Ca2000D">Canon 2000D</option>
+              <option value="Ca1300D">Canon 1300D</option>
+              <option value="Ca1200D">Canon 1200D</option>
+              <option value="Ca1100D">Canon 1100D</option>
+              <option value="Ca1000D">Canon 1000D</option>
+              <option value="Ca4000D">Canon 4000D</option>
+              <option value="Ca350D">Canon 350D</option>
+              <option value="Ca30D">Canon 30D</option>
+              <option value="Ca300D">Canon 300D</option>
+              <option value="Ca20D">Canon 20D</option>
+              <option value="Ca20Da">Canon 20Da</option>
+              <option value="CaR3">Canon R3</option>
+              <option value="CaR5">Canon R5</option>
+              <option value="CaR6mkII">Canon R6 Mark II</option>
+              <option value="CaR6">Canon R6</option>
+              <option value="CaR">Canon R</option>
+              <option value="CaRP">Canon RP</option>
+              <option value="CaR8">Canon R8</option>
+              <option value="CaR7">Canon R7</option>
+              <option value="CaR10">Canon R10</option>
+              <option value="CaR50">Canon R50</option>
+              <option value="-" disabled>-</option>
+              <option value="Pe645Z">Pentax 645Z</option>
+              <option value="PeK1mkII">Pentax K-1 MarkII</option>
+              <option value="PeK1">Pentax K-1</option>
+              <option value="PeKP">Pentax KP</option>
+              <option value="PeK5D">Pentax K5D</option>
+              <option value="PeK7D">Pentax K7D</option>
+              <option value="PeK20D">Pentax K20D</option>
+              <option value="PeKrD">Pentax KrD</option>
+              <option value="PeK10D">Pentax K10D</option>
+              <option value="-" disabled>-</option>
+              <option value="FuGFX100">Fuji GFX 100</option>
+              <option value="FuGFX50S">Fuji GFX 50S/50R</option>
+              <option value="FuXT5">Fuji X-T5</option>
+              <option value="FuXT4">Fuji X-T4</option>
+              <option value="FuXT3">Fuji X-T3</option>
+              <option value="FuXT2">Fuji X-T2</option>
+              <option value="FuXT1">Fuji X-T1</option>
+              <option value="FuXH2">Fuji X-H2</option>
+              <option value="FuXH2S">Fuji X-H2S</option>
+              <option value="FuXH1">Fuji X-H1</option>
+              <option value="FuXPro3">Fuji X-Pro3</option>
+              <option value="FuXPro2">Fuji X-Pro2</option>
+              <option value="-" disabled>-</option>
+              <option value="PaS1R">Panasonic S1R</option>
+              <option value="PaS1">Panasonic S1</option>
+              <option value="PaS1H">Panasonic S1H</option>
+              <option value="PaS5">Panasonic S5</option>
+              <option value="PaGH6">Panasonic GH6</option>
+              <option value="PaGH5">Panasonic GH5</option>
+              <option value="PaG9">Panasonic G9</option>
+              <option value="PaGH5s">Panasonic GH5s</option>
+              <option value="PaGH4">Panasonic GH4</option>
+              <option value="PaGX8">Panasonic GX8</option>
+              <option value="-" disabled>-</option>
+              <option value="OlOMDEM1X">Olympus OM-D E-M1 X</option>
+              <option value="OlOMDEM1mkIII">Olympus OM-D E-M1 MarkIII</option>
+              <option value="OlOMDEM1mkII">Olympus OM-D E-M1 MarkII</option>
+              <option value="OlOMDEM1">Olympus OM-D E-M1</option>
+              <option value="OlOMDEM5mkIII">Olympus OM-D E-M5 MarkIII</option>
+              <option value="OlOMDEM5mkII">Olympus OM-D E-M5 MarkII</option>
+              <option value="OlOMDEM5">Olympus OM-D E-M5</option>
+              <option value="-" disabled>-</option>
+              <option value="SoA1">Sony A1</option>
+              <option value="SoA9II">Sony A9 II</option>
+              <option value="SoA9">Sony A9</option>
+              <option value="SoA7rV">Sony A7r V</option>
+              <option value="SoA7rIV">Sony A7r IV</option>
+              <option value="SoA7rIII">Sony A7r III</option>
+              <option value="SoA7rII">Sony A7r II</option>
+              <option value="SoA7r">Sony A7r</option>
+              <option value="SoA7IV">Sony A7 IV</option>
+              <option value="SoA7III">Sony A7 III</option>
+              <option value="SoA7II">Sony A7 II</option>
+              <option value="SoA7">Sony A7</option>
+              <option value="SoA7sIII">Sony A7s III</option>
+              <option value="SoA7sII">Sony A7s II</option>
+              <option value="SoA7s">Sony A7s</option>
+              <option value="-" disabled>-</option>
+              <option value="SgfpL">Sigma fp L</option>
+              <option value="Sgfp">Sigma fp</option>
+             </select>
+            </td>
+            <td align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Effective MPix&nbsp;:
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <div id="MPS" style="font-size: 8pt;"></div>
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td rowspan="2" align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Lens Focal Length&nbsp;:
+            </td>
+            <td rowspan="2" align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <select name="FLS" id="FLS" size="1" onchange="CameraSampling('en');">
+              <option value="14">14mm</option>
+              <option value="18">18mm</option>
+              <option value="20">20mm</option>
+              <option value="24">24mm</option>
+              <option value="28">28mm</option>
+              <option value="35">35mm</option>
+              <option value="50">50mm</option>
+              <option value="55">55mm</option>
+              <option value="70">70mm</option>
+              <option value="85">85mm</option>
+              <option value="105">105mm</option>
+              <option value="200" selected>200mm</option>
+              <option value="300">300mm</option>
+              <option value="400">400mm</option>
+              <option value="500">500mm</option>
+              <option value="600">600mm</option>
+              <option value="800">800mm</option>
+              <option value="1000">1000mm</option>
+              <option value="1200">1200mm</option>
+              <option value="1500">1500mm</option>
+              <option value="2000">2000mm</option>
+             </select>
+             &nbsp;DX<input type="checkbox" name="DXS" id="DXS" value="" style="font-weight: bold;" onchange="CameraSampling('en');" title="Tick if DX lens is attached to the camera body">
+            </td>
+            <td align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Pixel Size&nbsp;:<br>
+             (in microns)&nbsp;&nbsp;
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <div id="PS" style="font-size: 8pt;"></div>
+            </td>
+           </tr>
+           <tr style="background-color: #EEEEFF;">
+            <td align="right" style="font-size: 8pt; text-align: right;" nowrap>
+             Sampling&nbsp;:<br>
+             (in arcseconds per pixel)&nbsp;&nbsp;
+            </td>
+            <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+             <div id="SPL" style="font-size: 8pt;"></div>
+            </td>
+           </tr>
+          </table>
+          </center>
+          </div>
+<!-- Instructions d'utilisation -->
+          <h2 style="margin-left: 10px;">Instructions</h2>
+          <ul>
+           <li class="Instructions7">To display the suggested time exposure for one of the solar eclipse events, select the event, the sensitivity<!--film speed--> (ISO) and the lens aperture (f/number). The altitude of the Sun and elevation of the observer do have a measurable influence on the exposure time, just as the sky conditions. The time exposure will then be displayed and computed every time you modify one of those parameters.</li>
+           <li class="Instructions7">The time exposures are only given as a guide. They will help you choosing a film matching your equipment and the event you are shooting. An automatic sequence can also be build accordingly. However, on the day of the eclipse, you should bracket your exposures one or more stops (&plusmn;1EV or more) to take into account the actual sky conditions and the variable nature of these phenomena. If the sky is not clear or hazy, then lengthen the exposures.</li>
+           <li class="Instructions7">The brightness (Q) and exposure value (EV) are computed after applying the atmospheric extinction.</li>
+          </ul>
+          <div align="center" style="text-align: center;">
+           <br><br>
+           <hr width="100" align="center" style="text-align: center;">
+           <br><br>
+           <form name="_donations" action="https://www.paypal.com/cgi-bin/webscr" method="post" accept-charset="utf-8">
+            <input type="hidden" name="cmd" size="-1" value="_donations">
+            <script language="JavaScript" type="text/javascript" src="../../javascript/Email_DonatePayPal.js"></script>
+            <input type="hidden" name="item_name" size="-1" value="Solar Eclipse Exposure Calculator">
+            <input type="hidden" name="item_number" size="-1" value="2024">
+            <input type="hidden" name="page_style" value="PayPal">
+            <input type="hidden" name="return" value="http://xjubier.free.fr/en/site_pages/PayPalDonate.html">
+            <input type="hidden" name="lc" value="US">
+            <input type="hidden" name="cn" value="Comments">
+            <input type="hidden" name="currency_code" value="EUR">
+            <input type="hidden" name="tax" value="0">
+            <input type="image" src="../../images/PayPalDonate_LG.gif" name="submit" alt="Donate via PayPal: fast, free and secure solution!" title="Help me help you by financing all the planned improvements! To donate you don&rsquo;t need to create PayPal account if you don&rsquo;t have one already, you can just use your credit card.">
+           </form>
+           <br>
+           Please consider making a donation to support my work and show your appreciation.
+          </div>
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td colspan="2" align="left" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="text" size="5" name="sunAlt" id="sunAlt" value="30.0" onchange="CheckSunAltitude('en');" title="Altitude of the Sun during the eclipse">&nbsp;<sup>&deg;</sup>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="text" size="6" name="obsAlt" id="obsAlt" value="0" onchange="CheckObserverAltitude('en');">&nbsp;m
+         </td>
+        </tr>
+        <tr style="background-color: #666699;">
+         <td colspan="2" style="font-size: 8pt; text-align: center; font-weight: bold;" nowrap>
+          Eclipse Event
+         </td>
+         <td style="font-size: 8pt; text-align: center; font-weight: bold;" nowrap>
+          Camera Settings
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_128">Partial phase&nbsp;&mdash;&nbsp;TO SolarLite&trade; filter (ND&nbsp;5.6)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_128" value="128" onclick="CalcExposure('en');">
+         </td>
+         <td rowspan="3" align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          Sensitivity (ISO)<!--Film speed (ISO)-->&nbsp;:&nbsp;
+          <select name="ISO" id="ISO" size="1" onchange="CalcExposure('en');">
+           <option value="6">6</option>
+           <option value="12">12</option>
+           <option value="25">25</option>
+           <option value="50">50</option>
+           <option value="64">64</option>
+           <option value="100" selected>100</option>
+           <option value="125">125</option>
+           <option value="160">160</option>
+           <option value="200">200</option>
+           <option value="250">250</option>
+           <option value="320">320</option>
+           <option value="400">400</option>
+           <option value="500">500</option>
+           <option value="640">640</option>
+           <option value="800">800</option>
+           <option value="1000">1000</option>
+           <option value="1250">1250</option>
+           <option value="1600">1600</option>
+           <option value="2000">2000</option>
+           <option value="2500">2500</option>
+           <option value="3200">3200</option>
+           <option value="6400">6400</option>
+           <option value="12800">12800</option>
+           <option value="25600">25600</option>
+           <option value="51200">51200</option>
+           <option value="102400">102400</option>
+          </select>
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_512">Partial phase&nbsp;&mdash;&nbsp;1/100000<sup>th</sup> filter (ND&nbsp;5.0)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_512" value="512" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_4096">Partial phase&nbsp;&mdash;&nbsp;1/10000<sup>th</sup> filter (ND&nbsp;4.0)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_4096" value="4096" checked onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_32">Baily&rsquo;s Beads (annular - with ND&nbsp;5.6 filter)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_32" value="32" onclick="CalcExposure('en');">
+         </td>
+         <td rowspan="3" align="center" style="font-size: 8pt; text-align: center; background-color: #EEEEFF;" nowrap>
+          Lens aperture (f/Number)&nbsp;:&nbsp;
+          <select name="fStop" id="fStop" size="1" onchange="CalcExposure('en');">
+           <option value="1" style="font-weight: bold;">1</option>
+           <option value="1.1">1.1</option>
+           <option value="1.2">1.2</option>
+           <option value="1.4" style="font-weight: bold;">1.4</option>
+           <option value="1.6">1.6</option>
+           <option value="1.8">1.8</option>
+           <option value="2" style="font-weight: bold;">2</option>
+           <option value="2.2">2.2</option>
+           <option value="2.5">2.5</option>
+           <option value="2.8" style="font-weight: bold;">2.8</option>
+           <option value="3.3">3.3</option>
+           <option value="3.5">3.5</option>
+           <option value="4" style="font-weight: bold;">4</option>
+           <option value="4.5">4.5</option>
+           <option value="5">5</option>
+           <option value="5.6" style="font-weight: bold;">5.6</option>
+           <option value="6.3">6.3</option>
+           <option value="7.1">7.1</option>
+           <option value="8" style="font-weight: bold;" selected>8</option>
+           <option value="9">9</option>
+           <option value="10">10</option>
+           <option value="11" style="font-weight: bold;">11</option>
+           <option value="13">13</option>
+           <option value="14">14</option>
+           <option value="16" style="font-weight: bold;">16</option>
+           <option value="18">18</option>
+           <option value="20">20</option>
+           <option value="22" style="font-weight: bold;">22</option>
+           <option value="32" style="font-weight: bold;">32</option>
+          </select>
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_128_2">Baily&rsquo;s Beads (annular - with ND&nbsp;5.0 filter)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_128_2" value="128" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_1024_2">Baily&rsquo;s Beads (annular - with ND&nbsp;4.0 filter)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_1024_2" value="1024" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_4096_2">Baily&rsquo;s Beads (total - without filter)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_4096_2" value="4096" onclick="CalcExposure('en');">
+         </td>
+         <td rowspan="14" align="center" style="font-size: 8pt; text-align: center; font-weight: bold;">
+          Suggested shutter speed&nbsp;:&nbsp;<br><br>
+          <div id="exposure" style="font-size: 16pt;"></div>
+          <br>
+          <hr width="50">
+          With atmospheric extinction&nbsp;:&nbsp;<br><br>
+          <div id="exposure2" style="font-size: 16pt;"></div>
+          <br><br>
+          <hr width="100">
+          <br><br>
+          Brightness&nbsp;(Q)&nbsp;:&nbsp;<br><br>
+          <div id="brightnessQ" style="font-size: 16pt;"></div>
+          <br>
+          Exposure&nbsp;Value&nbsp;(EV)&nbsp;:&nbsp;<br><br>
+          <div id="EV" style="font-size: 16pt;"></div>
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_2048">Chromosphere</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_2048" value="2048" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_1024">Prominences</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_1024" value="1024" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_256">Lower corona (&lt;0.1 solar radius)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_256" value="256" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_80">Diamond Rings (&plusmn;6s 2<sup>nd</sup> &amp; 3<sup>rd</sup> contact)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_80" value="80" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_32_2">Inner corona (&lt;0.2 solar radius)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_32_2" value="32" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_16">Inner corona (&lt;&frac12; solar radius)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_16" value="16" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_4">Middle corona (&lt;1 solar radius)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_4" value="4" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_2">Upper corona (&lt;2 solar radii)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_2" value="2" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_1">Outer corona (&gt;3 solar radii)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_1" value="1" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_0p5">Outer corona (&gt;4 solar radii)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_0p5" value="0.5" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_0p2">Outer corona (&gt;8 solar radii)</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_0p2" value="0.2" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #EEEEFF;">
+         <td align="left" style="font-size: 8pt; text-align: left;" nowrap>
+          <label for="EV_0p09">Earthshine</label>
+         </td>
+         <td align="center" style="font-size: 8pt; text-align: center;" nowrap>
+          <input type="radio" name="EclipseEvent" id="EV_0p09" value="0.09" onclick="CalcExposure('en');">
+         </td>
+        </tr>
+        <tr style="background-color: #CCCCFF;">
+         <td colspan="2" align="center" style="text-align: center; vertical-align: center;">
+          <div id="eventImage" style="width: auto; height: 90px; text-align: center; vertical-align: center;"></div>
+         </td>
+        </tr>
+       </table>
+       </center>
+       </div>
+      </td>
+     </tr>
+    </table>
+<!-- Bas de la page -->
+    <table border="0" width="100%">
+     <tr>
+      <td style="text-align: center;">
+       <hr align="center">
+       <table border="0" cellspacing="0" cellpadding="0" width="100%">
+        <tr>
+         <td width="15%" align="center" valign="middle" style="text-align: center;">
+          <script language="JavaScript" type="text/javascript" src="../../javascript/Meteo.js"></script>
+         </td>
+         <td width="70%" align="center" valign="middle" style="text-align: center;" nowrap>
+          <p class="Bottom">
+           <script language="JavaScript" type="text/javascript" src="../../javascript/Email.js"></script>
+           <span style="font-size: 9px;">Last page update on July 3, 2017.</span><br>
+           <a href="sitemap.html" class="Bottom">Site Map</a>&nbsp;&mdash;&nbsp;<a href="LegalMentions.html" class="Bottom">Legal Mentions</a>
+          </p>
+         </td>
+         <td width="15%" align="center" valign="middle" style="text-align: center;">
+          <script language="JavaScript" type="text/javascript" src="../../javascript/Compteur.js"></script>
+         </td>
+        </tr>
+       </table>
+      </td>
+     </tr>
+    </table>
+   </td>
+   <td valign="top" style="border-left: solid 1px lightgrey; background-color: #E7E7E7;" width="120">
+    <div align="center">
+<!-- Search Google -->
+     <form method="get" action="http://www.google.com/custom" target="google_window">
+      <table style="background-color: #E7E7E7;">
+       <tr>
+        <td valign="top" align="left" height="32" nowrap>
+         <a href="http://www.google.com/" rel="nofollow" class="none">
+          <img src="http://www.google.com/logos/Logo_25wht.gif" border="0" alt="Google" align="middle">
+         </a>
+         <br>
+         <input type="text" name="q" size="16" maxlength="255" value="">
+        </td>
+       </tr>
+       <tr>
+        <td valign="top" align="left">
+         <input type="hidden" name="domains" value="xjubier.free.fr">
+         <input type="checkbox" name="sitesearch" id="sitesearch" value="xjubier.free.fr" checked>
+         <label for="sitesearch" class="sitesearch">xjubier.free.fr</label><br>
+         <input type="hidden" name="client" value="pub-0817360300089666">
+         <input type="hidden" name="forid" value="1">
+         <input type="hidden" name="ie" value="ISO-8859-1">
+         <input type="hidden" name="oe" value="ISO-8859-1">
+         <input type="hidden" name="cof" value="S:http://xjubier.free.fr/;AH:center;LH:80;L:http://xjubier.free.fr/images/Logo_xjubier.jpg;LW:487;AWFID:b90af53b731018cc;">
+         <input type="hidden" name="hl" value="en">
+        </td>
+       </tr>
+       <tr>
+       <td valign="middle" align="center" style="text-align: center;">
+        <input type="submit" name="sa" value="Search">
+       </td>
+      </tr>
+     </table>
+    </form>
+     <hr>
+     <div class="IndexCenter">
+      <a href="../../guestbook/index.php?lang=english" target="_blank" class="IndexCenterLg" title="Guest Book"><img src="../../images/Guestbook_sm.gif" width="26" height="14" style="vertical-align: middle;" border="0" alt="Guest Book">&nbsp;Guest&nbsp;Book</a><br>
+      Xavier&nbsp;M.&nbsp;Jubier
+     </div>
+<!-- Links -->
+     <hr>
+     <div class="Index3">
+      <span style="text-decoration: underline;">Other&nbsp;eclipses:</span><br>
+      <a href="solar_eclipses/TSE_19990811_pg01.html" target="_blank" class="IndexCenter" title="1999 Total Solar Eclipse in France">1999 August 11</a><br>
+      <a href="solar_eclipses/TSE_20010621_pg01.html" target="_blank" class="IndexCenter" title="2001 Total Solar Eclipse in Angola">2001 June 21</a><br>
+      <a href="solar_eclipses/ASE_20011214_pg01.html" target="_blank" class="IndexCenter" title="2001 Annular Solar Eclipse in Costa Rica">2001 December 14</a><br>
+      <a href="solar_eclipses/TSE_20021204_pg01.html" target="_blank" class="IndexCenter" title="2002 Total Solar Eclipse in Australia">2002 December 4</a><br>
+      <a href="solar_eclipses/TSE_20031123_pg01.html" target="_blank" class="IndexCenter" title="2003 Total Solar Eclipse from Novolazarevskaya, Antarctica">2003 November 23</a><br>
+      <a href="solar_eclipses/HSE_20050408_pg01.html" target="_blank" class="IndexCenter" title="2005 Total Solar Eclipse in French Polynesia">2005 April 8</a><br>
+      <a href="libya/ASE_2005_pg01.html" target="_blank" class="IndexCenter" title="2005 Annular Solar Eclipse from Bir al Maruf, Libya and Madrid, Spain">2005 October 3</a><br>
+      <a href="solar_eclipses/TSE_20060329_pg01.html" target="_blank" class="IndexCenter" title="2006 Total Solar Eclipse from Waw an Namus, Libya">2006 March 29</a><br>
+      <a href="solar_eclipses/ASE_20060922_pg01.html" target="_blank" class="IndexCenter" title="2006 Annular Solar Eclipse from Kourou, French Guiana">2006 September 22</a><br>
+      <a href="solar_eclipses/ASE_20080207_pg02.html" target="_blank" class="IndexCenter" title="2008 Annular Solar Eclipse at Mount Vinson, Antarctica">2008 February 7</a><br>
+      <a href="solar_eclipses/TSE_20080801_pg03.html" target="_blank" class="IndexCenter" title="2008 Total Solar Eclipse in China">2008 August 1<sup>st</sup></a><br>
+      <a href="solar_eclipses/ASE_20090126_pg02.html" target="_blank" class="IndexCenter" title="2009 Annular Solar Eclipse in Anyer, Indonesia">2009 January 26</a><br>
+      <a href="solar_eclipses/TSE_20090722_pg03.html" target="_blank" class="IndexCenter" title="2009 Total Solar Eclipse in China (Yangshan Island), Japan (Iwo Jima) and Marshall Islands (Enewetak)">2009 July 22</a><br>
+      <a href="solar_eclipses/TSE_20100711_pg02.html" target="_blank" class="IndexCenter" title="2010 Total Solar Eclipse in French Polynesia (Tatakoto atoll), Argentina (Patagonia) and Chile (Easter Island)">2010 July 11</a><br>
+      <a href="solar_eclipses/ASE_20120520_pg02.html" target="_blank" class="IndexCenter" title="2012 Annular Solar Eclipse from Page (AZ), USA">2012 May 20</a><br>
+      <a href="solar_eclipses/TSE_20121113_pg02_Eclipse.html" target="_blank" class="IndexCenter" title="2012 Total Solar Eclipse from Queensland in Australia">2012 November 14</a><br>
+      <a href="solar_eclipses/ASE_20130510_pg02.html" target="_blank" class="IndexCenter" title="2013 Annular Solar Eclipse from Western Australia">2013 May 10</a><br>
+      <a href="solar_eclipses/HSE_20131103_pg02_EFlight.html" target="_blank" class="IndexCenter" title="2013 Total Solar Eclipse from a Falcon 900B private jet over the Western Atlantic Ocean">2013 November 3</a><br>
+      <a href="solar_eclipses/ASE_20140429_pg02.html" target="_blank" class="IndexCenter" title="2014 Annular Solar Eclipse in Antarctica">2014 April 29</a><br>
+      <a href="solar_eclipses/TSE_20150320_pg02_Eclipse.html" target="_blank" class="IndexCenter" title="2015 Total Solar Eclipse from the stratospheric eclipse flight over the North Atlantic">2015 March 20</a><br>
+      <a href="solar_eclipses/TSE_20160309_pg02_Eclipse.html" target="_blank" class="IndexCenter" title="2016 Total Solar Eclipse from Indonesia and Micronesia or airborne">2016 March 9</a>
+     </div>
+     <hr>
+     <div class="IndexCenter">
+      <img src="../../images/RSS_Safari_36x14.gif" border="0" width="36" height="14" align="middle" alt="RSS">&nbsp;
+      <img src="../../images/RSS_16x16.png" border="0" width="16" height="16" align="middle" alt="RSS"><br>
+      <a href="RSS.html" class="Index">RSS&nbsp;Service...</a>
+     </div>
+     <hr>
+<!-- Skype 'My status' button http://www.skype.com/go/skypebuttons -->
+     <div class="IndexCenter">
+<!--      Stopped working on 2015 May 15 -->
+<!--      <script language="JavaScript" type="text/javascript" src="http://download.skype.com/share/skypebuttons/js/skypeCheck.js"></script>
+      <a href="skype:xjubier?call" title="Skype me..."><img src="http://mystatus.skype.com/smallclassic/xjubier" style="border: none;" width="114" height="20" alt="Skype Status"></a>-->
+      <script language="JavaScript" type="text/javascript" src="http://www.skypeassets.com/i/scom/js/skype-uri.js"></script>
+      <div id="SkypeButton_Call_xjubier_1" title="Skype me...">
+       <script type="text/javascript">Skype.ui({"name": "dropdown", "element": "SkypeButton_Call_xjubier_1", "participants": ["xjubier"]});</script>
+      </div>
+     </div>
+<!-- Google Ads -->
+     <hr><br>
+     <script language="JavaScript" type="text/javascript">
+      <!--
+      google_ad_client = "ca-pub-0817360300089666";
+      /* 120x240 Main */
+      google_ad_slot = "6917279847";
+      google_ad_width = 120;
+      google_ad_height = 240;
+      //-->
+     </script>
+     <script language="JavaScript" type="text/javascript" src="http://pagead2.googlesyndication.com/pagead/show_ads.js"></script>
+     <hr>
+     <div class="IndexCenter">
+      <script language="JavaScript" type="text/javascript" id="mapmyvisitors" src="http://mapmyvisitors.com/map.js?cl=ffffff&w=a&t=n&d=uW4VOcu71K_QpDEVdpsvR7rl9ASRZx4hPOQLGqlJYLw"></script>
+     </div>
+    </div>
+   </td>
+  </tr>
+ </table>
+
+<!-- phpmyvisites -->
+<div style="visibility: hidden; display: none;">
+ <script type="text/javascript">
+  <!--
+  var a_vars = Array();
+  var pagename = "";
+  var phpmyvisitesSite = 7048;
+  var phpmyvisitesURL = "http://st.free.fr/phpmyvisites.php";
+  //-->
+ </script>
+ <script language="javascript" type="text/javascript" src="http://st.free.fr/phpmyvisites.js"></script>
+</div>
+</body>
+
+</html>

@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -239,6 +240,15 @@ int main() {
         TotalControl::CameraController::ReleaseSDK();
         return 2;
     }
+
+    // Sort by GUID — SDK enumeration order (USB bus order) is not stable across
+    // sessions/reconnects. GUID sort makes slot assignment (index 0, 1, 2…, and
+    // therefore "cam":"N" routing + GUI track binding) deterministic: the same
+    // physical camera always lands in the same slot regardless of connection order.
+    std::sort(cameraList.begin(), cameraList.end(),
+              [](const TotalControl::CameraInfo& a, const TotalControl::CameraInfo& b) {
+                  return a.guid < b.guid;
+              });
     {
         wchar_t buf[128];
         swprintf_s(buf, L"Found %zu camera(s):", cameraList.size());

@@ -1,0 +1,2510 @@
+<!--
+html
+{
+ background-color: #999999;
+}
+
+body
+{
+ margin: 0px;
+ background-color: #999999;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 9pt;
+ font-weight: normal;
+ text-align: justify;
+ min-width: 1100px;
+ max-width: 1400px;
+}
+
+/* Override the new default style in GM v3.14+ */
+.gm-style div, .gm-style span, .gm-style label, .gm-style a
+{
+ font-family: Verdana, Arial, Helvetica, sans-serif !important;
+ font-size: 7pt !important;
+ font-weight: bold !important;
+}
+
+.jsError
+{
+ margin: 0px;
+ padding: 10px 0px 10px 0px;
+ width: 100%;
+ position: absolute; top: 25%;
+ font-size: 3em; font-weight: bold;
+ color: red;
+ text-align: center;
+ background-color: #FFFF00;
+ filter: alpha(opacity=70);
+ opacity: 0.7;
+ -moz-opacity: 0.7;
+ -khtml-opacity: 0.7;
+}
+
+.filtermsg
+{
+ margin: 0px;
+ padding: 10px 0px 10px 0px;
+ width: 100%;
+ position: absolute; top: 50%; left: 0px;
+ font-size: 20px; font-weight: bold;
+ color: red;
+ vertical-align: middle;
+ text-align: center;
+ background-color: #FFFF00;
+ visibility: hidden;
+ filter: alpha(opacity=70);
+ opacity: 0.7;
+ -moz-opacity: 0.7;
+ -khtml-opacity: 0.7;
+}
+
+input, select
+{
+ font-size: 9pt;
+}
+
+h1
+{
+ font-size: 16pt; text-align: center;
+}
+
+.h1
+{
+ font-size: 16pt; font-weight: bold; text-align: left;
+}
+
+h1 span
+{
+ font-size: 16pt; text-align: center;
+}
+
+.h1 span
+{
+ font-size: 16pt; font-weight: bold; text-align: left;
+}
+
+h2
+{
+ font-size: 12pt; font-weight: bold;
+ text-align: left; padding-top: 20px;
+}
+
+h3
+{
+ font-size: 11pt; font-weight: bold;
+ text-align: left;
+}
+
+p
+{
+ font-size: 8pt; text-align: justify;
+}
+
+div
+{
+ font-size: 8pt;
+}
+
+p.Owner
+{
+ text-align: justify;
+}
+
+p.home
+{
+ margin-left: 10px; margin-right: 10px;
+}
+
+p.Description
+{
+ margin-left: 60px; margin-right: 25px;
+}
+
+p.Presentation
+{
+ font-weight: normal;
+ margin-left: 25px; margin-right: 25px;
+}
+
+p.PresentationNarrowRight
+{
+ font-weight: normal;
+ margin-left: 25px; margin-right: 5px;
+}
+
+p.PresentationNarrowMargin
+{
+ font-weight: normal;
+ margin-left: 5px; margin-right: 5px;
+}
+
+p.GEG
+{
+ font-size: 14px; text-align: left;
+ margin-left: 30px; margin-right: 25px;
+}
+
+p.ImageSlide
+{
+ margin-left: 20px; margin-right: 20px;
+}
+
+div.ImageSlide
+{
+ margin-left: 20px; margin-right: 20px;
+}
+
+p.ImageSlideCopyright
+{
+ font-size: 8pt; text-align: center;
+ font-weight: bold;
+ margin-left: 20px; margin-right: 20px;
+}
+
+div.ImageSlideCopyright
+{
+ font-weight: bold; text-align: center;
+ margin-left: 20px; margin-right: 20px;
+}
+
+p.Instructions
+{
+ font-size: 9pt;
+ margin-left: 20px; margin-right: 25px; margin-bottom: 10px;
+}
+
+p.Instructions7
+{
+ font-size: 7pt; text-align: justify;
+ margin-left: 20px; margin-right: 25px; margin-bottom: 10px;
+}
+
+p.Index
+{
+ margin-left: 25px; margin-right: 25px;
+}
+
+div.Index
+{
+ margin-left: 25px; margin-right: 25px;
+}
+
+p.Index2
+{
+ margin-left: 10px; margin-right: 10px;
+}
+
+p.Index3
+{
+ font-size: 8pt; text-align: left;
+ margin-left: 5px; margin-right: 5px;
+}
+
+div.Index3
+{
+ text-align: left;
+ margin-left: 5px; margin-right: 5px;
+}
+
+p.IndexCenter
+{
+ font-size: 8pt; text-align: center;
+ margin-left: 0px; margin-right: 0px;
+}
+
+div.IndexCenter
+{
+ text-align: center;
+ margin-left: 5px; margin-right: 5px;
+}
+
+p.Bottom
+{
+ font-size: 9pt; text-align: center;
+ margin-left: 10px; margin-right: 10px;
+}
+
+div.Bottom
+{
+ font-size: 9pt; text-align: center;
+ margin-left: 10px; margin-right: 10px;
+}
+
+p.BottomSmall
+{
+ font-size: 7pt; text-align: center;
+ margin-left: 10px; margin-right: 10px;
+}
+
+p.Legend
+{
+ font-size: 9pt; font-weight: bold;
+ text-align: center;
+ margin-left: 10px; margin-right: 10px;
+}
+
+p.eclipseprogram
+{
+ margin-left: 10px; margin-right: 5px;
+}
+
+span
+{
+ font-size: 8pt; text-align: justify;
+}
+
+span.Presentation
+{
+ text-align: justify;
+}
+
+span.Description
+{
+ font-weight: bold;
+}
+
+span.PageLinkHeader
+{
+ font-size: 9pt; font-weight: bold;
+}
+
+div.Description
+{
+ font-weight: bold;
+}
+
+label.sitesearch
+{
+ font-size: 9px;
+ font-weight: bold;
+ text-align: left;
+}
+
+span.Option, label.Option
+{
+ text-align: left;
+}
+
+span.PFL
+{
+ font-size: 120%; font-weight: bold;
+}
+
+span.Input
+{
+ font-size: 9pt;
+}
+
+span.h1
+{
+ font-size: 16pt; font-weight: bold;
+}
+
+span.h2
+{
+ font-size: 12pt; font-weight: bold;
+}
+
+span.td, span.th
+{
+ font-size: 8pt;
+}
+/*
+span.page:rest
+{
+ background-color: #FFFFFF;
+ border: 1px solid #E6E6E6;
+}
+
+span.page:hover
+{
+ background-color: #D2EAF6;
+ border: 1px solid #B7D8EE;
+}
+
+span.page:selected
+{
+ background-color: #D2EAF6;
+ border: 1px solid #B7D8EE;
+}
+*/
+span.LastUpdate
+{
+ font-size: 7pt; text-align: center;
+}
+
+span.Ephemerides
+{
+ font-size: 9pt;
+}
+
+legend.Description
+{
+ font-size: 8pt; font-weight: bold;
+ text-align: left;
+ vertical-align: top;
+}
+
+ul.Presentation
+{
+ font-size: 8pt; text-align: justify;
+}
+
+li
+{
+ font-size: 8pt; text-align: justify;
+}
+
+li.home
+{
+ line-height: 1.3;
+ margin-left: 5px; margin-right: 5px; margin-top: 10px; margin-bottom: 10px;
+}
+
+li.Presentation
+{
+ margin-left: 10px; margin-right: 25px; margin-bottom: 10px;
+}
+
+li.Presentation2
+{
+ margin-left: 10px; margin-right: 25px;
+}
+
+li.iframe
+{
+ font-size: 8pt;
+}
+
+li.eclipse1
+{
+ margin-left: 10px; margin-right: 10px; margin-bottom: 10px;
+}
+
+li.equipment
+{
+ margin-left: 10px; margin-right: 10px; margin-bottom: 10px;
+}
+
+li.newsletter
+{
+ font-size: 8pt; text-align: justify;
+ margin-left: 5px; margin-right: 5px; margin-bottom: 10px;
+}
+
+li.newsletter2
+{
+ font-size: 8pt; text-align: justify;
+ margin-left: 5px; margin-right: 5px; margin-bottom: 4px;
+}
+
+li.interglobe
+{
+ font-size: 9pt; text-align: justify;
+ margin-left: 15px; margin-right: 5px; margin-bottom: 2px;
+}
+
+li.eclipseprogram
+{
+ margin-left: 10px; margin-right: 5px; margin-bottom: 2px;
+}
+
+li.EclipseChasers
+{
+ margin-left: 10px; margin-right: 5px; margin-bottom: 2px;
+}
+
+ol.Instructions
+{
+ background-color: #e6edff;
+ border: solid 1px #bfbfbf;
+ padding-top: 8px;
+ padding-bottom: 8px;
+}
+
+font.li2, span.li2
+{
+ font-size: 8pt; font-weight: bold; text-align: justify;
+ margin-right: 25px; margin-bottom: 10px;
+}
+
+div.li2
+{
+ font-weight: bold; text-align: center;
+ margin-right: 25px; margin-bottom: 10px;
+}
+
+span.li2m5
+{
+ font-size: 8pt; font-weight: bold; text-align: justify;
+ margin-right: 25px; margin-bottom: 10px;
+ margin-left: +5px;
+}
+
+span.eclipseWait, span.tdm1b
+{
+ font-size: 7pt; font-weight: bold;
+}
+
+span.eclipseWaitBlue
+{
+ font-size: 7pt; font-weight: bold;
+ color: blue;
+}
+
+span.eclipseWaitGreen
+{
+ font-size: 7pt; font-weight: bold;
+ color: green;
+}
+
+span.eclipseWaitRed
+{
+ font-size: 7pt; font-weight: bold;
+ color: red;
+}
+
+span.eclipseWaitOrange
+{
+ font-size: 7pt; font-weight: bold;
+ color: orange;
+}
+
+span.eclipseWaitBlue18
+{
+ font-size: 18pt; font-weight: bold;
+ color: blue;
+}
+
+span.eclipseWaitGreen18
+{
+ font-size: 18pt; font-weight: bold;
+ color: green;
+}
+
+span.eclipseWaitRed18
+{
+ font-size: 18pt; font-weight: bold;
+ color: red;
+}
+
+span.eclipseWaitOrange18
+{
+ font-size: 18pt; font-weight: bold;
+ color: orange;
+}
+
+div.thumbnail
+{
+ font-size: 7pt;
+ text-align: center;
+}
+
+div.container
+{
+ text-align: center;
+}
+
+div.RightVerticalPanel
+{
+ margin-left: auto;
+ margin-right: auto;
+ text-align: center; /*text-align: left;*/ /* Overrule inheritance (for MSIE) */
+}
+
+div.infos_canon
+{
+ font-family: monospace;
+ text-align: left;
+ overflow: auto;
+ width: 600px;
+ height: 260px;
+ margin: 2px 2px 2px 2px;
+ padding: 1px 2px 1px 2px;
+ border: 1px solid #B6B6B6;
+ background-color: #FFFFFF;
+}
+
+span.Browsers, div.Browsers
+{
+ font-size: 8pt; text-align: center;
+}
+
+span.PhotoRights_sm
+{
+ font-size: 7pt; text-align: center;
+ color: red;
+}
+
+td, th
+{
+ font-size: 8pt; text-align: justify;
+}
+
+th.EclipseChasers
+{
+ font-weight: bold;
+ text-align: center;
+}
+
+td.Chevrons
+{
+ font-weight: bold;
+ text-align: left;
+ vertical-align: middle;
+ white-space: nowrap;
+}
+
+td.Owner
+{
+ font-weight: bold; text-align: center;
+}
+
+td.Language
+{
+ font-size: 9pt; font-weight: bold;
+ text-align: right;
+ vertical-align: middle;
+ white-space: nowrap;
+}
+
+td.Description
+{
+ font-size: 9pt; text-align: justify;
+ margin-left: 20px; margin-right: 20px;
+}
+
+td.Ephemerides
+{
+ text-align: justify;
+}
+
+td.EphemeridesRight
+{
+ text-align: right;
+ white-space: nowrap;
+}
+
+td.EphemeridesCenter
+{
+ text-align: center;
+ white-space: nowrap;
+}
+
+td.EphemeridesBold
+{
+ font-weight: bold; text-align: justify;
+}
+
+td.EphemeridesBoldRight
+{
+ font-weight: bold; text-align: right;
+ white-space: nowrap;
+}
+
+td.EphemeridesBoldCenter
+{
+ font-weight: bold; text-align: center;
+ white-space: nowrap;
+}
+
+td.EphemeridesHeader
+{
+ font-weight: bold;
+ text-align: center;
+ background-color: #666699;
+}
+
+td.EphemeridesHeaderYellow
+{
+ font-weight: bold;
+ text-align: center;
+ background-color: #666699;
+ color: #FFE279;
+}
+
+td.PhotoRights
+{
+ text-align: center;
+ color: red;
+}
+
+td.ImageIcon
+{
+ font-weight: bold; text-align: center;
+ background-color: white;
+ cursor: pointer;
+}
+
+td.ImageIcon:hover
+{
+ background-color: #D8E4F1;
+}
+
+td.ImageIcon2
+{
+ font-weight: bold; text-align: center;
+ background-color: white;
+}
+
+td.ImageIconTop, td.ImageIconTop2
+{
+ font-weight: bold; text-align: center;
+ vertical-align: top;
+ background-color: white;
+}
+
+td.ImageIconBottom
+{
+ font-weight: bold; text-align: center;
+ vertical-align: bottom;
+ background-color: white;
+}
+
+td.ImageIconBottom:hover
+{
+ background-color: #D8E4F1;
+}
+
+td.ImageIconBottom2
+{
+ font-weight: bold; text-align: center;
+ vertical-align: bottom;
+ background-color: white;
+}
+
+td.ImageIconMiddle
+{
+ font-weight: bold; text-align: center;
+ vertical-align: middle;
+ background-color: white;
+}
+
+td.ImageIconBottomBlk
+{
+ font-weight: bold; text-align: center;
+ vertical-align: bottom;
+ background-color: black;
+ color: #F8EDCE;
+}
+
+td.CellButtonBottom
+{
+ font-weight: bold; text-align: center;
+ vertical-align: bottom;
+ background-color: white;
+ cursor: pointer;
+}
+
+td.CellButtonBottom:hover
+{
+ background-color: #D8E4F1;
+}
+
+td.ImageSlide
+{
+ font-size: 9pt; text-align: justify;
+ margin-left: 20px; margin-right: 20px;
+ background-color: white;
+}
+
+td.PageLinkHeader
+{
+ font-size: 9pt; text-align: center;
+ background-color: #E7E7E7;
+}
+
+td.PageLinkHeaderLight
+{
+ font-size: 9pt; text-align: center;
+ background-color: #E5ECF9;
+}
+
+td.HomePageLinkHeaderLight
+{
+ font-size: 9pt; text-align: center;
+ background-color: #E5ECF9;
+ height: 3em;
+}
+
+td.PagePrivateLinkHeaderLight
+{
+ font-size: 9pt; text-align: right;
+ background-color: #E5ECF9;
+}
+
+td.ContactSmall
+{
+ text-align: left; vertical-align: top;
+ background-color: #FDF3D0;
+}
+
+td.Index
+{
+ font-size: 8pt;
+}
+
+a.EclipseHelp
+{
+ font-size: 7pt; font-weight: bold;
+}
+
+td.Eclipse, th.Eclipse
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: center;
+ white-space: nowrap;
+}
+
+td.EclipseLeft, span.EclipseLeft, div.EclipseLeft
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: left;
+ white-space: nowrap;
+}
+
+td.EclipseRight, span.EclipseRight, div.EclipseRight
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: right;
+ white-space: nowrap;
+}
+
+td.EclipseLatLon
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: right;
+ white-space: nowrap;
+}
+
+td.EclipseCenter, span.EclipseCenter, div.EclipseCenter
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: center;
+ white-space: nowrap;
+}
+
+td.EclipseCenterTop, span.EclipseCenterTop, div.EclipseCenterTop
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: center;
+ vertical-align: top;
+ white-space: nowrap;
+}
+
+td.EclipseJustify
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: justify;
+ white-space: nowrap;
+}
+
+td.EclipseChasersL
+{
+ text-align: left;
+}
+
+td.EclipseChasersC
+{
+ text-align: center;
+}
+
+td.eclipseworldatlasheader, th.eclipseworldatlasheader
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: center;
+}
+
+td.eclipseworldatlas
+{
+ font-size: 7pt;
+ text-align: center;
+}
+
+td.eclipseworldatlasleft
+{
+ font-size: 7pt;
+ text-align: left;
+}
+
+td.eclipseworldatlasright
+{
+ font-size: 7pt;
+ text-align: right;
+}
+
+td.eclipseworldatlascenter
+{
+ font-size: 7pt;
+ text-align: center;
+}
+
+td.eclipseworldatlasjustify
+{
+ font-size: 7pt;
+ text-align: justify;
+}
+
+td.eclipseworldatlasbleft
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: left;
+}
+
+td.eclipseworldatlasbright
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: right;
+}
+
+th.eclipseprogramheader
+{
+ font-weight: bold;
+ text-align: center;
+}
+
+td.eclipseprogram
+{
+ text-align: center;
+}
+
+td.eclipseprogramleft
+{
+ text-align: left;
+}
+
+td.eclipseprogramright
+{
+ text-align: right;
+}
+
+td.fm_copyright
+{
+ font-size: 7pt;
+ text-align: center;
+}
+
+td.download
+{
+ font-size: 8pt;
+}
+
+li.Instructions
+{
+ font-size: 9pt; text-align: justify;
+ margin-left: 10px; margin-right: 15px; margin-bottom: 10px;
+}
+
+li.Instructions7
+{
+ font-size: 7pt; text-align: justify;
+ margin-left: 10px; margin-right: 15px; margin-bottom: 10px;
+}
+
+li.Instructions2
+{
+ margin-left: 0px; margin-right: 0px; margin-bottom: 6px;
+}
+
+li.Instructions3
+{
+ margin-left: 0px; margin-right: 0px; margin-bottom: 0px;
+}
+
+li.Instructions41
+{
+ margin-top: -8px; margin-left: 10px; margin-right: 0px; margin-bottom: 0px;
+}
+
+li.Instructions4
+{
+ margin-left: 10px; margin-right: 0px; margin-bottom: 0px;
+}
+
+a
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a:visited
+{
+ color: #6699CC;
+}
+
+a:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.none
+{
+ text-decoration: none;
+}
+
+a.none:visited
+{
+ text-decoration: none;
+}
+
+a.none:hover
+{
+ text-decoration: none;
+}
+
+a.Chevrons
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Chevrons:visited
+{
+ color: #6699CC;
+}
+
+a.Chevrons:hover
+{
+ font-size: 9pt;
+ color: #0099CC; text-decoration: none;
+}
+
+a.Owner
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Owner:visited
+{
+ color: #6699CC;
+}
+
+a.Owner:hover
+{
+ font-size: 9pt;
+ color: #0099CC; text-decoration: none;
+}
+
+a.Language
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Language:visited
+{
+ color: #6699CC;
+}
+
+a.Language:hover
+{
+ font-size: 10pt;
+ color: #0099CC; text-decoration: none;
+}
+
+a.Presentation
+{
+ font-size: 8pt; font-weight: normal;
+ color: #006699; text-decoration: underline;
+}
+
+a.Presentation:visited
+{
+ color: #6699CC;
+}
+
+a.Presentation:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.GEG
+{
+ font-size: 14px; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.GEG:visited
+{
+ color: #6699CC;
+}
+
+a.GEG:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.Description
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: none;
+}
+
+a.Description:visited
+{
+ color: #6699CC;
+}
+
+a.Description:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.li
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.li:visited
+{
+ color: #6699CC;
+}
+
+a.li:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.li2
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.li2:visited
+{
+ color: #6699CC;
+}
+
+a.li2:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.sitemapHeader
+{
+ font-size: 10pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.sitemapHeader:visited
+{
+ color: #6699CC;
+}
+
+a.sitemapHeader:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.ImageIcon
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.ImageIcon:visited
+{
+ color: #6699CC;
+}
+
+a.ImageIcon:hover
+{
+ font-size: 8pt; font-weight: bold;
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.ImageIconPlain
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: none;
+}
+
+a.ImageIconPlain:visited
+{
+ color: #6699CC;
+}
+
+a.ImageIconPlain:hover
+{
+ color: #0099CC;
+}
+
+a.ShowSlide
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: none;
+}
+
+a.ShowSlide:visited
+{
+ color: #6699CC;
+}
+
+a.ShowSlide:hover
+{
+ color: #0099CC;
+}
+
+a.ShowSlideSmall
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.ShowSlideSmall:visited
+{
+ color: #6699CC;
+}
+
+a.ShowSlideSmall:hover
+{
+ color: #0099CC;
+}
+
+a.Bottom
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Bottom:visited
+{
+ color: #6699CC;
+}
+
+a.Bottom:hover
+{
+ color: #0099CC;
+}
+
+a.BottomSmall
+{
+ font-size: 7pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.BottomSmall:visited
+{
+ color: #6699CC;
+}
+
+a.BottomSmall:hover
+{
+ color: #0099CC;
+}
+
+a.SiteMap
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.SiteMap:visited
+{
+ color: #6699CC;
+}
+
+a.SiteMap:hover
+{
+ color: #0099CC;
+}
+
+a.SiteMapSmall
+{
+ font-size: 7pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.SiteMapSmall:visited
+{
+ color: #6699CC;
+}
+
+a.SiteMapSmall:hover
+{
+ color: #0099CC;
+}
+
+a.ContactSmall
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.ContactSmall:visited
+{
+ color: #6699CC;
+}
+
+a.ContactSmall:hover
+{
+ color: #0099CC;
+}
+
+a.Legend
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Legend:visited
+{
+ color: #6699CC;
+}
+
+a.Legend:hover
+{
+ color: #0099CC;
+}
+
+a.ShowGoogle
+{
+ font-size: 7pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.ShowGoogle:visited
+{
+ color: #6699CC;
+}
+
+a.ShowGoogle:hover
+{
+ color: #0099CC;
+}
+
+a.EclipseChasers
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: none;
+}
+
+a.EclipseChasers:visited
+{
+ color: #6699CC;
+}
+
+a.EclipseChasers:hover
+{
+ color: #0099CC; text-decoration: underline;
+}
+
+a.Map_5MCSE
+{
+ font-size: 9pt; font-weight: bold;
+ color: #FFFFFF; text-decoration: underline;
+}
+
+a.Map_5MCSE:visited
+{
+ color: #6699CC;
+}
+
+a.Map_5MCSE:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.Map_5MCLE
+{
+ font-size: 9pt; font-weight: bold;
+ color: #FFFFFF; text-decoration: underline;
+}
+
+a.Map_5MCLE:visited
+{
+ color: #6699CC;
+}
+
+a.Map_5MCLE:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.SlideNav
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.SlideNav:visited
+{
+ color: #006699;
+}
+
+a.SlideNav:hover
+{
+ color: #006699;
+}
+
+a.ImageSlide
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.ImageSlide:visited
+{
+ color: #6699CC;
+}
+
+a.ImageSlide:hover
+{
+ color: #0099CC;
+}
+
+a.PageLinkHeader
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.PageLinkHeader:visited
+{
+ color: #6699CC;
+}
+
+a.PageLinkHeader:hover
+{
+ color: #FFFFFF; text-decoration: none;
+ background: #003366;
+}
+
+a.Browsers
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Browsers:visited
+{
+ color: #6699CC;
+}
+
+a.Browsers:hover
+{
+ color: #0099CC;
+}
+
+a.notyet
+{
+ font-size: 9pt; font-weight: bold;
+ color: #888888; text-decoration: underline;
+}
+
+a.notyet:visited
+{
+ color: #888888;
+}
+
+a.notyet:hover
+{
+ color: #AAAAAA;
+}
+
+a.ShowEclipseMap
+{
+ font-size: 12pt; font-weight: bold;
+ color: #000000; text-decoration: underline;
+}
+
+a.ShowEclipseMap:visited
+{
+ color: #6699CC;
+}
+
+a.ShowEclipseMap:hover
+{
+ color: #0099CC;
+}
+
+a.h2
+{
+ font-size: 14pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.h2:visited
+{
+ color: #6699CC;
+}
+
+a.h2:hover
+{
+ color: #0099CC;
+}
+
+a.h3
+{
+ font-size: 11pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.h3:visited
+{
+ color: #6699CC;
+}
+
+a.h3:hover
+{
+ color: #0099CC;
+}
+
+a.Index
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Index:visited
+{
+ color: #6699CC;
+}
+
+a.Index:hover
+{
+ color: #0099CC;
+}
+
+a.IndexCenterLg
+{
+ font-size: 8pt; font-weight: bold;
+ text-align: center;
+ color: #006699; text-decoration: underline;
+}
+
+a.IndexCenterLg:visited
+{
+ color: #6699CC;
+}
+
+a.IndexCenterLg:hover
+{
+ color: #0099CC;
+}
+
+a.IndexCenter
+{
+ font-size: 7pt; font-weight: bold;
+ text-align: center;
+ color: #006699; text-decoration: underline;
+}
+
+a.IndexCenter:visited
+{
+ color: #6699CC;
+}
+
+a.IndexCenter:hover
+{
+ color: #0099CC;
+}
+
+a.IndexNewsletters
+{
+ font-size: 8pt; font-weight: bold;
+ text-align: left;
+ color: #006699; text-decoration: underline;
+}
+
+a.IndexNewsletters:visited
+{
+ color: #6699CC;
+}
+
+a.IndexNewsletters:hover
+{
+ color: #0099CC;
+}
+
+a.download
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.download:visited
+{
+ color: #6699CC;
+}
+
+a.download:hover
+{
+ color: #0099CC;
+}
+
+a.eclipseworldatlas
+{
+ font-size: 7pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.eclipseworldatlas:visited
+{
+ color: #6699CC;
+}
+
+a.eclipseworldatlas:hover
+{
+ color: #0099CC;
+}
+
+a.fm_copyright
+{
+ font-size: 7pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.fm_copyright:visited
+{
+ color: #6699CC;
+}
+
+a.fm_copyright:hover
+{
+ color: #0099CC; text-decoration: none;
+}
+
+a.Instructions
+{
+ font-size: 9pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Instructions:visited
+{
+ color: #6699CC;
+}
+
+a.Instructions:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.Instructions2
+{
+ font-size: 8pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Instructions2:visited
+{
+ color: #6699CC;
+}
+
+a.Instructions2:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.Instructions7
+{
+ font-size: 7pt; font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+a.Instructions7:visited
+{
+ color: #6699CC;
+}
+
+a.Instructions7:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+
+a.Booking
+{
+ font-size: 8pt; font-weight: bold;
+ color: #FFFFFF; text-decoration: none;
+}
+
+a.Booking:visited
+{
+ color: #FFFFFF;
+}
+
+a.Booking:hover
+{
+ color: #FFFFFF;
+}
+
+a.APMLw
+{
+ font-size: 9pt; font-weight: bold;
+ color: white; text-decoration: underline;
+}
+
+a.APMLw:visited
+{
+ color: white;
+}
+
+a.APMLw:hover
+{
+ text-decoration: underline overline;
+}
+
+a.APMLb
+{
+ font-size: 7pt; font-weight: bold;
+ color: black; text-decoration: underline;
+}
+
+a.APMLb:visited
+{
+ color: black;
+}
+
+a.APMLb:hover
+{
+ text-decoration: underline overline;
+}
+
+a.ImageIconBottom, a.ImageIconBottom2
+{
+ font-size: 8pt;
+}
+
+.BookingInfo10
+{
+ font-size: 10px; font-weight: bold;
+ color: #FFFFFF; text-decoration: none;
+}
+
+.BookingInfo11
+{
+ font-size: 11px; font-weight: bold;
+ color: #FFFFFF; text-decoration: none;
+}
+
+.BookingInfo11red
+{
+ font-size: 11px; font-weight: bold;
+ color: #FF0000; text-decoration: none;
+}
+
+.BookingInfo11m
+{
+ font-size: 11px; font-weight: bold;
+ color: #FFFFFF; text-decoration: none;
+ margin-left: 6px;
+}
+
+.BookingInfo14
+{
+ font-size: 14px; font-weight: bold;
+ color: #FFFFFF; text-decoration: none;
+}
+
+.BookingInfo14u
+{
+ font-size: 14px; font-weight: bold;
+ color: #FFFFFF; text-decoration: underline;
+}
+
+.BookingInfo14um
+{
+ font-size: 14px; font-weight: bold;
+ color: #FFFFFF; text-decoration: underline;
+ margin-left: 6px;
+}
+
+.BookingInfo14c
+{
+ font-size: 14px; font-weight: bold;
+ color: #FFFFFF; text-decoration: none;
+ text-align: center;
+}
+
+.Tours
+{
+ font-size: 12px; font-weight: bold;
+ color: #006699; text-decoration: underline;
+ text-align: center;
+ cursor: pointer;
+}
+
+div.td
+{
+ font-size: 8pt;
+}
+
+div.tdm1, span.tdm1
+{
+ font-size: 7pt;
+}
+
+div.Tours:hover
+{
+ background-color: #F8EDCE;
+}
+
+div.ImageIconLink
+{
+ font-weight: bold;
+ color: #006699; text-decoration: underline;
+}
+
+div.ImageIconLink:visited
+{
+ color: #6699CC;
+}
+
+div.ImageIconLink:hover
+{
+ color: #0099CC; text-decoration: none;
+}
+
+.nobr
+{
+ white-space: nowrap;
+}
+
+.infotip
+{
+ text-align: left;
+ width: 80%;
+ margin-bottom: 1.5em;
+ margin-left: auto;
+ margin-right: auto;
+ padding: 5px 10px 5px 34px;
+ border: 1px solid #A7A772;
+ background: #FFFFD9 url('../images/Bulb.gif') no-repeat 10px 4px;
+}
+
+.flashBanner
+{
+ font-size: 11px;
+ color: #FF0000;
+ height: 18px;
+ width: 500px;
+ border-width: 0px;
+}
+
+.SolarActivity_Frame
+{
+ border-width: 1px;
+ border-style: solid;
+ border-color: #381D02;
+ background-color: #F8EDCE;
+ padding: 4px;
+ text-align: right;
+}
+
+.EC_Frame
+{
+ border-width: 1px;
+ border-style: solid;
+ border-color: #381D02;
+ background-color: #F8EDCE;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: normal;
+ text-align: justify;
+}
+
+.EC_Booking_Green
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #296469;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_Green:hover
+{
+ background-color: #389199;
+}
+
+td.EC_Booking_GreenCell
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #296469;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_GreenCell:hover
+{
+ background-color: #389199;
+}
+
+.EC_Booking_Yellow
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #BCA828;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_Yellow:hover
+{
+ background-color: #E7CE2F;
+}
+
+td.EC_Booking_YellowCell
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #BCA828;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_YellowCell:hover
+{
+ background-color: #E7CE2F;
+}
+
+.EC_Booking_Blue
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #006699;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_Blue:hover
+{
+ background-color: #0087CC;
+}
+
+td.EC_Booking_BlueCell
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #006699;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_BlueCell:hover
+{
+ background-color: #0087CC;
+}
+
+.EC_Booking_Purple
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #450045;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_Purple:hover
+{
+ background-color: #80047F;
+}
+
+td.EC_Booking_PurpleCell
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #450045;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_PurpleCell:hover
+{
+ background-color: #80047F;
+}
+
+.EC_Booking_Orange
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #CA6B2A;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_Orange:hover
+{
+ background-color: #FF8734;
+}
+
+td.EC_Booking_OrangeCell
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #CA6B2A;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_OrangeCell:hover
+{
+ background-color: #FF8734;
+}
+
+.EC_Booking_DarkBlue
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #365092;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_DarkBlue:hover
+{
+ background-color: #486FCC;
+}
+
+td.EC_Booking_DarkBlueCell
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #365092;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_DarkBlueCell:hover
+{
+ background-color: #486FCC;
+}
+
+.EC_Booking_Brown
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #914D1B;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_Brown:hover
+{
+ background-color: #CE6D25;
+}
+
+td.EC_Booking_BrownCell
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #914D1B;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_BrownCell:hover
+{
+ background-color: #CE6D25;
+}
+
+.EC_Booking_DarkBrown
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #594426;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_DarkBrown:hover
+{
+ background-color: #A77E46;
+}
+
+td.EC_Booking_DarkBrownCell
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #594426;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_DarkBrownCell:hover
+{
+ background-color: #A77E46;
+}
+
+.EC_Booking_Kaki
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #524F10;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+}
+
+div.EC_Booking_Kaki:hover
+{
+ background-color: #9F981F;
+}
+
+td.EC_Booking_Kaki
+{
+ border: 2px solid;
+ border-color: #EEEEEE #6E6E6E #6E6E6E #EEEEEE;
+ background-color: #524F10;
+ padding: 4px;
+ font-family: Verdana, Arial, Helvetica, Georgia, sans-serif;
+ font-size: 8pt;
+ font-weight: bold;
+ color: #FFFFFF;
+ text-align: center;
+ vertical-align: top;
+ cursor: pointer;
+}
+
+td.EC_Booking_KakiCell:hover
+{
+ background-color: #9F981F;
+}
+
+/* Doesn't work in IE */
+td.frameCell:hover
+{
+ background-color: #FF0000;
+}
+
+/* Doesn't work in IE */
+td.frameCellCenter:hover
+{
+ background-color: #FF0000;
+ text-align: center;
+}
+
+.clear_float
+{
+ clear: both;
+ visibility: hidden;
+}
+
+/* Navigation bar */
+#nav { float: left; width: 100%; background: #3B51D8; font-size: 1.1em; font-weight: bold; text-align: center; }
+#nav ul { margin: 0 0px; padding: 0; width: 100%; }
+#nav li { display: inline; list-style-type: none; text-align: center; vertical-align: bottom; }
+#nav li a { float: left; padding: 5px 10px; color: #FFFFFF; text-decoration: none; vertical-align: bottom; }
+#nav li a:hover { background: #9FAAEC; color: #FFFFFF; }
+#nav li a:visited { color: #FFFFFF; }
+#nav li a.Active { background: #9FAAEC; color: #000000; }
+#nav li a:hover.Active { background: #9FAAEC; color: #FFFFFF; }
+
+#nav2 { float: left; width: 100%; background: #3B51D8; font-size: 1.1em; font-weight: bold; text-align: center; }
+#nav2 ul { margin: 0 0px; padding: 0; width: 100%; }
+#nav2 li { display: inline; list-style-type: none; text-align: center; vertical-align: bottom; }
+#nav2 li a { float: left; padding: 5px 10px; color: #FFFFFF; text-decoration: none; vertical-align: bottom; }
+#nav2 li a:hover { background: #9FAAEC; color: #FFFFFF; }
+#nav2 li a:visited { color: #FFFFFF; }
+#nav2 li a.Active { background: #9FAAEC; color: #000000; }
+#nav2 li a:hover.Active { background: #9FAAEC; color: #FFFFFF; }
+
+/* Sub navigation bar */
+#subnav { float: left; width: 100%; background: #9FAAEC; font-size: 0.9em; font-weight: bold; text-align: center; }
+#subnav ul { margin: 0 0px; width: 100%; white-space: nowrap; }
+#subnav li { display: inline; list-style-type: none; }
+#subnav li a { float: left; padding: 2px 10px; color: #000000; text-decoration: none; }
+#subnav li a:visited { color: #000000; }
+#subnav li a:hover { background: #3B51D8; color: #FFFFFF; }
+#subnav li a.Active, #subnav li a.Active:visited { color: #FFFFFF; }
+#subnav li a.Secured, #subnav li a.Secured:visited { color: #CC0000; text-transform: uppercase; }
+
+#subnav2 { float: left; width: 100%; background: #9FAAEC; font-size: 0.9em; font-weight: bold; text-align: center; }
+#subnav2 ul { margin: 0 0px; width: 100%; white-space: nowrap; }
+#subnav2 li { display: inline; list-style-type: none; }
+#subnav2 li a { float: left; padding: 2px 10px; color: #000000; text-decoration: none; }
+#subnav2 li a:visited { color: #000000; }
+#subnav2 li a:hover { background: #3B51D8; color: #FFFFFF; }
+#subnav2 li a.Active, #subnav2 li a.Active:visited { color: #FFFFFF; }
+#subnav2 li a.Secured, #subnav2 li a.Secured:visited { color: #CC0000; text-transform: uppercase; }
+
+a.ImageRolloverTSE_2012a_816mm_CE
+{
+ background: url('../site_stickers/TSE_2012/TSE_2012a_816mm_CE.jpg') no-repeat 12px 0px;
+ width: 1024px;
+ height: 745px;
+ display: block;
+}
+
+a.ImageRolloverTSE_2012a_816mm_CE:hover
+{
+ background: url('../site_stickers/TSE_2012/TSE_2012a_816mm_CE.jpg') no-repeat 12px -745px;
+}
+
+select.icon-menu option {
+ background-repeat: no-repeat;
+ background-position: bottom left;
+ padding-left: 20px;
+}
+select#countries option[value="UN"] {
+ background-image: url(../images/language/UnitedNations.png);
+}
+select#countries option[value="US"] {
+ background-image: url(../images/language/UnitedStates.png);
+}
+select#countries option[value="FR"] {
+ background-image: url(../images/language/France.png);
+}
+select#countries option[value="SP"] {
+ background-image: url(../images/language/Spain.png);
+}
+select#countries option[value="DE"] {
+ background-image: url(../images/language/Germany.png);
+}
+select#countries option[value="IT"] {
+ background-image: url(../images/language/Italy.png);
+}
+select#countries option[value="RU"] {
+ background-image: url(../images/language/Russia.png);
+}
+select#countries option[value="JP"] {
+ background-image: url(../images/language/Japan.png);
+}
+select#countries option[value="CN"] {
+ background-image: url(../images/language/China.png);
+}
+select#countries option[value="PT"] {
+ background-image: url(../images/language/Portugal.png);
+}
+select#countries option[value="MA"] {
+ background-image: url(../images/language/Morocco.png);
+}
+select#countries option[value="KO"] {
+ background-image: url(../images/language/SouthKorea.png);
+}
+select#countries option[value="GR"] {
+ background-image: url(../images/language/Greece.png);
+}
+select#countries option[value="IR"] {
+ background-image: url(../images/language/Iran.png);
+}
+select#countries option[value="IS"] {
+ background-image: url(../images/language/Iceland.png);
+}
+select#countries option[value="NO"] {
+ background-image: url(../images/language/Norway.png);
+}
+select#countries option[value="FI"] {
+ background-image: url(../images/language/Finland.png);
+}
+select#countries option[value="SV"] {
+ background-image: url(../images/language/Sweden.png);
+}
+select#countries option[value="DA"] {
+ background-image: url(../images/language/Denmark.png);
+}
+
+/* Saros Catalog */
+#container900 {
+ width: 900px;
+ background: #8AF;
+ margin: 0 auto; /* the auto margins (in conjunction with a width) center the page */
+ border: 1px solid #000000;
+ text-align: left; /* this overrides the text-align: center on the body element. */
+}
+
+#mainContent {
+ padding: 0 0px;
+ background: #8AF;
+ color: #000;
+ font-size: small;
+}
+
+#mainContent h1 {
+ margin: 0; /* zeroing the margin of the last element in the #header div will avoid margin collapse - an unexplainable space between divs. If the div has a border around it, this is not necessary as that also avoids the margin collapse */
+ padding: 10px 0 0px 0;
+ font-size: x-large;
+ color: #000;
+}
+
+#mainContent h2 {
+ margin: 0; /* zeroing the margin of the last element in the #header div will avoid margin collapse - an unexplainable space between divs. If the div has a border around it, this is not necessary as that also avoids the margin collapse */
+ padding: 10px 0 0px 0;
+ font-size: large;
+ color: #000;
+}
+
+#mainContent h3 {
+ margin: 0;
+ padding: 10px 0 0px 0;
+ font-size: medium;
+ color: #000;
+}
+
+#mainContent h4 {
+ margin: 0;
+ padding: 10px 0 0px 0;
+ font-size: small;
+ color: #000;
+}
+
+.pbox1 {
+ padding: 10px 50px;
+ background: #FFF;
+ color: #000;
+ font-size: small;
+ margin: 10px 0px 30px 0px;
+}
+
+h1.smallcaps, h2.smallcaps, h3.smallcaps, h4.smallcaps {
+ font-variant: small-caps;
+}
+
+/* +++++++++++++++++++++++++++++++++++++++++++++++ */
+/* Tables */
+
+table.datatab, table.datataballcenter, table.datatab2 {
+ margin-top: 10px;
+ margin-bottom: 10px;
+}
+
+table.datataballcenter {
+ text-align: center;
+}
+
+table.datatab, table.datataballcenter, table.datatab2 {
+ border: 1px solid #666666;
+ margin-bottom: 15px;
+ font-size: 9pt;
+ vertical-align: middle;
+ border-spacing: 0;
+// border-collapse: collapse;
+}
+
+table.datatab thead tr td, table.datataballcenter thead tr td, table.datatab2 thead tr td {
+ background: #B0B6FF;
+ color: #000;
+ font-weight: bold;
+ padding: 3px 8px;
+ border-left: 1px solid white;
+ vertical-align: middle;
+ text-align: center;
+}
+
+table.datatab thead tr td.first, table.datataballcenter thead tr td, table.datatab2 thead tr td {
+ background: #B0B6FF;
+ color: #000;
+ font-weight: bold;
+ padding: 3px 8px;
+ border-left: 1px none white;
+ vertical-align: middle;
+ text-align: center;
+}
+
+table.datatab thead tr.subhead td, table.datataballcenter thead tr.subhead td, table.datatab2 thead tr.subhead td {
+ background: #ccf;
+ color: black;
+ font-weight: normal;
+ padding: 3px 8px;
+ border-left: 1px solid white;
+ vertical-align: middle;
+ text-align: center;
+}
+
+table.datatab thead tr.theading td, table.datataballcenter thead tr.theading td, table.datatab2 thead tr.theading td {
+ background: #ff8;
+ color: black;
+ font-weight: 700;
+ font-size: 14pt;
+ padding: 3px 8px;
+ border-left: 1px solid white;
+ vertical-align: middle;
+ text-align: center;
+}
+
+/* +++++++++++++++++++++++++++++++++++++++++++++++ */
+table.datatab thead tr.theading1 td, table.datataballcenter thead tr.theading td, table.datatab2 thead tr.theading td {
+ background: #969CFF;
+ color: black;
+ font-weight: 700;
+ font-size: 12pt;
+ padding: 3px 8px;
+ border-left: 1px solid white;
+ vertical-align: middle;
+ text-align: center;
+}
+
+table.datatab thead tr.theading1 td.first, table.datataballcenter thead tr.theading td, table.datatab2 thead tr.theading td {
+ background: #969CFF;
+ color: black;
+ font-weight: 700;
+ font-size: 12pt;
+ padding: 3px 8px;
+ border-left: 1px none white;
+ vertical-align: middle;
+ text-align: center;
+}
+
+/* +++++++++++++++++++++++++++++++++++++++++++++++ */
+table.datatab thead tr.theading2 td, table.datataballcenter thead tr.theading td, table.datatab2 thead tr.theading td {
+ background: #ff8;
+ color: black;
+ font-weight: 700;
+ font-size: 10pt;
+ padding: 3px 8px;
+ border-left: 1px solid white;
+ vertical-align: middle;
+ text-align: center;
+}
+
+/* +++++++++++++++++++++++++++++++++++++++++++++++ */
+
+table.datatab tbody tr td, table.datataballcenter tbody tr td {
+ font-size: 9pt;
+ padding: 3px 8px;
+ border-left: 1px solid #D9D9D9;
+ vertical-align: middle;
+}
+
+table.datatab2 tbody tr td {
+ font-size: 10pt;
+ padding: 1px 4px;
+ border-left: 1px solid #D9D9D9;
+ vertical-align: middle;
+}
+
+table.datatab tbody tr.odd td, table.datataballcenter tbody tr.odd td, table.datatab2 tbody tr.odd td {
+ background-color: #eef;
+ vertical-align: middle;
+ text-align: center;
+}
+
+table.datatab tbody tr.even td, table.datataballcenter tbody tr.even td, table.datatab2 tbody tr.even td {
+ background-color: #ddf;
+ vertical-align: middle;
+ text-align: center;
+}
+
+table.datatab tbody tr.odd1 td {
+ background-color: #eef;
+ vertical-align: middle;
+}
+
+table.datatab tbody tr.even1 td {
+ background-color: #ddf;
+ vertical-align: middle;
+}
+
+table.datatab tbody tr.odd2 td {
+ background-color: #eef;
+ vertical-align: middle;
+ text-align: center;
+}
+
+table.datatab tbody tr.even2 td {
+ background-color: #ddf;
+ vertical-align: middle;
+ text-align: center;
+}
+
+.APcenter8 {
+ text-align: center;
+ font-size: 8pt;
+ padding: 1px;
+}
+
+a.datatab
+{
+ font-size: 8pt; font-weight: normal;
+ color: #006699; text-decoration: underline;
+}
+
+a.datatab:visited
+{
+ color: #6699CC;
+}
+
+a.datatab:hover
+{
+ color: #0099CC; text-decoration: underline overline;
+}
+-->

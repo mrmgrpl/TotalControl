@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="fr"><head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <link href="a_data/widget_opmk.css" rel="stylesheet">
+        <style>
+        a, abbr, acronym, address, applet, article, aside, audio, b, big, blockquote, body, canvas, caption, center, cite, code, dd, del, details, dfn, dialog, div, dl, dt, em, embed, fieldset, figcaption, figure, font, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr, html, i, iframe, img, ins, kbd, label, legend, li, mark, menu, meter, nav, object, ol, output, p, pre, progress, q, rp, rt, ruby, s, samp, section, small, span, strike, strong, sub, summary, sup, table, tbody, td, tfoot, th, thead, time, tr, tt, u, ul, var, video, xmp {border: 0;margin: 0;padding: 0;font-size: 100%}
+        html, body {height: 100%}
+        article, aside, details, figcaption, figure, footer, header, hgroup, menu, nav, section {display: block}
+        b, strong {font-weight: bold}
+        img {color: transparent;font-size: 0;vertical-align: middle;-ms-interpolation-mode: bicubic}
+        ol, ul {list-style: none}
+        li {display: list-item}
+        table {border-collapse: collapse;border-spacing: 0}
+        th, td, caption {font-weight: normal;vertical-align: top;text-align: left}
+        q {quotes: none}
+        q:before, q:after {content: '';content: none}
+        sub, sup, small {font-size: 75%}
+        sub, sup {line-height: 0;position: relative;vertical-align: baseline}
+        sub {bottom: -0.25em}
+        sup {top: -0.5em}
+        svg {overflow: hidden}
+
+        body {
+            margin: 0px;
+        }
+        body a {
+            color: #FFFFFF;
+        }
+
+        strong {
+            font-weight: bold;
+        }
+
+        .widgetBox {
+            font-family: Arial, Helvetica, Verdana, sans-serif;
+            text-shadow: 0 1px 3px #555;
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+            font-size: 12px;
+            line-height: 13px;
+            position: relative;
+        }
+
+        .widgetContent {
+            background-size: cover;
+            background-position: 50% 50%;
+            background-repeat: no-repeat;
+            background-color: #FFFFFF;
+            position: absolute;
+            z-index: 9;
+        }
+
+        .widgetBox .text {
+            position: relative;
+            z-index: 9;
+        }
+
+        .icon {
+            position: absolute;
+            z-index: 5;
+            top: 16px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            margin: 0 auto;
+            width: 70px;
+            height: 60px;
+        }
+
+        .icon img {
+            width: 100%;
+        }
+
+        strong {
+            font-weight: bold;
+        }
+
+            </style>
+        <style>
+        .day1 {
+            position: relative;
+            float: left;
+            width: 270px;
+            height: 54px;
+            padding: 3px 5px;
+        }
+
+        .day1 .icon {
+            top: 4px;
+            right: 35px;
+        }
+
+        .day1 .iconsize_1{
+            width:50px;
+            right:10px;
+        }
+
+        .day1 .day {
+            font-size: 12px;
+            line-height: 13px;
+            font-weight: bold;
+        }
+
+        .day1 .temperatures {
+            font-size: 48px;
+            line-height: 40px;
+            font-weight: bold;
+        }
+
+        .day1 .description {
+            float: right;
+            width: 45%;
+        }
+
+        .overlay, .widgetBox {
+            height: 60px;
+        }
+
+        .dayBox:not(.day1) {
+            position: relative;
+            float: left;
+            width: 80px;
+            height: 54px;
+            padding: 3px 5px;
+            text-align: center;
+        }
+
+        .dayBox:not(.day1) .day {
+            margin: 0 0 28px;
+            font-weight: bold;
+        }
+
+        .dayBox:not(.day1) .icon {
+            width: 50px;
+        }
+
+        .dayBox:not(.day1) .iconsize_1 {
+            width: 30px;
+        }
+
+        .dayBox:not(.day1) .temperatures {
+            font-weight: bold;
+        }
+
+        .nbDays_1 {
+            width: 280px;
+        }
+
+        .nbDays_1 .overlay {
+            background: transparent url("https://www.meteocity.com/build/images/widget/style1/horizontal-1day-overlay.png") no-repeat 0 0;
+            width: 280px;
+        }
+
+        .nbDays_2 {
+            width: 370px;
+        }
+
+        .nbDays_2 .overlay {
+            background: transparent url("https://www.meteocity.com/build/images/widget/style1/horizontal-2days-overlay.png") no-repeat 0 0;
+            width: 370px;
+        }
+
+        .nbDays_3 {
+            width: 460px;
+        }
+
+        .nbDays_3 .overlay {
+            background: transparent url("https://www.meteocity.com/build/images/widget/style1/horizontal-3days-overlay.png") no-repeat 0 0;
+            width: 460px;
+        }
+
+        .nbDays_4 {
+            width: 550px;
+        }
+
+        .nbDays_4 .overlay {
+            background: transparent url("https://www.meteocity.com/build/images/widget/style1/horizontal-4days-overlay.png") no-repeat 0 0;
+            width: 550px;
+        }
+
+        .nbDays_5 {
+            width: 640px;
+        }
+
+        .nbDays_5 .overlay {
+            background: transparent url("https://www.meteocity.com/build/images/widget/style1/horizontal-5days-overlay.png") no-repeat 0 0;
+            width: 640px;
+        }
+    </style>
+</head>
+<body style="width:280px;height:60;">
+
+
+<div class="widgetBox format_4 nbDays_1">
+    <div class="widgetContent bgstyle-1">
+        <div class="overlay">
+                                            <a target="_top" class="widgetBox" href="https://www.meteocity.com/france/antony-v3037423?utm_medium=widget&amp;utm_source=referral&amp;utm_campaign=france-antony-v3037423&amp;utm_content=widget">
+                    <div class="dayBox day1">
+                            
+    <div class="text">
+                    <div class="description">
+                <strong>Très nuageux</strong>
+                <div class="moreDescription">
+                    Humidité : <strong>37%</strong><br>
+                    Vent : <strong>16 km/h</strong><br>
+                    <strong>Nord-Nord-Est</strong>
+                </div>
+            </div>
+            <div class="temperatures">32°</div>
+            <div class="day">Mercredi 15 Juillet</div>
+            </div>
+                        <div class="icon iconsize_1">
+                                                            <img src="a_data/cloudy-lvl3_opmk.webp">
+                                                    </div>
+                    </div>
+                </a>
+                    </div>
+    </div>
+</div>
+
+
+</body></html>

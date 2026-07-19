@@ -2404,8 +2404,8 @@ void App::InitTracks() {
 
     TLTrack cam1;
     cam1.type     = "camera";
-    cam1.cameraId = "ILCE-7RM4A";
-    cam1.label    = "Cam1 ILCE-7RM4A";
+    cam1.cameraId = "";           // model-agnostic: targets camera[0] at runtime,
+    cam1.label    = "Cam1";       // label recomputed from live connection (TrackLabel())
     m_tracks.push_back(std::move(cam1));
 
     TLTrack audio;
@@ -3976,18 +3976,47 @@ void App::RenderTimelineBottom() {
     std::vector<CamStatus> camSnap;
     { std::lock_guard lk(m_camerasMutex); camSnap = m_cameras; }
 
-    // Helper: resolve track label from connection state
-    auto TrackLabel = [&](const TLTrack& tr) -> std::string {
-        if (tr.IsAudio()) return "Audio track";
-        if (tr.cameraId.empty()) return "Photo track";
-        for (const auto& cs : camSnap) {
-            if (cs.model == tr.cameraId && !cs.guid.empty()) {
-                std::string sid = cs.guid.size() >= 4
-                    ? cs.guid.substr(cs.guid.size() - 4) : cs.guid;
-                return cs.model + "  #" + sid;
-            }
+    // Grow camera-track count to match detected cameras (up to kMaxCamTracks) —
+    // the operator doesn't need to manually add a track when connecting another
+    // camera; a new track appears next to the existing camera tracks with a
+    // "CamN" placeholder and immediately picks up the real model+GUID via
+    // TrackLabel() below. Never shrinks — a camera briefly dropping out must
+    // not delete a track's configured blocks.
+    {
+        int numCamTracks = 0, lastCamIdx = -1;
+        for (int i = 0; i < static_cast<int>(m_tracks.size()); ++i)
+            if (m_tracks[i].IsCamera()) { ++numCamTracks; lastCamIdx = i; }
+        int wantTracks = std::min<int>(static_cast<int>(camSnap.size()), kMaxCamTracks);
+        while (numCamTracks < wantTracks) {
+            TLTrack t;
+            t.type  = "camera";
+            t.label = std::format("Cam{}", numCamTracks + 1);
+            m_tracks.insert(m_tracks.begin() + (lastCamIdx + 1), std::move(t));
+            ++numCamTracks;
+            ++lastCamIdx;
+            m_tlDirty = true;
+            LogLine(std::format("Timeline: auto-added camera track ({} camera(s) detected)",
+                                 numCamTracks));
         }
-        return tr.cameraId;   // configured but camera not connected yet
+    }
+
+    // Helper: resolve track label from connection state. camPos is this track's
+    // position among camera tracks only (0-based, top-to-bottom) — the same
+    // position used by BuildBlockCmd's camIdx for "cam":"N" pipe routing, which
+    // in turn matches camSnap[N] (SRV sorts cameras by GUID at startup, see
+    // main.cpp, so slot N is deterministic run to run). Default placeholder is
+    // positional ("Cam1"/"Cam2"/…), swapped for the real model+GUID once that
+    // slot reports a connected camera.
+    auto TrackLabel = [&](const TLTrack& tr, int camPos) -> std::string {
+        if (tr.IsAudio()) return "Audio track";
+        if (camPos >= 0 && camPos < static_cast<int>(camSnap.size())
+                         && !camSnap[camPos].model.empty()) {
+            const auto& cs = camSnap[camPos];
+            std::string sid = cs.guid.size() >= 4
+                ? cs.guid.substr(cs.guid.size() - 4) : cs.guid;
+            return sid.empty() ? cs.model : cs.model + "  #" + sid;
+        }
+        return std::format("Cam{}", camPos + 1);
     };
 
     ImGui::SeparatorText("TIMELINE");
@@ -4443,17 +4472,21 @@ void App::RenderTimelineBottom() {
 
     // Draw tracks — pass 1: backgrounds, block fills, labels
     // 2-px gap at the bottom of each track (ty2-2 instead of ty2) separates rows visually.
+    // camPos tracks each camera track's position among camera tracks only (top to
+    // bottom) — matches BuildBlockCmd's camIdx numbering (see TrackLabel above).
+    int camPos = 0;
     for (int ti = 0; ti < nT; ++ti) {
         TLTrack& tr  = m_tracks[ti];
         float ty     = tracksY + ti * kTrackH;
         float tyFill = ty + kTrackH - 2.f;   // bottom of visible content (2px gap below)
+        int   myCamPos = tr.IsCamera() ? camPos++ : -1;
 
         // Label column — highlighted when track is selected
         bool isSelTrack = (ti == m_selTrack);
         ImU32 labelBg = isSelTrack ? IM_COL32(28, 40, 62, 255) : IM_COL32(14, 14, 22, 255);
         dl->AddRectFilled({winPos.x, ty}, {winPos.x + kLabelW - 2.f, tyFill}, labelBg);
         ImU32 lc = tr.IsAudio() ? IM_COL32(150,100,210,255) : IM_COL32(120,148,172,255);
-        std::string dynLbl = TrackLabel(tr);
+        std::string dynLbl = TrackLabel(tr, myCamPos);
 
         dl->AddText({winPos.x + 8.f, ty + 7.f}, lc, dynLbl.c_str());
         // Left-click on track label → select track (highlights label background)
@@ -4831,6 +4864,24 @@ App::App() {
         if (!saved.empty()) {
             m_tracks = std::move(saved);
             LogLine(std::format("Timeline loaded: {} tracks from DB", m_tracks.size()));
+
+            // Migration: clear cameraId saved before the "model-agnostic" fix
+            // (InitTracks() used to hardcode cameraId="ILCE-7RM4A" on the first
+            // camera track). cameraId is never user-settable anywhere in this
+            // app — every track-creation path sets it to "" — so any non-empty
+            // value loaded from an older DB is guaranteed leftover from that
+            // hardcoded default, not user configuration.
+            bool migratedCamId = false;
+            for (auto& tr : m_tracks) {
+                if (tr.type == "camera" && !tr.cameraId.empty()) {
+                    tr.cameraId.clear();
+                    migratedCamId = true;
+                }
+            }
+            if (migratedCamId) {
+                LogLine("Timeline migration: cleared stale hardcoded cameraId on camera track(s)");
+                m_tlDirty = true;
+            }
         }
 
         // Seed calibration snapshot once (idempotent)
@@ -6618,6 +6669,8 @@ void App::RenderMenuBar() {
     if (ImGui::BeginMenu("About")) {
         if (ImGui::MenuItem("About TotalControl"))
             m_showAbout = true;
+        if (ImGui::MenuItem("What's New"))
+            m_showWhatsNew = true;
         if (ImGui::MenuItem("Open GitHub")) {
             ShellExecuteW(nullptr, L"open",
                 L"https://github.com/mrmgrpl/TotalControl",
@@ -6690,6 +6743,48 @@ void App::RenderOptionsWindow() {
     assert(true); // postcondition: all controls rendered
     ImGui::PopFont();
     ImGui::End();
+}
+
+// ─── Minimal markdown renderer (no external library — hand-written, project convention) ───
+// Supports: "# "/"## " headers (gold), "- "/"* " bullets, blank line = spacing. Everything
+// else is plain text. Good enough for WHATS_NEW.md; not a general-purpose markdown renderer.
+void App::RenderMarkdownBody(const std::string& md) {
+    assert(!md.empty()); // caller checks emptiness before calling
+    static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
+    static const ImVec4 kText {0.85f, 0.85f, 0.88f, 1.0f};
+
+    size_t pos = 0;
+    size_t lineCount = 0;
+    static constexpr size_t kMaxLines = 20000; // bounded loop (rule 2); WHATS_NEW.md is hand-edited
+    while (pos <= md.size() && lineCount < kMaxLines) {
+        ++lineCount;
+        size_t eol = md.find('\n', pos);
+        std::string line = (eol == std::string::npos) ? md.substr(pos) : md.substr(pos, eol - pos);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        if (line.empty()) {
+            ImGui::Spacing();
+        } else if (line.rfind("## ", 0) == 0) {
+            ImGui::Spacing();
+            ImGui::TextColored(kGold, "%s", line.substr(3).c_str());
+        } else if (line.rfind("# ", 0) == 0) {
+            ImGui::Spacing();
+            ImGui::PushFont(m_fontLarge);
+            ImGui::TextColored(kGold, "%s", line.substr(2).c_str());
+            ImGui::PopFont();
+        } else if (line.rfind("- ", 0) == 0 || line.rfind("* ", 0) == 0) {
+            // Plain ASCII "-" bullet: AddFontFromFileTTF uses ImGui's default
+            // glyph range (Basic Latin + Latin-1 only), which excludes U+2022
+            // (bullet) and renders it as a missing-glyph placeholder.
+            ImGui::TextColored(kText, "  - %s", line.substr(2).c_str());
+        } else {
+            ImGui::TextColored(kText, "%s", line.c_str());
+        }
+
+        if (eol == std::string::npos) break;
+        pos = eol + 1;
+    }
+    assert(lineCount <= kMaxLines); // postcondition: loop bound respected
 }
 
 // ─── About modal ──────────────────────────────────────────────────────────────
@@ -6816,6 +6911,49 @@ void App::RenderAboutModal() {
     ImGui::EndPopup();
 }
 
+// ─── What's New modal ─────────────────────────────────────────────────────────
+
+void App::RenderWhatsNewModal() {
+    assert(true); // invariant: always callable; m_showWhatsNew guards early-out
+    if (!m_showWhatsNew) return;
+    ImGui::OpenPopup("What's New");
+    ImGui::SetNextWindowSize(ImVec2(580, 620), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+
+    if (!ImGui::BeginPopupModal("What's New", &m_showWhatsNew,
+                                ImGuiWindowFlags_NoResize))
+        return;
+
+    if (!m_whatsNewLoaded) {
+        m_whatsNewLoaded = true; // attempt once per process; missing file just renders empty
+        std::wstring path = ExeDir() + L"\\WHATS_NEW.md";
+        std::ifstream f(path, std::ios::binary);
+        if (f)
+            m_whatsNewMd.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+
+    static const ImVec4 kGray {0.55f, 0.55f, 0.60f, 1.0f};
+
+    ImGui::BeginChild("##whatsnew_body", ImVec2(0, -44.f), false, ImGuiWindowFlags_None);
+    ImGui::PushFont(m_fontMono);
+    if (m_whatsNewMd.empty())
+        ImGui::TextColored(kGray, "  (WHATS_NEW.md not found next to executable)");
+    else
+        RenderMarkdownBody(m_whatsNewMd);
+    ImGui::PopFont();
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    ImGui::Spacing();
+    float btnW = 80.f;
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - btnW) * 0.5f);
+    if (ImGui::Button("Close", ImVec2(btnW, 0)))
+        m_showWhatsNew = false;
+
+    ImGui::EndPopup();
+}
+
 // ─── Main frame ───────────────────────────────────────────────────────────────
 
 void App::OnFrame() {
@@ -6858,6 +6996,7 @@ void App::OnFrame() {
 
     // ── About + Options + snapshot modals ────────────────────────────────
     RenderAboutModal();
+    RenderWhatsNewModal();
     RenderOptionsWindow();
     if (m_configDb.IsOpen()) RenderSnapshotModal();
 

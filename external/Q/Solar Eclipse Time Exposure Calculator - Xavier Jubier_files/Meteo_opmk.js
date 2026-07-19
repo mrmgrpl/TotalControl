@@ -1,0 +1,4 @@
+<!--
+//document.write( "<img src='http://perso0.free.fr/cgi-bin/meteo.pl?dep=92' alt='Meteo'>" );
+document.write( '<div id="cont_OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx"><div id="spa_OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx"><a id="a_OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx" href="http://www.meteocity.com/france/antony_v92002/" target="_blank" rel="nofollow" style="font-size: 7px; color: #333333; text-decoration: none;" title="Antony, France">M&eacute;t&eacute;o Antony, France</a><span style="font-size: 7px;"> &copy;</span><a href="http://www.meteocity.com" target="_blank" rel="nofollow" style="font-size: 7px;">meteocity.com</a></div><script language="JavaScript" type="text/javascript" src="http://widget.meteocity.com/js/OTIwMDJ8MXw0fDF8MXxGRkZGRkZ8MXxGRkZGRkZ8Y3wx"></script></div>' );
+//-->

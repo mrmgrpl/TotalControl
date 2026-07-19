@@ -217,6 +217,14 @@ add_custom_command(TARGET TotalControlGUI POST_BUILD
     COMMENT "Copy TotalControlData.db -> SRV output dir"
 )
 
+# Copy WHATS_NEW.md next to SRV exe (read by About > What's New tab)
+add_custom_command(TARGET TotalControlGUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/WHATS_NEW.md"
+        "$<TARGET_FILE_DIR:TotalControlSRV>/WHATS_NEW.md"
+    COMMENT "Copy WHATS_NEW.md -> SRV output dir"
+)
+
 # Copy GUI exe next to SRV exe
 add_custom_command(TARGET TotalControlGUI POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
