@@ -7196,6 +7196,7 @@ void App::RenderCloseConfirmModal() {
 void App::RenderMarkdownBody(const std::string& md) {
     assert(!md.empty()); // caller checks emptiness before calling
     static const ImVec4 kGold {0.95f, 0.80f, 0.20f, 1.0f};
+    static const ImVec4 kSub  {0.55f, 0.80f, 0.95f, 1.0f}; // ### author-name subheadings
     static const ImVec4 kText {0.85f, 0.85f, 0.88f, 1.0f};
 
     size_t pos = 0;
@@ -7209,6 +7210,8 @@ void App::RenderMarkdownBody(const std::string& md) {
 
         if (line.empty()) {
             ImGui::Spacing();
+        } else if (line.rfind("### ", 0) == 0) {
+            ImGui::TextColored(kSub, "%s", line.substr(4).c_str());
         } else if (line.rfind("## ", 0) == 0) {
             ImGui::Spacing();
             ImGui::TextColored(kGold, "%s", line.substr(3).c_str());
@@ -7221,9 +7224,13 @@ void App::RenderMarkdownBody(const std::string& md) {
             // Plain ASCII "-" bullet: AddFontFromFileTTF uses ImGui's default
             // glyph range (Basic Latin + Latin-1 only), which excludes U+2022
             // (bullet) and renders it as a missing-glyph placeholder.
+            ImGui::PushTextWrapPos(0.0f); // wrap at the child window's right edge
             ImGui::TextColored(kText, "  - %s", line.substr(2).c_str());
+            ImGui::PopTextWrapPos();
         } else {
+            ImGui::PushTextWrapPos(0.0f);
             ImGui::TextColored(kText, "%s", line.c_str());
+            ImGui::PopTextWrapPos();
         }
 
         if (eol == std::string::npos) break;
@@ -7362,7 +7369,7 @@ void App::RenderWhatsNewModal() {
     assert(true); // invariant: always callable; m_showWhatsNew guards early-out
     if (!m_showWhatsNew) return;
     ImGui::OpenPopup("What's New");
-    ImGui::SetNextWindowSize(ImVec2(580, 620), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(960, 540), ImGuiCond_Always); // 16:9
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
