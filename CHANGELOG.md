@@ -16,16 +16,17 @@
 - Fixed a race condition when changing camera settings (ARM) - shoot/bracket/arm commands now reject the shot if the settings were not confirmed by the camera
 - Fixed a locale bug that broke parsing of fractional EV values (0.3ev, 0.5ev, 0.7ev)
 - Expanded the IQP/BE model tooltips with proper attribution: IQP names its source (besselianelements.com); BE now spells out its full name ("Besselian Elements"), and credits Fred Espenak (NASA GSFC, elements dataset), Jean Meeus ("Elements of Solar Eclipses", 1989, algorithm), and Greg Miller (celestialprogramming.com, the public-domain reference code this app's implementation follows)
-- Added a note to the BE tooltip that it uses a smooth, circular lunar limb with no libration/limb-profile correction, so C2/C3 can differ by roughly 1-2 seconds from limb-corrected tools (C1/C4/Max are far less sensitive to this and should stay in close agreement); closing line now reads "Use this model if you can't obtain an IQP API key."
 - Moved the "IQP / BE" primary-model selector to sit next to the Altitude field in the LOCATION section, instead of its own row above the contact table; label reworded ("Primary:" -> "Choose prediction model") and moved after the two options
-
-### Alexandru Barbovschi
 - Relabeled the GE contact-times table headers to "GE C1/C2/MAX/C3/C4" and removed the redundant "GE contact times (UTC)" caption above it
 - Added an explicit "Primary: IQP / BE" choice above the contact-time table (TIME section), so it's clear which of the two independent calculation engines actually drives generated Timeline blocks (One Picture Per Minute, Totality Brackets, audio presets, Snap to Seconds), the T- countdown, and the Loc (local time zone) column, instead of silently always preferring IQP. Falls back to the other engine automatically if the chosen one isn't available yet; the IQP and BE columns keep showing their own results side by side regardless of the choice
 - Fixed the GOES-19 SUVI corona image's burned-in date/time stamp and NOAA logo showing up overlapping the solar simulator - the bottom edge of the image is now masked out transparently before it's displayed
+- The IQP/BE/Loc/T- column headers and the C1/C2/Max/C3/C4/Rise/Set row labels in the contact-time table now have their own tooltips, addressing the "column names aren't explained" report
+- Moved the GE (greatest eclipse) contact times out of that table into their own small table in the ECLIPSE section, next to the eclipse picker - GE times are a property of the eclipse itself, not of the observer's location, so they didn't belong alongside the location-dependent IQP/BE/Loc columns
+
+### Alexandru Barbovschi
+- Added a note to the BE tooltip that it uses a smooth, circular lunar limb with no libration/limb-profile correction, so C2/C3 can differ by roughly 1-2 seconds from limb-corrected tools (C1/C4/Max are far less sensitive to this and should stay in close agreement); closing line now reads "Use this model if you can't obtain an IQP API key."
 - Added a confirmation dialog before closing the GUI (X button, Alt+F4, or File > Quit), stating that a restart takes about 5 seconds, and warning that the camera server keeps running if it's still connected
 - Added the same protection to the camera server (TotalControlSRV): closing its console window or pressing Ctrl+C now asks for confirmation first, warning that reconnecting to the cameras afterward can take up to 60 seconds - system logoff/shutdown are not blocked, only operator actions
-- The IQP/BE/Loc/T- column headers and the C1/C2/Max/C3/C4/Rise/Set row labels in the contact-time table now have their own tooltips, addressing the "column names aren't explained" report
 
 ### John Melson
 - Added remote control of the camera's Focus Magnifier (Live View zoom) -- needed for passive/manual optics like a telescope, which never send the focus-ring-turning signal a native Sony lens uses to trigger this automatically. Four buttons (Off / x1.0 / x5.9 / x11.9) next to each camera's Live View opacity slider in SIMULATOR CONFIG; confirmed live on real hardware -- pressing a button visibly changes the zoom shown on the camera's own screen, not just the value TotalControl reads back
@@ -40,7 +41,6 @@
 
 ### Alessandro Pessi
 - Contact-time table (IQP/BE/Loc columns, all rows: C1/C2/Max/C3/C4/Rise/Set) now shows full HH:MM:SS.mmm precision instead of HH:MM - the underlying data was already millisecond-accurate, only the display was truncated to the minute (also reported independently by Alexandru Barbovschi)
-- Moved the GE (greatest eclipse) contact times out of that table into their own small table in the ECLIPSE section, next to the eclipse picker - GE times are a property of the eclipse itself, not of the observer's location, so they didn't belong alongside the location-dependent IQP/BE/Loc columns
 - Added a tooltip on the "Paste Google Maps URL" field explaining that coordinates can also be typed directly into the Latitude/Longitude fields above it, without a link
 
 ## 2026-07-08 - Initial release
