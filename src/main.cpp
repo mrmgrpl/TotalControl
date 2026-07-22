@@ -34,11 +34,27 @@ static std::string WtoU8(const std::wstring& w) {
     return s;
 }
 
+// ISO 8601 local timestamp, YYYY-MM-DDTHH:MM:SS.ffff — the 4-digit fraction
+// (ten-thousandths of a second) needs sub-millisecond precision, which
+// SYSTEMTIME/GetLocalTime doesn't provide (only 3-digit milliseconds), so
+// this derives both date/time fields and the fraction from the same
+// 100ns-resolution FILETIME instead.
+static void FormatLogTimestamp(wchar_t* out, size_t outCap) {
+    FILETIME ftUtc; GetSystemTimePreciseAsFileTime(&ftUtc);
+    FILETIME ftLocal;
+    FileTimeToLocalFileTime(&ftUtc, &ftLocal);
+    SYSTEMTIME st;
+    FileTimeToSystemTime(&ftLocal, &st);
+    ULARGE_INTEGER ui; ui.LowPart = ftLocal.dwLowDateTime; ui.HighPart = ftLocal.dwHighDateTime;
+    int frac4 = static_cast<int>((ui.QuadPart % 10000000ULL) / 1000ULL);
+    swprintf_s(out, outCap, L"%04d-%02d-%02dT%02d:%02d:%02d.%04d",
+               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, frac4);
+}
+
 // File + console + DebugView. Breaks line first if console was in dot mode.
 static void LogLine(const wchar_t* msg) {
-    SYSTEMTIME st; GetLocalTime(&st);
-    wchar_t ts[16];
-    swprintf_s(ts, L"%02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    wchar_t ts[32];
+    FormatLogTimestamp(ts, std::size(ts));
     std::wstring line = std::wstring(ts) + L"  " + msg;
 
     std::lock_guard<std::mutex> lk(g_logMutex);
@@ -50,9 +66,8 @@ static void LogLine(const wchar_t* msg) {
 
 // File only (no console) — for seq_status polling.
 static void LogFileOnly(const wchar_t* msg) {
-    SYSTEMTIME st; GetLocalTime(&st);
-    wchar_t ts[16];
-    swprintf_s(ts, L"%02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    wchar_t ts[32];
+    FormatLogTimestamp(ts, std::size(ts));
     std::wstring line = std::wstring(ts) + L"  " + msg;
     std::lock_guard<std::mutex> lk(g_logMutex);
     if (g_logFile.is_open()) { g_logFile << WtoU8(line) << "\n"; g_logFile.flush(); }
@@ -76,9 +91,8 @@ static void LogBanner(const wchar_t* msg) {
 
 // Timestamp log in bright red — for critical startup warnings.
 static void LogWarning(const wchar_t* msg) {
-    SYSTEMTIME st; GetLocalTime(&st);
-    wchar_t ts[16];
-    swprintf_s(ts, L"%02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    wchar_t ts[32];
+    FormatLogTimestamp(ts, std::size(ts));
     std::wstring line = std::wstring(ts) + L"  " + msg;
     std::lock_guard<std::mutex> lk(g_logMutex);
     if (g_logFile.is_open()) { g_logFile << WtoU8(line) << "\n"; g_logFile.flush(); }

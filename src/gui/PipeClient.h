@@ -12,16 +12,26 @@ enum class PipeError {
     NotConnected,    // pipe handle is INVALID_HANDLE_VALUE
     WriteFailed,     // WriteFile() returned false
     ReadFailed,      // ReadFile() returned false or read == 0
-    ResponseTooLarge // response exceeded safety limit (1 MiB)
+    ResponseTooLarge,// response exceeded safety limit (1 MiB)
+    Timeout          // no response within kIoTimeoutMs — pipe is closed, caller may retry
 };
 
 std::string_view PipeErrorMessage(PipeError e) noexcept;
 
-// Synchronous JSON-Lines client for \\.\pipe\TotalControl.
-// SendRequest() is thread-safe (blocking, holds mutex for duration of call).
+// Synchronous-style (blocking, but bounded) JSON-Lines client for
+// \\.\pipe\TotalControl. SendRequest() is thread-safe (holds mutex for the
+// duration of the call) and internally uses overlapped I/O with a timeout —
+// a stuck/unresponsive server can never hang the calling thread forever
+// (see Change log: a caller blocked in an untimed ReadFile could not be
+// interrupted even by the caller's own shutdown request, freezing the GUI).
 class PipeClient {
 public:
     enum class State { Disconnected, Connected };
+
+    // Bound on a single request/response round trip. Must comfortably exceed
+    // the slowest legitimate SRV operation — CommandHandler's DriveMode
+    // verify budget (kDriveModeVerifyMs) is 6000ms, so this leaves margin.
+    static constexpr DWORD kIoTimeoutMs = 10000;
 
     PipeClient()  = default;
     ~PipeClient() { Disconnect(); }

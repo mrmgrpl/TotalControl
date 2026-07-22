@@ -36,6 +36,7 @@ endforeach()
 set(SRV_SOURCES
     src/main.cpp
     src/CameraController.cpp
+    src/DriveModeNames.cpp
     src/daemon/PipeServer.cpp
     src/daemon/CommandHandler.cpp
     src/SequencerEngine.cpp
@@ -173,6 +174,7 @@ add_executable(TotalControlGUI WIN32
     src/gui/SdoClient.cpp
     src/gui/ElevationClient.cpp
     src/gui/GeocodeClient.cpp
+    src/gui/IersDeltaTClient.cpp
     src/gui/gui.rc
 )
 

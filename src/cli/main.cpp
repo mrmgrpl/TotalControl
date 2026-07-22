@@ -15,12 +15,22 @@ static void LogOpen(const std::wstring& dir) {
 
 static void Log(const std::string& msg) {
     if (!g_log.is_open()) return;
+    // ISO 8601 local timestamp, YYYY-MM-DDTHH:MM:SS.ffff — the 4-digit
+    // fraction (ten-thousandths of a second) needs sub-millisecond
+    // precision, which SYSTEMTIME/GetLocalTime doesn't provide (only
+    // 3-digit milliseconds), so this derives everything from a
+    // 100ns-resolution FILETIME instead.
+    FILETIME ftUtc; GetSystemTimePreciseAsFileTime(&ftUtc);
+    FILETIME ftLocal;
+    FileTimeToLocalFileTime(&ftUtc, &ftLocal);
     SYSTEMTIME st;
-    GetLocalTime(&st);
+    FileTimeToSystemTime(&ftLocal, &st);
+    ULARGE_INTEGER ui; ui.LowPart = ftLocal.dwLowDateTime; ui.HighPart = ftLocal.dwHighDateTime;
+    int frac4 = static_cast<int>((ui.QuadPart % 10000000ULL) / 1000ULL);
     char ts[32];
-    snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+    snprintf(ts, sizeof(ts), "%04d-%02d-%02dT%02d:%02d:%02d.%04d",
              st.wYear, st.wMonth, st.wDay,
-             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+             st.wHour, st.wMinute, st.wSecond, frac4);
     g_log << ts << "  " << msg << "\r\n";
     g_log.flush();
 }

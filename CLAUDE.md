@@ -300,6 +300,16 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Bracket + ARM timing calibration (measured, not guessed)** | **DONE 2026-07-12** |
 | **CLI `arm` subcommand** | **DONE 2026-07-12** |
 | **Buffer-depletion model (repeated identical brackets)** | **IN PROGRESS — see Change log** |
+| **Multi-camera true concurrency (SRV per-camera locks + acceptor pool, GUI per-camera pipe/threads)** | **DONE 2026-07-21** |
+| **GUI/SRV hang-on-stop fix (PipeClient overlapped I/O + timeout)** | **DONE 2026-07-21** |
+| **DriveModeNames — shared hex→string decoder (SRV status + CommandHandler)** | **DONE 2026-07-21** |
+| **Live Delta-T (IERS bulletin fetch/cache/24h refresh)** | **DONE 2026-07-21** |
+| **Per-model ARM latency calibration (arm_calibration table, ArmEstMs)** | **DONE 2026-07-21** |
+| **ISO 8601 log timestamps (4-decimal fraction, all 3 executables)** | **DONE 2026-07-21** |
+| **"Bracket ARM Calibration" + "Bracket SS Sweep" presets (Photo Sequence menu)** | **DONE 2026-07-21** |
+| **BracketExposureSumMs — shutter-speed 30s ceiling clamp** | **DONE 2026-07-22** |
+| **bracket_calibration corruption from SS Sweep runs (missing `ss` tag on samples)** | **OPEN — diagnosed, not fixed, see Change log 2026-07-22** |
+| **Camera USB connect speedup (~25s/camera, `CreateCameraObjectInfoUSBConnection`)** | **PAUSED — investigated, not implemented** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -716,6 +726,163 @@ current single-bracket-only model.
   not yet applied to code.
 
 </details>
+
+### 2026-07-21 — Multi-camera concurrency, live Delta-T, per-model ARM calibration
+
+Started from a hardware report: with more than one camera connected, only
+one camera ever fired at a time and Timeline scheduling drifted badly.
+Root-caused to two separate single-instance bottlenecks, one per side of the
+pipe:
+
+**1. SRV serialization (`CommandHandler.h/.cpp`, `PipeServer.h/.cpp`)**
+`CommandHandler` had one global `m_handlerMtx` serializing every command
+across all cameras — replaced with per-camera `std::vector<std::mutex>
+m_camLocks` (indexed via `CamIndex()`) plus a separate `m_globalLock` for
+non-camera commands (`quit`/`list_cameras`/`seq_*`). `PipeServer::Run()` was
+also a single-instance accept loop — a first attempt at fixing GUI-side
+concurrency (below) made this *worse* by having all camera threads hammer
+`CreateFileW` against it simultaneously (3 of 4 cameras failed a live test).
+Fixed with an 8-thread acceptor pool (`AcceptorLoop()` × `kAcceptorThreads`).
+Separately found and fixed a real UB bug while in this code: pipes were
+created with `FILE_FLAG_OVERLAPPED` but `ServeClient()`'s `ReadFile`/
+`WriteFile` passed `nullptr` for the OVERLAPPED param — added proper
+`OverlappedReadByte`/`OverlappedWriteAll` helpers.
+
+**2. GUI serialization (`App.h/.cpp`, `PipeClient.h/.cpp`)**
+One shared blocking pipe connection and one sequencer thread served all
+camera tracks. Rewrote to `PipeClient m_seqPipe[kMaxCamTracks]` (dedicated
+connection per camera) and `std::thread m_seqThread[kMaxCamTracks]`
+(`SeqCamThreadProc`, was `SeqThreadProc`) — each camera's bracket/burst
+commands now fire independently instead of queueing behind the others.
+Verified live: 4 cameras firing brackets within single-digit-to-tens-of-ms
+of each other, down from seconds of drift.
+
+**3. GUI hang on Stop, requiring the process to be killed**
+`PipeClient::SendRequest` had no I/O timeout — a single stuck request could
+block forever, and Stop couldn't cancel it. Added `PipeError::Timeout`,
+`kIoTimeoutMs=10000`, and an `OverlappedIo()` helper using
+`GetOverlappedResultEx` + `CancelIoEx` on timeout.
+
+**4. DriveMode raw hex display**
+`GetStatus()` (SRV) and CommandHandler's generic property decoder had two
+independently-diverging copies of a DriveMode hex→string table, and neither
+was complete — unmapped codes fell back to raw hex. Consolidated into one
+shared `DecodeDriveMode()` (`DriveModeNames.h/.cpp`, ~55 entries).
+
+**5. Live Delta-T (IERS bulletin), replacing the static Espenak catalog value**
+Prompted by an email report (Alessandro Pessi) of a ~6s discrepancy against
+besselianelements.com traced to a stale ΔT constant. New
+`IersDeltaTClient.h/.cpp` fetches `finals.all.iau2000.txt` from
+`datacenter.iers.org`, computes `ΔT = 32.184 + leap_seconds − UT1UTC`, and
+caches the result in `delta_t_cache` (Config.db) with a fetch timestamp.
+Background thread refreshes at most once per 24h
+(`kDeltaTRefreshMs`); on fetch failure, falls back to the last successfully
+cached value (never the static catalog) per explicit requirement — a stale
+*measured* value beats a wrong *guessed* one. Displayed in the Solar
+Simulator status bar between ALT and OBS.
+
+**6. Per-model ARM latency calibration**
+`ArmEstMs()` used one formula for every camera model regardless of its
+actual DriveMode-change latency. Hardware testing found this varies hugely
+by image-processor generation (BIONZ XR: ~300–550ms stable on ILCE-7SM3/
+ILCE-7M4; BIONZ X: up to 5.4s and far less consistent on ILCE-7C/
+ILCE-7RM4A) — see `docs/arm_latency_bionz_whitepaper.md`. Added
+`arm_calibration` table (`cam_model, count → lat_avg_ms` etc., mirroring the
+existing `bracket_calibration` pattern) and a member `ArmEstMs(TLBlock,
+camModel)`. Found and fixed a second bug while wiring this up: none of the
+6–9 real call sites actually passed `camModel` — every one defaulted to
+`{}`, so the per-model lookup was dead code from the day it was written.
+Threaded `camModel` through all of them (presets, snap-to-prev, hit-testing,
+timeline drawing). `kDriveModeVerifyMs` explicitly kept flat at 6000ms
+(not per-model) — a large constant gap is *wanted* here so the calibration
+measurement environment stays uniform; calibrating the calibration would be
+circular.
+
+**7. New calibration presets (Photo Sequence menu)**
+"Bracket ARM Calibration (5x, interleaved)" — 16 bracket variants × 5 reps,
+feeds the per-model ARM/bracket "SAVE CALIB" buttons with a stable mean+max.
+"Bracket SS Sweep" — validates `BlockDurMs()`'s exposure-time scaling across
+the shutter-speed range (count=3 full sweep, count=5/9 spot checks); this is
+the preset that exposed the shutter-speed ceiling bug fixed the next day
+(2026-07-22, below).
+
+**8. ISO 8601 log timestamps**
+All three executables' log timestamp generators (`App::LogLine`, SRV's
+`LogLine`/`LogFileOnly`/`LogWarning`, CLI's `Log()`) rewritten to full
+`YYYY-MM-DDTHH:MM:SS.ffff` (4-digit fraction) via
+`GetSystemTimePreciseAsFileTime` — was previously inconsistent (3-digit ms,
+space separator) across the three binaries.
+
+**Paused, not implemented**: camera USB connection speedup (~25s/camera).
+Investigated `SDK::CreateCameraObjectInfoUSBConnection` as a way to skip the
+redundant re-enumeration `main.cpp` currently does (once globally, then
+again inside every `CameraController::Connect()` call) and parallelize the
+per-camera connect loop — paused to prioritize calibration work, not yet
+resumed.
+
+### 2026-07-22 — BracketSumMultiplier() shutter-speed ceiling fix
+
+The new "Bracket SS Sweep" preset (above) exposed a physically-impossible
+prediction: a count=9/ev=1.0/base=8s block was estimated at ~200s. Root
+cause: `BracketSumMultiplier()` summed `2^(k·evStep)` for each bracket stop
+as a pure theoretical exponential, with no upper bound — for that block the
+last stop computes to `8s × 2^4 = 128s`, a shutter speed that doesn't exist
+on any of our camera bodies or in the SDK's own valid-value list (mechanical
+shutter tops out at 30s; longer needs bulb, which brackets don't use). We
+only ever set the bracket's *base* ss + DriveMode code — the camera's own
+firmware computes each stop's actual exposure internally and snaps it to its
+real value list (same mechanism as `CameraController::NearestShutterSpeed()`,
+which queries `SDK::GetSelectDeviceProperties` and does log-space nearest
+match), so an unclamped formula can only ever be a theoretical upper bound,
+not a real prediction.
+
+Fixed by replacing the dimensionless multiplier with `BracketExposureSumMs()`
+(`App.cpp`), which computes each stop's nominal exposure time and snaps it
+to the nearest entry in a generated standard 1/3-stop shutter-speed table
+(`StandardShutterSpeedsSec()`, 30s → 1/8000s, ratio 2^(1/3)/step — the same
+industry-standard geometric series Sony bodies use) before summing, via
+`SnapToRealShutterSpeedSec()` (log-space nearest-match, mirroring
+`NearestShutterSpeed()`). This makes the sum correctly plateau at the 30s
+ceiling instead of growing without bound.
+
+The calibrated path in `BlockDurMs()` previously scaled a fixed multiplier
+by `(ssMs − kCalibBaselineSsMs)` — a linear correction that assumed the
+sum-vs-ss relationship was linear, which the clamping breaks. Changed to
+compute `BracketExposureSumMs()` directly at both the requested ss and the
+calibration baseline ss, and subtract the two sums — correct at any base ss
+including near/at the ceiling, with zero behavior change at short ss (where
+clamping never triggers, matching all existing calibration data).
+
+The "Bracket SS Sweep" preset's own SS range (kFullSs, `AddShutterSpeedSweepPreset()`)
+was independently capped at 8s during the same investigation to keep sweep
+runtime practical (30s at count=9 alone took ~16 min for one block) — that
+part of the fix was already in place; only the duration-prediction formula
+needed the ceiling fix above.
+
+**Known open bug, not fixed today**: the SS Sweep run that exposed this also
+exposed a pre-existing bug — `SeqCalibSample` doesn't track which `ss` a
+sample was taken at, so if "SAVE CALIB" is pressed after an SS-Sweep run, its
+across-many-shutter-speeds samples get averaged into `bracket_calibration`'s
+`(count,ev)`-keyed rows as if they were all one baseline measurement,
+corrupting them (confirmed via direct DB query: ILCE-7C count=3/ev=1.0ev
+jumped from ~437ms/5 reps to 1119ms/14 reps after this happened once
+already). Diagnosed, not yet fixed — don't press SAVE CALIB after an SS
+Sweep run; re-run "Bracket ARM Calibration (5x)" to restore clean data if it
+happens.
+
+**Hardware note from the same session**: one camera (ILCE-7RM4A) fully
+disconnected mid-test at 0% battery (`OnDisconnected 0x00008209`), then ran
+a subsequent SS Sweep at only 8% after reconnecting — several of its ARM/
+shoot commands failed outright (`arm_failed`, zero photos for that step),
+and successful ones were 4-8x slower than its normal ~500-700ms. Confirmed
+in code that failed attempts are correctly excluded from calibration sample
+buffers (`if (ok && ...)` guards in both `sendArm` and the main shoot path
+in `App.cpp`) — but successful-but-battery-degraded samples are NOT
+excluded, so don't trust or save calibration data gathered from a
+low-battery camera. This is also a general reminder that Timeline block
+durations are always a forward *prediction*, computed before a block fires
+— there is no feedback loop from actual shoot success/failure back into
+what's displayed or scheduled.
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 

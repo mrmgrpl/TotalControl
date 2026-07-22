@@ -1,5 +1,6 @@
 #include "CommandHandler.h"
 #include "SequencerEngine.h"
+#include "DriveModeNames.h"
 #include <algorithm>
 #include <cassert>
 #include <clocale>
@@ -28,12 +29,19 @@ static constexpr int kDriveModeVerifyMs = 6000;
 namespace TotalControl {
 
 CommandHandler::CommandHandler(std::vector<CameraController*> cams)
-    : m_cams(std::move(cams)) {
+    : m_cams(std::move(cams)), m_camLocks(m_cams.size()) {
     assert(!m_cams.empty());  // daemon must connect at least one camera before constructing the handler
 }
 
 void CommandHandler::SetSequencer(SequencerEngine* seq) {
     m_seq = seq;
+}
+
+size_t CommandHandler::CamIndex(const CameraController* cam) const {
+    for (size_t i = 0; i < m_cams.size(); ++i)
+        if (m_cams[i] == cam) return i;
+    assert(false);  // cam must always come from m_cams (via RouteCamera)
+    return 0;
 }
 
 CameraController* CommandHandler::RouteCamera(const std::wstring& req) const {
@@ -261,65 +269,9 @@ static std::wstring DecodePropValue(uint32_t code, uint64_t raw) {
         case 0x000a: return L"hl";
         default: swprintf_s(buf, L"0x%X", (unsigned)raw); return buf;
         }
-    case 0x010e: // DriveMode
-        switch (raw) {
-        case 0x00000001: return L"single";
-        case 0x00010001: return L"cont-hi";
-        case 0x00010002: return L"cont-hi-plus";  // CrDrive_Continuous_Hi_Plus  — confirmed ILCE-7RM4A
-        case 0x00010003: return L"cont-hi-live";  // CrDrive_Continuous_Hi_Live
-        case 0x00010004: return L"cont-lo";       // CrDrive_Continuous_Lo       — confirmed ILCE-7RM4A
-        case 0x00010005: return L"cont";          // CrDrive_Continuous
-        case 0x00010006: return L"cont-speed";    // CrDrive_Continuous_SpeedPriority
-        case 0x00010007: return L"cont-mid";      // CrDrive_Continuous_Mid      — confirmed ILCE-7RM4A
-        case 0x00010008: return L"cont-mid-live"; // CrDrive_Continuous_Mid_Live
-        case 0x00010009: return L"cont-lo-live";  // CrDrive_Continuous_Lo_Live
-        case 0x00011001: return L"burst-lo";
-        case 0x00011002: return L"burst-mid";
-        case 0x00011003: return L"burst-hi";
-        case 0x00012001: return L"focus-bracket";
-        case 0x00020001: return L"timelapse";
-        case 0x00030001: return L"timer-2s";
-        case 0x00030002: return L"timer-5s";
-        case 0x00030003: return L"timer-10s";
-        case 0x00040301: return L"bracket-0.3ev-3-cont";
-        case 0x00040302: return L"bracket-0.3ev-5-cont";
-        case 0x00040303: return L"bracket-0.3ev-9-cont";
-        case 0x00040304: return L"bracket-0.5ev-3-cont";
-        case 0x00040305: return L"bracket-0.5ev-5-cont";
-        case 0x00040306: return L"bracket-0.5ev-9-cont";
-        case 0x00040307: return L"bracket-0.7ev-3-cont";
-        case 0x00040308: return L"bracket-0.7ev-5-cont";
-        case 0x00040309: return L"bracket-0.7ev-9-cont";
-        case 0x0004030a: return L"bracket-1ev-3-cont";
-        case 0x0004030b: return L"bracket-1ev-5-cont";
-        case 0x0004030c: return L"bracket-1ev-9-cont";
-        case 0x0004030d: return L"bracket-2ev-3-cont";
-        case 0x0004030e: return L"bracket-2ev-5-cont";
-        case 0x0004030f: return L"bracket-3ev-3-cont";
-        case 0x00040310: return L"bracket-3ev-5-cont";
-        case 0x00050001: return L"bracket-0.3ev-3";
-        case 0x00050002: return L"bracket-0.3ev-5";
-        case 0x00050003: return L"bracket-0.3ev-9";
-        case 0x00050004: return L"bracket-0.5ev-3";
-        case 0x00050005: return L"bracket-0.5ev-5";
-        case 0x00050006: return L"bracket-0.5ev-9";
-        case 0x00050007: return L"bracket-0.7ev-3";
-        case 0x00050008: return L"bracket-0.7ev-5";
-        case 0x00050009: return L"bracket-0.7ev-9";
-        case 0x0005000a: return L"bracket-1ev-3";
-        case 0x0005000b: return L"bracket-1ev-5";
-        case 0x0005000c: return L"bracket-1ev-9";
-        case 0x0005000d: return L"bracket-2ev-3";
-        case 0x0005000e: return L"bracket-2ev-5";
-        case 0x0005000f: return L"bracket-3ev-3";
-        case 0x00050010: return L"bracket-3ev-5";
-        case 0x00060001: return L"wb-bracket-lo";
-        case 0x00060002: return L"wb-bracket-hi";
-        case 0x00070001: return L"dro-bracket-lo";
-        case 0x00070002: return L"dro-bracket-hi";
-        case 0x10000001: return L"lpf-bracket";
-        default: swprintf_s(buf, L"0x%08X", (unsigned)raw); return buf;
-        }
+    case 0x010e: // DriveMode — single source of truth in DriveModeNames.cpp,
+                 // shared with CameraController::GetStatus()
+        return DecodeDriveMode(static_cast<uint32_t>(raw));
     case 0x0110: // ImageSize
         switch (raw) {
         case 1: return L"L"; case 2: return L"M"; case 3: return L"S";
@@ -609,11 +561,13 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
 
     // ── quit ──────────────────────────────────────────────────────────────────
     if (cmd == L"quit") {
+        std::lock_guard lk(m_globalLock);
         resp = Ok(); return false;
     }
 
     // ── list_cameras ──────────────────────────────────────────────────────────
     if (cmd == L"list_cameras") {
+        std::lock_guard lk(m_globalLock);
         std::wostringstream ss;
         ss << L"\"cameras\":[";
         for (size_t i = 0; i < m_cams.size(); ++i) {
@@ -629,12 +583,65 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         return true;
     }
 
-    // All other commands require a specific camera
+    // ── seq_start ─────────────────────────────────────────────────────────────
+    // {"cmd":"seq_start","file":"C:\\sequences\\eclipse.json"}
+    // {"cmd":"seq_start","file":"...","sim_offset_ms":-37926976000}  (--test mode)
+    // Not tied to a single camera — steps route per-camera internally when
+    // dispatched, so this only needs to serialise against other seq_*/quit calls.
+    if (cmd == L"seq_start") {
+        std::lock_guard lk(m_globalLock);
+        if (!m_seq) { resp = Err(L"no_sequencer", L"SequencerEngine not configured"); return true; }
+        if (m_seq->State() == SeqState::Running) {
+            resp = Err(L"already_running", L"seq_stop first"); return true;
+        }
+        std::wstring file = JStr(req, L"file");
+        if (file.empty()) { resp = Err(L"missing_file", L"seq_start requires \"file\""); return true; }
+
+        // Optional test-mode offset injected by CLI --test flag.
+        long long simOffsetMs = 0;
+        if (JHas(req, L"sim_offset_ms")) {
+            const std::wstring key = L"\"sim_offset_ms\":";
+            auto pos = req.find(key);
+            if (pos != std::wstring::npos) {
+                pos += key.size();
+                try { simOffsetMs = std::stoll(req.substr(pos)); } catch (...) {}
+            }
+        }
+
+        std::wstring err = m_seq->Load(file, (int64_t)simOffsetMs);
+        if (!err.empty()) { resp = Err(L"load_failed", err.c_str()); return true; }
+        if (!m_seq->Start()) { resp = Err(L"start_failed", L"no steps or dispatch not set"); return true; }
+        resp = Ok(m_seq->StatusJson());
+        return true;
+    }
+
+    // ── seq_stop ──────────────────────────────────────────────────────────────
+    if (cmd == L"seq_stop") {
+        std::lock_guard lk(m_globalLock);
+        if (!m_seq) { resp = Err(L"no_sequencer"); return true; }
+        m_seq->Stop();
+        resp = Ok(m_seq->StatusJson());
+        return true;
+    }
+
+    // ── seq_status ────────────────────────────────────────────────────────────
+    if (cmd == L"seq_status") {
+        std::lock_guard lk(m_globalLock);
+        if (!m_seq) { resp = Err(L"no_sequencer"); return true; }
+        resp = Ok(m_seq->StatusJson());
+        return true;
+    }
+
+    // All other commands require a specific camera. Lock only THAT camera's
+    // mutex — held until Handle() returns — so operations on different
+    // cameras run concurrently while operations on the same camera stay
+    // serialised (a CrSDK device handle is not safe for concurrent access).
     CameraController* cam = RouteCamera(req);
     if (!cam) {
         resp = Err(L"camera_not_found", JHas(req, L"cam") ? JStr(req, L"cam").c_str() : L"no cameras");
         return true;
     }
+    std::lock_guard lk(m_camLocks[CamIndex(cam)]);
 
     // ── status ────────────────────────────────────────────────────────────────
     if (cmd == L"status") {
@@ -1213,56 +1220,9 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         return true;
     }
 
-    // ── seq_start ─────────────────────────────────────────────────────────────
-    // {"cmd":"seq_start","file":"C:\\sequences\\eclipse.json"}
-    // {"cmd":"seq_start","file":"...","sim_offset_ms":-37926976000}  (--test mode)
-    if (cmd == L"seq_start") {
-        if (!m_seq) { resp = Err(L"no_sequencer", L"SequencerEngine not configured"); return true; }
-        if (m_seq->State() == SeqState::Running) {
-            resp = Err(L"already_running", L"seq_stop first"); return true;
-        }
-        std::wstring file = JStr(req, L"file");
-        if (file.empty()) { resp = Err(L"missing_file", L"seq_start requires \"file\""); return true; }
-
-        // Optional test-mode offset injected by CLI --test flag.
-        long long simOffsetMs = 0;
-        if (JHas(req, L"sim_offset_ms")) {
-            const std::wstring key = L"\"sim_offset_ms\":";
-            auto pos = req.find(key);
-            if (pos != std::wstring::npos) {
-                pos += key.size();
-                try { simOffsetMs = std::stoll(req.substr(pos)); } catch (...) {}
-            }
-        }
-
-        std::wstring err = m_seq->Load(file, (int64_t)simOffsetMs);
-        if (!err.empty()) { resp = Err(L"load_failed", err.c_str()); return true; }
-        if (!m_seq->Start()) { resp = Err(L"start_failed", L"no steps or dispatch not set"); return true; }
-        resp = Ok(m_seq->StatusJson());
-        return true;
-    }
-
-    // ── seq_stop ──────────────────────────────────────────────────────────────
-    if (cmd == L"seq_stop") {
-        if (!m_seq) { resp = Err(L"no_sequencer"); return true; }
-        m_seq->Stop();
-        resp = Ok(m_seq->StatusJson());
-        return true;
-    }
-
-    // ── seq_status ────────────────────────────────────────────────────────────
-    if (cmd == L"seq_status") {
-        if (!m_seq) { resp = Err(L"no_sequencer"); return true; }
-        resp = Ok(m_seq->StatusJson());
-        return true;
-    }
-
     // ── lv_start ──────────────────────────────────────────────────────────────
     if (cmd == L"lv_start") {
-        int lvIdx = 0;
-        for (int i = 0; i < (int)m_cams.size(); ++i)
-            if (m_cams[i] == cam) { lvIdx = i; break; }
-        bool ok = cam->StartLiveView(lvIdx);
+        bool ok = cam->StartLiveView(static_cast<int>(CamIndex(cam)));
         resp = ok ? Ok() : Err(L"lv_failed", L"shared memory or camera error");
         return true;
     }

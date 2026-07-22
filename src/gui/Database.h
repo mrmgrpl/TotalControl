@@ -41,6 +41,21 @@ struct BktCalibEntry {
     int64_t     createdMs = 0;
 };
 
+// ARM (DriveMode-change) latency — separate from BktCalibEntry's bracket
+// *shoot* time above. Keyed by (camModel, count) only, not ev: measured ARM
+// latency doesn't show a consistent ev dependency (see docs/
+// arm_latency_bionz_whitepaper.md), matching ArmEstMs()'s existing
+// count-only formula shape.
+struct ArmCalibEntry {
+    std::string camModel;
+    int         count     = 0;
+    int         latMaxMs  = 0;
+    int         latAvgMs  = 0;
+    int         latMinMs  = 0;
+    int         reps      = 0;
+    int64_t     createdMs = 0;
+};
+
 // ─── Named snapshot ───────────────────────────────────────────────────────────
 
 struct SnapshotInfo {
@@ -86,6 +101,14 @@ public:
     std::vector<BktCalibEntry> LoadCalibData(const std::string& camModel) const;
     std::vector<std::string>   LoadCalibModels() const;
 
+    // ARM (DriveMode-change) latency calibration (TotalControlConfig.db) —
+    // per-model, per-count. Feeds App::ArmEstMs() the same way LoadCalibData
+    // feeds App::BlockDurMs().
+    void                       CreateArmCalibTable();
+    void                       SaveArmCalibData(const std::vector<ArmCalibEntry>& entries);
+    std::vector<ArmCalibEntry> LoadArmCalibData(const std::string& camModel) const;
+    std::vector<std::string>   LoadArmCalibModels() const;
+
     // named timeline snapshots (TotalControlConfig.db)
     void                      CreateSnapshotTables();
     void                      SaveSnapshot(const std::string& name,
@@ -113,6 +136,21 @@ public:
                                          double horizonAltDeg = 0.0,
                                          double horizonAzDeg  = 180.0);
     std::vector<CamConfig> LoadCamConfigs() const;
+
+    // Delta T (IERS Earth-orientation bulletin) cache (TotalControlConfig.db)
+    // Keyed by eclipseDate "YYYY-MM-DD". Refreshed at most once per 24h by
+    // App's background fetch — see IersDeltaTClient. fetchedAtMs lets the
+    // caller decide staleness; the cached value itself is always usable as
+    // a fallback even when stale (better than the static Espenak catalog
+    // value — see Change log 2026-07-21, Alessandro/besselianelements.com).
+    struct DeltaTCache {
+        double  dtSeconds   = 0.0;
+        bool    predicted   = false;  // IERS Bulletin A forecast vs Bulletin B measured
+        int64_t fetchedAtMs = 0;
+    };
+    void CreateDeltaTTable();
+    void SaveDeltaT(const std::string& eclipseDate, double dtSeconds, bool predicted);
+    bool LoadDeltaT(const std::string& eclipseDate, DeltaTCache& out) const;
 
     // Audio file duration cache (TotalControlConfig.db)
     // lang: uppercase 2-char tag e.g. "PL", "EN"; filename: bare name.

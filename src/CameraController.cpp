@@ -1,4 +1,5 @@
 #include "CameraController.h"
+#include "DriveModeNames.h"
 
 // Sony CrSDK — external headers, do not modify; warnings suppressed intentionally
 #pragma warning(push, 0)
@@ -893,24 +894,7 @@ CameraStatus CameraController::GetStatus() {
             break;
         // ── Drive ─────────────────────────────────────────────────────────────
         case SDK::CrDeviceProperty_DriveMode:
-            switch (cur) {
-            case SDK::CrDrive_Single:                        s.driveMode = L"single";        break;
-            case SDK::CrDrive_Continuous_Hi:                 s.driveMode = L"cont-hi";       break;
-            case SDK::CrDrive_Continuous_Hi_Plus:            s.driveMode = L"cont-hi-plus";  break;
-            case SDK::CrDrive_Continuous_Hi_Live:            s.driveMode = L"cont-hi-live";  break;
-            case SDK::CrDrive_Continuous_Lo:                 s.driveMode = L"cont-lo";       break;
-            case SDK::CrDrive_Continuous:                    s.driveMode = L"cont";          break;
-            case SDK::CrDrive_Continuous_SpeedPriority:      s.driveMode = L"cont-speed";    break;
-            case SDK::CrDrive_Continuous_Mid:                s.driveMode = L"cont-mid";      break;
-            case SDK::CrDrive_Continuous_Mid_Live:           s.driveMode = L"cont-mid-live"; break;
-            case SDK::CrDrive_Continuous_Lo_Live:            s.driveMode = L"cont-lo-live";  break;
-            case SDK::CrDrive_Single_Bracket_10Ev_5pics:     s.driveMode = L"bracket-1ev-5";  break;
-            case SDK::CrDrive_Continuous_Bracket_10Ev_5pics: s.driveMode = L"bracket-1ev-5c"; break;
-            default: {
-                wchar_t b[16]; swprintf_s(b, L"0x%08X", (unsigned)cur);
-                s.driveMode = b; break;
-            }
-            }
+            s.driveMode = DecodeDriveMode(static_cast<uint32_t>(cur));
             break;
         // ── WB / Image ────────────────────────────────────────────────────────
         case SDK::CrDeviceProperty_WhiteBalance:

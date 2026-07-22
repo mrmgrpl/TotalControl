@@ -79,6 +79,35 @@ private:
     void TriggerIqpFetch();
     void EnsureDefaultConfig(const std::wstring& path);
 
+    // ── Delta T (IERS Earth-orientation bulletin) ──────────────────────────────
+    // Espenak's bundled catalog dt is a static, years-old prediction; IERS
+    // revises the real forecast weekly as the eclipse date approaches (see
+    // Change log 2026-07-21 — Alessandro/besselianelements.com found
+    // TotalControl's Espenak dt for TSE2026 was 6s stale, shifting C2/C3 by
+    // the same amount). Checked at startup and whenever the selected eclipse
+    // changes (TriggerIqpFetch); re-fetched at most once per 24h per date.
+    struct DeltaTState {
+        double      dtSeconds   = 0.0;
+        bool        valid       = false;  // do we have ANY usable IERS value for forDate
+        bool        predicted   = false;  // IERS Bulletin A forecast vs Bulletin B measured
+        int64_t     fetchedAtMs = 0;
+        std::string forDate;              // "YYYY-MM-DD"
+    };
+    void TriggerDeltaTFetch();
+    // Overrides bel.dt with the cached/fetched IERS value for (y,mo,d) if one
+    // is available; leaves the catalog's own dt untouched otherwise (only
+    // fallback: no IERS value has EVER been obtained for this date).
+    void ApplyDeltaTOverride(BesselianElements& bel, int y, int mo, int d) const;
+    static constexpr int64_t kDeltaTRefreshMs = 24LL * 3600 * 1000;
+    mutable std::mutex m_deltaTMutex;
+    DeltaTState         m_deltaTState;
+    std::thread          m_deltaTThread;
+    // Snapshot of bel.dt AFTER ApplyDeltaTOverride, taken in TriggerIqpFetch —
+    // the actual value used for the last BE/GE calc (IERS override or catalog
+    // fallback, whichever applied). Shown in the Solar Simulator status bar;
+    // avoids re-deriving/re-querying the same decision every frame.
+    double m_effectiveDeltaT = 0.0;
+
     void RenderCameraSection();
     void RenderEclipseSection();
     void RenderContactTimesSection();
@@ -133,14 +162,29 @@ private:
     // Sequencer mode: Idle → TestRunning ↔ TestPaused; Idle → Running
     enum class GuiSeqMode : int { Idle, TestRunning, TestPaused, Running };
 
+    // Up to 4 simultaneous camera tracks. Declared here (rather than with the
+    // rest of the sequencer state below) because m_seqPipe/m_seqThread need it
+    // for their array bounds.
+    static constexpr int kMaxCamTracks  = 4;
+
     static std::string BuildBlockCmd(const TLBlock& blk, int camIdx);
     void StartSeqThread(GuiSeqMode mode);
-    void StopSeqThread();          // pause/stop — joins thread
-    void SeqThreadProc(GuiSeqMode mode,
-                       int64_t playheadStartMs,
-                       int64_t realStartMs);
+    void StopSeqThread();          // pause/stop — joins all per-camera threads
+    // One thread per camera track, each with its own pipe connection
+    // (m_seqPipe[camIdx]), so a multi-second bracket/ARM call on one camera
+    // never blocks the due-block check or firing for a different camera.
+    void SeqCamThreadProc(int camIdx,
+                          TLTrack* track,
+                          GuiSeqMode mode,
+                          int64_t playheadStartMs,
+                          int64_t realStartMs);
 
     PipeClient m_pipe;
+    // Dedicated pipe connections for the sequencer threads — separate from
+    // m_pipe (used by the main/status thread) and from each other, so
+    // SendRequest's internal per-connection mutex can't serialise one
+    // camera's ARM/shoot behind another's.
+    PipeClient m_seqPipe[kMaxCamTracks];
 
     std::thread       m_connectThread;
     std::atomic<bool> m_connectRun{false};
@@ -174,7 +218,7 @@ private:
     // ── Camera status (written by m_statusThread, read by render thread) ──────
     std::thread       m_statusThread;
     std::atomic<bool> m_statusRun{false};
-    std::mutex        m_camerasMutex;        // guards m_cameras
+    mutable std::mutex m_camerasMutex;        // guards m_cameras -- mutable: CamModelForPos() is const
     std::vector<CamStatus> m_cameras;
 
     // ── Eclipse selector ──────────────────────────────────────────────────────
@@ -353,18 +397,54 @@ private:
     std::map<std::string,
              std::map<std::pair<int,std::string>, int>> m_calibCache;
 
-    struct SeqCalibSample { int count = 0; std::string ev; int latMs = 0; };
+    // camModel is recorded per-sample (not assumed from m_cameras[0]) because
+    // all kMaxCamTracks camera threads push into the same buffer concurrently
+    // — a run with 4 different camera models mixes their samples together
+    // otherwise (see Change log).
+    struct SeqCalibSample { int count = 0; std::string ev; int latMs = 0; std::string camModel; };
     // Samples collected during the current/last TEST RUN or RUN (Bracket only).
-    // Written by seqThread; read by main thread only after thread join.
+    // Written by up to kMaxCamTracks sequencer threads concurrently — guarded
+    // by m_seqCalibMtx; read by main thread only after all threads join.
     std::vector<SeqCalibSample> m_seqCalibBuf;
 
     void LoadCalibCache();                              // DB → m_calibCache
     void SeedBuiltinCalib();                            // seed ILCE-7RM4A if absent
-    void SaveCalibFromBuf(const std::string& camModel); // buf → DB + reload cache
+    // Saves + removes only camModel's samples from m_seqCalibBuf — other
+    // models' still-unsaved samples are left intact for their own button.
+    void SaveCalibFromBuf(const std::string& camModel);
 
     // BlockDurMs: member function (not static) so it can access m_calibCache.
     // camModel = track's cameraId; empty = use first available calibration.
     int64_t BlockDurMs(const TLBlock& b, std::string_view camModel = {}) const;
+
+    // ── ARM (DriveMode-change) calibration ───────────────────────────────────
+    // Mirrors the bracket-duration calibration above exactly, but keyed by
+    // (camModel, count) only — see docs/arm_latency_bionz_whitepaper.md for
+    // why ev isn't part of the key. Measured on real hardware 2026-07-21:
+    // ArmEstMs()'s original formula was derived from ILCE-7RM4A alone and
+    // over-estimates BIONZ-XR bodies (ILCE-7SM3/7M4) by 8-12x.
+    std::map<std::string, std::map<int, int>> m_armCalibCache;  // camModel -> count -> estMs
+    struct ArmCalibSample { int count = 0; int latMs = 0; std::string camModel; };
+    std::vector<ArmCalibSample> m_armCalibBuf;  // guarded by m_seqCalibMtx, same as m_seqCalibBuf
+
+    void LoadArmCalibCache();                    // DB -> m_armCalibCache
+    void SeedArmCalibFromWhitepaper();            // one-time seed, 2026-07-21 measurement
+    // Saves + removes only camModel's ARM samples from m_armCalibBuf.
+    void SaveArmCalibFromBuf(const std::string& camModel);
+    // ArmEstMs: member function (not static) so it can access m_armCalibCache.
+    // camModel = track's cameraId; empty/unmatched -> falls back to the
+    // original ILCE-7RM4A-derived formula.
+    int64_t ArmEstMs(const TLBlock& b, std::string_view camModel = {}) const;
+
+    // Resolves a camera track's live model name for BlockDurMs()/ArmEstMs()
+    // per-model lookups. Two overloads: by position among camera tracks only
+    // (0-based, top-to-bottom -- same numbering as BuildBlockCmd's camIdx and
+    // TrackLabel/TrackColor in RenderTimelineBottom), or by raw track index
+    // into m_tracks (converts to camPos first). Returns "" if unresolvable
+    // (camera not yet connected/reporting a model) -- callers already treat
+    // an empty camModel as "use the generic/fallback formula".
+    std::string CamModelForPos(int camPos) const;
+    std::string CamModelForTrackIndex(int ti) const;
 
     // Snap to Seconds: rounds so the OFFSET FROM THE NEAREST CONTACT
     // (C1/C2/C3/C4) is a whole number of seconds — matching the Relative
@@ -383,16 +463,16 @@ private:
 
     // ── Execution log ────────────────────────────────────────────────────────
     // Sequence counter reset at each TEST RUN / RUN start.
-    // Written by main thread (StartSeqThread), incremented by seqThread.
-    // Thread-safe: thread start provides happens-before guarantee.
-    int m_execSeqNum = 0;
+    // One per-camera thread now increments this concurrently — must be atomic.
+    std::atomic<int> m_execSeqNum{0};
 
     // ── GUI sequencer state ───────────────────────────────────────────────────
     std::atomic<GuiSeqMode> m_guiSeqMode{GuiSeqMode::Idle};
 
-    // Per-track "next unfired block" index for up to 4 camera tracks.
-    // Written only by m_seqThread while running; read by main thread only after join.
-    static constexpr int kMaxCamTracks  = 4;
+    // Per-track "next unfired block" index for up to kMaxCamTracks camera tracks.
+    // Each index is written only by its own SeqCamThreadProc(camIdx) while
+    // running (no two threads touch the same slot); read by main thread only
+    // after all threads have joined.
     static constexpr int kMaxAudioTracks = 2;
     int m_seqNextBlock[kMaxCamTracks]    = {};
     // m_audioNextBlock is written by m_audioSeqThread during the run (live progress) and
@@ -403,9 +483,14 @@ private:
     int64_t m_testPlayheadAtStart = -1;
     int64_t m_testStartRealMs     = -1;
 
-    std::thread       m_seqThread;
+    // One sequencer thread per camera track (see SeqCamThreadProc), joined in
+    // StopSeqThread(). Unused slots (fewer than kMaxCamTracks camera tracks)
+    // are left non-joinable.
+    std::thread       m_seqThread[kMaxCamTracks];
     std::thread       m_audioSeqThread;   // independent audio-only tick loop
     std::atomic<bool> m_seqRun{false};
+    // Guards m_seqCalibBuf, which per-camera sequencer threads now push to concurrently.
+    std::mutex        m_seqCalibMtx;
 
     void AudioSeqThreadProc(GuiSeqMode mode, int64_t playheadStartMs, int64_t realStartMs);
 
@@ -462,6 +547,8 @@ private:
     void AddPhotoPreset();
     void AddTotalityBracketPreset();
     void AddAllBracketVariantsPreset();
+    void AddBracketArmCalibrationPreset();
+    void AddShutterSpeedSweepPreset();
     int  m_presetTargetTrack = 0;  // camera track index that receives AddPhotoPreset blocks
 };
 

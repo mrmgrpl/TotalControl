@@ -2,6 +2,25 @@
 
 ---
 
+## 2026-07-22
+
+### Andrzej Nowak
+- Fixed a bracket duration prediction bug that could estimate a wide bracket (5 or 9 shots) at a slow base shutter speed as taking far longer than physically possible - one case predicted ~200 seconds for a block that actually takes about 8. The formula was assuming shutter speeds beyond what any camera (or the SDK) can produce - real shutter speeds top out at 30 seconds. Each shot in a bracket is now checked against the camera's real, standard shutter-speed steps before its time gets added up, so predictions can no longer exceed what's physically possible
+
+## 2026-07-21
+
+### Andrzej Nowak
+- Fixed multi-camera control: with more than one camera connected, only one camera would ever fire at a time and all timing would drift badly. Each camera now gets its own dedicated connection and scheduling, instead of all cameras sharing one at a time - confirmed on hardware with 4 cameras firing brackets within milliseconds of each other instead of queueing behind one another
+- Fixed the GUI freezing (needing the process killed) when stopping a running sequence, sometimes even between two commands - a stuck request now times out and cancels cleanly after 10 seconds instead of blocking forever
+- Fixed the camera server occasionally failing to accept new camera connections when several connected at nearly the same time
+- The camera status panel and CLI now show a readable drive-mode name (e.g. "Bracket 1EV/9/Cont") instead of a raw hex code
+- Log timestamps in the server, GUI, and CLI are now consistently full ISO 8601 with a stable four-digit fraction of a second
+- Added a "Bracket ARM Calibration" preset to measure, per camera model, how long each one actually takes to apply a settings change between shots - confirmed on hardware that this varies a lot by camera (some models 8-10x slower than others), and the Timeline now schedules each camera's gap using its own measured number instead of one guess for every model
+- Added a "Bracket SS Sweep" preset to validate that the Timeline's predicted bracket duration holds up across the full range of shutter speeds, not just the one speed it was originally calibrated against
+
+### Alessandro Pessi
+- Eclipse contact-time predictions (C1/C2/Max/C3/C4) now use a Delta-T value (the correction between clock time and Earth's actual rotation) fetched from the IERS's own published bulletin and refreshed automatically once a day, instead of a fixed value that was already several seconds stale for this eclipse - matches the ~6 second discrepancy Alessandro found against besselianelements.com. Falls back to the last successfully fetched value if today's update fails, so a network hiccup never leaves the app without one. The current value is now also shown in the Solar Simulator status bar
+
 ## 2026-07-20
 
 ### Maciej Szupiluk

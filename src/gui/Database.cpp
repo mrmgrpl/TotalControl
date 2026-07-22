@@ -745,6 +745,82 @@ std::vector<std::string> Database::LoadCalibModels() const {
     return result;
 }
 
+// ─── ARM (DriveMode-change) latency calibration ──────────────────────────────
+// Separate table from bracket_calibration above: keyed by (cam_model, count)
+// only — no ev column, since ARM latency doesn't show a consistent ev
+// dependency (see docs/arm_latency_bionz_whitepaper.md).
+
+static constexpr const char* kCreateArmCalib = R"SQL(
+    CREATE TABLE IF NOT EXISTS arm_calibration (
+        cam_model   TEXT    NOT NULL,
+        count       INTEGER NOT NULL,
+        lat_max_ms  INTEGER NOT NULL,
+        lat_avg_ms  INTEGER NOT NULL,
+        lat_min_ms  INTEGER NOT NULL,
+        reps        INTEGER NOT NULL DEFAULT 0,
+        created_ms  INTEGER NOT NULL,
+        PRIMARY KEY (cam_model, count)
+    );
+)SQL";
+
+void Database::CreateArmCalibTable() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateArmCalib);
+}
+
+void Database::SaveArmCalibData(const std::vector<ArmCalibEntry>& entries) {
+    assert(m_db != nullptr);
+    assert(entries.size() <= 64);  // bounded: at most a handful of counts per model
+    if (!m_db || entries.empty()) return;
+    sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
+    for (const auto& e : entries) {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(m_db,
+            "INSERT OR REPLACE INTO arm_calibration"
+            " (cam_model,count,lat_max_ms,lat_avg_ms,lat_min_ms,reps,created_ms)"
+            " VALUES (?,?,?,?,?,?,?);",
+            -1, &st, nullptr);
+        sqlite3_bind_text (st, 1, e.camModel.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int  (st, 2, e.count);
+        sqlite3_bind_int  (st, 3, e.latMaxMs);
+        sqlite3_bind_int  (st, 4, e.latAvgMs);
+        sqlite3_bind_int  (st, 5, e.latMinMs);
+        sqlite3_bind_int  (st, 6, e.reps);
+        sqlite3_bind_int64(st, 7, e.createdMs);
+        sqlite3_step(st); sqlite3_finalize(st);
+    }
+    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+}
+
+std::vector<ArmCalibEntry> Database::LoadArmCalibData(const std::string& camModel) const {
+    assert(m_db != nullptr);  // DB must be open to load calibration
+    assert(!camModel.empty());
+    std::vector<ArmCalibEntry> result;
+    if (!m_db) return result;
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT count,lat_max_ms,lat_avg_ms,lat_min_ms,reps,created_ms"
+        " FROM arm_calibration WHERE cam_model=?"
+        " ORDER BY count;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    sqlite3_bind_text(st, 1, camModel.c_str(), -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        ArmCalibEntry e;
+        e.camModel  = camModel;
+        e.count     = sqlite3_column_int  (st, 0);
+        e.latMaxMs  = sqlite3_column_int  (st, 1);
+        e.latAvgMs  = sqlite3_column_int  (st, 2);
+        e.latMinMs  = sqlite3_column_int  (st, 3);
+        e.reps      = sqlite3_column_int  (st, 4);
+        e.createdMs = sqlite3_column_int64(st, 5);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
 // ─── JPL Horizons ephemeris cache ────────────────────────────────────────────
 
 static constexpr const char* kCreateEph = R"SQL(
@@ -1060,6 +1136,88 @@ std::vector<CamConfig> Database::LoadCamConfigs() const {
     }
     sqlite3_finalize(st);
     assert(result.size() <= 64);  // sanity: won't have more than 64 cameras in a session
+    return result;
+}
+
+void Database::CreateDeltaTTable() {
+    assert(m_db != nullptr);
+    Exec(R"SQL(
+        CREATE TABLE IF NOT EXISTS delta_t_cache (
+            eclipse_date TEXT    PRIMARY KEY,
+            dt_seconds   REAL    NOT NULL,
+            predicted    INTEGER NOT NULL DEFAULT 1,
+            fetched_at   INTEGER NOT NULL
+        );
+    )SQL");
+}
+
+void Database::SaveDeltaT(const std::string& eclipseDate, double dtSeconds, bool predicted) {
+    assert(m_db != nullptr);
+    assert(!eclipseDate.empty());
+
+    FILETIME ft; GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER ui; ui.LowPart = ft.dwLowDateTime; ui.HighPart = ft.dwHighDateTime;
+    int64_t nowMs = static_cast<int64_t>(ui.QuadPart / 10000) - 11644473600000LL;
+
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+            "INSERT OR REPLACE INTO delta_t_cache (eclipse_date, dt_seconds, predicted, fetched_at)"
+            " VALUES (?,?,?,?);",
+            -1, &st, nullptr) != SQLITE_OK)
+        return;
+    sqlite3_bind_text  (st, 1, eclipseDate.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_double(st, 2, dtSeconds);
+    sqlite3_bind_int   (st, 3, predicted ? 1 : 0);
+    sqlite3_bind_int64 (st, 4, nowMs);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+bool Database::LoadDeltaT(const std::string& eclipseDate, DeltaTCache& out) const {
+    assert(m_db != nullptr);
+    assert(!eclipseDate.empty());
+    if (!m_db) return false;
+
+    sqlite3_stmt* chk = nullptr;
+    sqlite3_prepare_v2(m_db,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='delta_t_cache';",
+        -1, &chk, nullptr);
+    bool exists = (sqlite3_step(chk) == SQLITE_ROW);
+    sqlite3_finalize(chk);
+    if (!exists) return false;
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT dt_seconds, predicted, fetched_at FROM delta_t_cache WHERE eclipse_date=?;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, eclipseDate.c_str(), -1, SQLITE_STATIC);
+
+    bool found = false;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        out.dtSeconds   = sqlite3_column_double(st, 0);
+        out.predicted   = sqlite3_column_int   (st, 1) != 0;
+        out.fetchedAtMs = sqlite3_column_int64 (st, 2);
+        found = true;
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+
+std::vector<std::string> Database::LoadArmCalibModels() const {
+    assert(m_db != nullptr);  // DB must be open to list models
+    std::vector<std::string> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT DISTINCT cam_model FROM arm_calibration ORDER BY cam_model;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const auto* p = sqlite3_column_text(st, 0);
+        if (p) result.push_back(reinterpret_cast<const char*>(p));
+    }
+    sqlite3_finalize(st);
     return result;
 }
 
