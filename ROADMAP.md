@@ -376,7 +376,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
 ## "TotalControlCLI quit" nie zamyka faktycznie procesu SRV
 - Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: bug
-- Zgłosił: Andrzej Nowak (znalezione przy okazji sesji 2026-07-19, podczas
+- Zgłosił: mgr Maciej Szupiluk (znalezione przy okazji sesji 2026-07-19, podczas
   próby zbudowania projektu przy uruchomionym SRV)
 - Opis: `tc quit` wysyła `{"cmd":"quit"}`, SRV odpowiada `{"ok":true}`, ale
   sam proces `TotalControlSRV.exe` nie kończył działania, dopóki inny klient
@@ -395,7 +395,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
 ## Tooltips (on-hover) dla wszystkich pól interfejsu
 - Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
 - Typ: feature
-- Zgłosił: Andrzej Nowak (projekt)
+- Zgłosił: mgr Maciej Szupiluk (projekt)
 - Opis: dodano `ImGui::SetItemTooltip()`/`IsItemHovered()+SetTooltip()` na
   praktycznie wszystkich eksponowanych polach GUI (Andrzej zaakceptował pełny
   zakres z `docs/tooltips_review.md`, w tym pola tylko-do-odczytu — pytanie 1
@@ -426,7 +426,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
 ## Moduł optymalizacji ekspozycji/bracketingu (Q-based) — nowe okno/przełącznik obok Solar Simulator
 - Status: proponowane (duży zakres — do rozbicia na etapy przed startem)
 - Typ: feature
-- Zgłosił: Andrzej Nowak (projekt)
+- Zgłosił: mgr Maciej Szupiluk (projekt)
 - Opis: nowe okno GUI albo przełącznik w Col2 obok "SKY VIEW SIMULATOR"
   ("SIMULATOR" ↔ "EXPOSURE OPTIMIZER"), liczący optymalny bracketing i czasy
   naświetlania per faza zaćmienia na podstawie wartości Q (NASA/Espenak) i
@@ -549,7 +549,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
 ## Wykres wartości Q na osi czasu Timeline (cienka linia w wierszu UTC)
 - Status: proponowane (nie robić od razu — patrz decyzja Andrzeja niżej)
 - Typ: feature
-- Zgłosił: Andrzej Nowak (projekt)
+- Zgłosił: mgr Maciej Szupiluk (projekt)
 - Opis: dodać do Timeline (`RenderTimelineBottom()`, App.cpp) wykres wartości Q
   — jasnoszara, cienka (1px) linia — narysowany w wierszu UTC ruler (`rulerY`
   .. `rulerY + kRulerH`), razem z tickami/etykietami czasu UTC. Cel: pozwolić

@@ -4,7 +4,7 @@
 
 ## 2026-07-23
 
-### Andrzej Nowak
+### mgr Maciej Szupiluk
 - Fixed multi-camera control: with more than one camera connected, only one camera would ever fire at a time and all timing would drift badly. Each camera now gets its own dedicated connection and scheduling, instead of all cameras sharing one at a time - confirmed on hardware with 4 cameras firing brackets within milliseconds of each other instead of queueing behind one another
 - Fixed the GUI freezing (needing the process killed) when stopping a running sequence, sometimes even between two commands - a stuck request now times out and cancels cleanly after 10 seconds instead of blocking forever
 - Fixed the camera server occasionally failing to accept new camera connections when several connected at nearly the same time
@@ -25,8 +25,8 @@
 
 ## 2026-07-20
 
-### Maciej Szupiluk
-- Inverted when the Moon renders as a solid black disc vs. its photo texture in the Solar Simulator (Maciej Szupiluk's idea): now black during the partial phases (C1-C2 and C3-C4) and shows the photo during totality (C2-C3) - previously the other way around. Falls back to the old geometric heuristic (moon fully covering the sun) when contact times haven't been calculated yet
+### mgr Maciej Szupiluk
+- Inverted when the Moon renders as a solid black disc vs. its photo texture in the Solar Simulator (mgr Maciej Szupiluk's idea): now black during the partial phases (C1-C2 and C3-C4) and shows the photo during totality (C2-C3) - previously the other way around. Falls back to the old geometric heuristic (moon fully covering the sun) when contact times haven't been calculated yet
 - "Connect camera" / "Test picture" / "Disconnect" now split the available width evenly (was a fixed 135px each, leaving dead space on wider panels)
 - Latitude and Longitude now sit on one line instead of two, saving vertical space in the LOCATION section
 - Fixed "TotalControlCLI quit" not actually closing the camera server process while another client (e.g. the GUI) was still connected - the server now fully stops as soon as any client sends quit, regardless of how many other clients are connected

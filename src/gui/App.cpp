@@ -7863,7 +7863,7 @@ void App::RenderAboutModal() {
     // ── Author ─────────────────────────────────────────────────────────────────
     ImGui::Spacing();
     ImGui::TextColored(kGold, "Author");
-    ImGui::TextColored(kGray, "  Maciej Szupiluk  (mrmgrpl)");
+    ImGui::TextColored(kGray, "  mgr Maciej Szupiluk");
     S::Link(      "    github.com/mrmgrpl/TotalControl",
                   L"https://github.com/mrmgrpl/TotalControl",                              kLink);
 
