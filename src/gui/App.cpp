@@ -7574,7 +7574,7 @@ void App::RenderMenuBar() {
                 nullptr, nullptr, SW_SHOWNORMAL);
         }
         ImGui::Separator();
-        ImGui::MenuItem("TSE 2026-08-12  Burgos/Lerma", nullptr, false, false);
+        ImGui::MenuItem("v2026-07-23", nullptr, false, false);
         ImGui::EndMenu();
     }
 }
@@ -7801,7 +7801,7 @@ void App::RenderAboutModal() {
 
     // ── Libraries ─────────────────────────────────────────────────────────────
     ImGui::Spacing();
-    ImGui::TextColored(kGold, "Biblioteki / Libraries");
+    ImGui::TextColored(kGold, "Libraries");
     ImGui::TextColored(kGray, "  Sony Camera Remote SDK (CrSDK)  Sony Corp.");
     ImGui::TextColored(kGray, "    Camera control, live view, property polling");
     ImGui::Spacing();
@@ -7816,7 +7816,7 @@ void App::RenderAboutModal() {
 
     // ── Eclipse Data & Algorithms ──────────────────────────────────────────────
     ImGui::Spacing();
-    ImGui::TextColored(kGold, "Dane zaciemien / Eclipse Data & Algorithms");
+    ImGui::TextColored(kGold, "Eclipse Data & Algorithms");
     ImGui::TextColored(kGray, "  Fred Espenak  (\"Mr. Eclipse\")  NASA GSFC (ret.)");
     ImGui::TextColored(kGray, "    Exposure model, Besselian elements, 11 898 eclipses");
     S::Link(      "    eclipse.gsfc.nasa.gov",       L"https://eclipse.gsfc.nasa.gov/",    kLink);
@@ -7833,7 +7833,7 @@ void App::RenderAboutModal() {
 
     // ── Solar Imagery & Ephemeris ──────────────────────────────────────────────
     ImGui::Spacing();
-    ImGui::TextColored(kGold, "Obrazy i efemerdy / Solar Imagery & Ephemeris");
+    ImGui::TextColored(kGold, "Solar Imagery & Ephemeris");
     ImGui::TextColored(kGray, "  JPL Horizons  NASA Jet Propulsion Laboratory");
     ImGui::TextColored(kGray, "    Sun, Moon & 5 planets -- positions, angular sizes");
     S::Link(      "    ssd.jpl.nasa.gov/horizons",   L"https://ssd.jpl.nasa.gov/horizons/",kLink);
@@ -7851,19 +7851,19 @@ void App::RenderAboutModal() {
 
     // ── Acknowledgments ────────────────────────────────────────────────────────
     ImGui::Spacing();
-    ImGui::TextColored(kGold, "Podziekowania / Acknowledgments");
-    ImGui::TextColored(kGray, "  Fred Espenak -- 40+ lat tabel zaciemien dla fotografow");
-    ImGui::TextColored(kGray, "  Ekipa IQP -- API prognoz zaciemien w czasie rzeczywistym");
-    ImGui::TextColored(kGray, "  Omar Cornut -- Dear ImGui, immediate-mode UI bez kompromisow");
-    ImGui::TextColored(kGray, "  NASA SDO i NOAA GOES-19 -- otwarte dane sloneczne");
-    ImGui::TextColored(kGray, "  Zespol JPL SSD -- serwis efemerydy Horizons");
-    ImGui::TextColored(kGray, "  Jean Meeus -- algorytmy astronomiczne ponadczasowe");
-    ImGui::TextColored(kGray, "  Open-Elevation API -- darmowa wysokosc n.p.m. z linku Google Maps");
+    ImGui::TextColored(kGold, "Acknowledgments");
+    ImGui::TextColored(kGray, "  Fred Espenak -- 40+ years of eclipse tables for photographers");
+    ImGui::TextColored(kGray, "  The IQP team -- real-time eclipse prediction API");
+    ImGui::TextColored(kGray, "  Omar Cornut -- Dear ImGui, immediate-mode UI without compromises");
+    ImGui::TextColored(kGray, "  NASA SDO and NOAA GOES-19 -- open solar data");
+    ImGui::TextColored(kGray, "  The JPL SSD team -- Horizons ephemeris service");
+    ImGui::TextColored(kGray, "  Jean Meeus -- timeless astronomical algorithms");
+    ImGui::TextColored(kGray, "  Open-Elevation API -- free elevation lookup from a Google Maps link");
 
     // ── Author ─────────────────────────────────────────────────────────────────
     ImGui::Spacing();
-    ImGui::TextColored(kGold, "Autor / Author");
-    ImGui::TextColored(kGray, "  Andrzej Nowak  (mrmgrpl)");
+    ImGui::TextColored(kGold, "Author");
+    ImGui::TextColored(kGray, "  Maciej Szupiluk  (mrmgrpl)");
     S::Link(      "    github.com/mrmgrpl/TotalControl",
                   L"https://github.com/mrmgrpl/TotalControl",                              kLink);
 
