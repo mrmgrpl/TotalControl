@@ -309,7 +309,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **"Bracket ARM Calibration" + "Bracket SS Sweep" presets (Photo Sequence menu)** | **DONE 2026-07-21** |
 | **BracketExposureSumMs — shutter-speed 30s ceiling clamp** | **DONE 2026-07-22** |
 | **bracket_calibration corruption from SS Sweep runs (missing `ss` tag on samples)** | **OPEN — diagnosed, not fixed, see Change log 2026-07-22** |
-| **Camera USB connect speedup (~25s/camera, `CreateCameraObjectInfoUSBConnection`)** | **PAUSED — investigated, not implemented** |
+| **Camera USB connect speedup — eliminate redundant re-enumeration** | **DONE 2026-07-22, verified on 4-camera hardware: ~27s/cam → ~0.3-1.0s/cam** — see Change log |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -883,6 +883,99 @@ low-battery camera. This is also a general reminder that Timeline block
 durations are always a forward *prediction*, computed before a block fires
 — there is no feedback loop from actual shoot success/failure back into
 what's displayed or scheduled.
+
+### 2026-07-22 — Bracket calibration architecture: (model,count,ev) → (model,count)
+
+Following the shutter-speed-table fix above, re-examined what
+`bracket_calibration` was actually measuring. Queried the live DB and
+computed `residual = measured_total_ms − BracketExposureSumMs(count, ev,
+ss)` for every stored row: once the now-exact analytic exposure-time sum is
+subtracted, the residual (pure per-shot mirror/shutter/buffer/USB/SDK
+overhead) is ev- and ss-independent for a given (model, count) — confirmed
+on real data, spread of a few percent at most (e.g. ILCE-7SM3 count=3:
+346-360ms residual across 5 different ev variants). The `ev` key in the old
+schema was measuring nothing real; it was also the direct cause of the
+still-open SS-Sweep corruption bug (Change log above), since a table that's
+supposed to vary by ev looks like a plausible target for SS-Sweep's
+constant-ev/varying-ss samples to silently corrupt.
+
+Restructured `bracket_calibration` from `(cam_model, count, ev)` to
+`(cam_model, count)` — identical shape to `arm_calibration`. `Database.cpp`'s
+`CreateCalibTables()` detects the old schema (presence of an `ev` column via
+`PRAGMA table_info`) and drops+recreates automatically. `SeqCalibSample`
+gained an `ss` field so `SaveCalibFromBuf()` can subtract each sample's own
+analytic exposure sum (its own ev *and* ss) before averaging — this is what
+actually fixes the SS-Sweep corruption bug: a sample from any ss is now a
+valid calibration input instead of a risk, because the physics is subtracted
+per-sample before anything gets averaged. `BlockDurMs()`'s calibrated path
+simplified from a baseline-delta correction to a plain
+`overhead[model][count] + BracketExposureSumMs(...)`.
+
+Removed `SeedBuiltinCalib()` and `SeedArmCalibFromWhitepaper()` (hardcoded
+C++ seed functions, ILCE-7RM4A-only and 2026-07-21-whitepaper-only
+respectively) — factory-default calibration now ships as real database
+content instead: `data/TotalControlDefaultConfig.db` (new, tracked in git,
+same pattern as `data/TotalControlData.db`) is pre-populated via a direct
+SQL write (not app source code) with fresh measured rows for all 4 tracked
+models (`bracket_calibration` + `arm_calibration`, 3 reps/variant — see
+"Bracket ARM Calibration" reps reduction below). New CMake `POST_BUILD` step
+copies it next to the SRV output, same as `TotalControlData.db`.
+`App::EnsureDefaultConfig()` needed zero code changes — its existing
+`if (exists) return` guard means a shipped file is simply adopted as-is.
+
+"Bracket ARM Calibration" preset reps reduced 5→3 (`kReps` in
+`AddBracketArmCalibrationPreset()`): a repeat 5x run produced results
+statistically indistinguishable from the first, so 3 has margin to spare
+without unnecessary shutter wear.
+
+### 2026-07-22 — Camera connect speedup: eliminate redundant re-enumeration
+
+`main.cpp` enumerated cameras once via `CameraController::Enumerate()` to
+build the sorted GUID list, then looped over them calling
+`CameraController::Connect(guid, enumTimeoutSec, connectTimeoutMs)` — but
+`Connect()` did its *own* fresh `SDK::EnumCameraObjects()` internally to
+re-find the same GUID, for every single camera. For N cameras that's 1+N
+full USB scans (each with a 5s ceiling) where 1 would do.
+
+Added `CameraController::EnumerateRaw(timeoutSec, out&) -> void*` (same scan
+as `Enumerate()`, but returns the raw SDK enum result as an opaque handle
+instead of releasing it immediately) and `ReleaseEnum(void*)`. Added a new
+`Connect(guid, void* preEnumeratedHandle, connectTimeoutMs)` overload that
+searches the passed-in handle instead of re-scanning; both overloads now
+share their post-resolve logic (`SDK::Connect`, wait for `OnConnected`,
+`PopulateSupportedCodes` stabilization, `WarmCache`) via a new private
+`ConnectToTarget()` helper, so nothing about the actual connect sequence
+itself changed. `main.cpp`'s connect loop stays sequential exactly as
+before — explicitly scoped to *not* touch parallelism, per discussion; only
+the redundant-enumeration part was in scope. Opaque `void*` handle at the
+`CameraController.h` boundary keeps the SDK-isolation rule intact (`main.cpp`
+never touches an SDK type directly).
+
+**Measured on real hardware same day, 4 cameras** (`TotalControlSRV.log`):
+connect phase went from ~27s/camera (108s total, one full redundant USB
+re-scan per camera) to ~0.3-1.0s/camera (2.9s total) — cameras now connect
+essentially back-to-back. The search/enumeration phase itself (finding
+cameras in the first place, `SDK::EnumCameraObjects`) is untouched by this
+fix and stayed at its usual ~26.3-26.8s across every run, old and new alike
+— that cost is internal to the SDK call, not something this change reaches.
+
+**Progress bar follow-up**: both phases previously shared one hardcoded
+`kExpectedPhaseMs = 25000` (25s = 100%) — not an SDK constant, just this
+app's own guess, written before this fix existed. After the connect-phase
+speedup that guess became wildly wrong for that bar specifically (bar would
+sit at ~12% when the phase was actually already done). Split into
+`kExpectedSearchMs = 27000` (tuned to the observed, SDK-bound ~26.3-26.8s)
+and `kExpectedConnectPerCamMs = 1000` — the connect bar's 100% target is now
+`cameraList.size() * kExpectedConnectPerCamMs`, since total connect time is
+genuinely proportional to camera count post-fix, not a fixed guess.
+`RenderProgress()` takes the expected-duration as a parameter instead of
+reading a single module-level constant.
+
+**Follow-up same day**: the connect-phase bar was removed entirely (not just
+retimed) — at ~1s/camera it's too fast for an animated bar to convey
+anything; replaced with a single `"Connecting to N camera(s)..."` log line.
+Only the search-phase bar remains (`kExpectedSearchMs`), since that phase is
+still genuinely ~27s and benefits from visual feedback.
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 

@@ -2,12 +2,7 @@
 
 ---
 
-## 2026-07-22
-
-### Andrzej Nowak
-- Fixed a bracket duration prediction bug that could estimate a wide bracket (5 or 9 shots) at a slow base shutter speed as taking far longer than physically possible - one case predicted ~200 seconds for a block that actually takes about 8. The formula was assuming shutter speeds beyond what any camera (or the SDK) can produce - real shutter speeds top out at 30 seconds. Each shot in a bracket is now checked against the camera's real, standard shutter-speed steps before its time gets added up, so predictions can no longer exceed what's physically possible
-
-## 2026-07-21
+## 2026-07-23
 
 ### Andrzej Nowak
 - Fixed multi-camera control: with more than one camera connected, only one camera would ever fire at a time and all timing would drift badly. Each camera now gets its own dedicated connection and scheduling, instead of all cameras sharing one at a time - confirmed on hardware with 4 cameras firing brackets within milliseconds of each other instead of queueing behind one another
@@ -17,9 +12,16 @@
 - Log timestamps in the server, GUI, and CLI are now consistently full ISO 8601 with a stable four-digit fraction of a second
 - Added a "Bracket ARM Calibration" preset to measure, per camera model, how long each one actually takes to apply a settings change between shots - confirmed on hardware that this varies a lot by camera (some models 8-10x slower than others), and the Timeline now schedules each camera's gap using its own measured number instead of one guess for every model
 - Added a "Bracket SS Sweep" preset to validate that the Timeline's predicted bracket duration holds up across the full range of shutter speeds, not just the one speed it was originally calibrated against
+- Fixed a bracket duration prediction bug that could estimate a wide bracket (5 or 9 shots) at a slow base shutter speed as taking far longer than physically possible - one case predicted ~200 seconds for a block that actually takes about 8. The formula was assuming shutter speeds beyond what any camera (or the SDK) can produce - real shutter speeds top out at 30 seconds. Each shot in a bracket is now checked against the camera's real, standard shutter-speed steps before its time gets added up, so predictions can no longer exceed what's physically possible
+- Restructured the per-camera bracket-timing calibration data so it's keyed only by camera model and shot count, not also by EV step - measurements had shown the EV step was never actually affecting the per-shot overhead, and keeping it as a key was the direct cause of a data-corruption bug (a shutter-speed sweep test could silently overwrite good calibration numbers with an average of samples taken at wildly different, unrelated shutter speeds). Factory-default calibration for all four tracked camera models now ships as real measured data in a bundled database file instead of being hardcoded in the app
+- Sped up connecting to multiple cameras by removing a redundant USB re-scan that was happening once per camera on top of the one already done to find them in the first place - measured on hardware with 4 cameras: connect time dropped from about 27 seconds per camera (108s total) to well under a second per camera (under 3s total)
+- Cleaned up the camera server's startup banner: version number was stale (hadn't been updated since May), and it printed internal details (pipe name, CLI stop command) that aren't useful to an end user
 
 ### Alessandro Pessi
 - Eclipse contact-time predictions (C1/C2/Max/C3/C4) now use a Delta-T value (the correction between clock time and Earth's actual rotation) fetched from the IERS's own published bulletin and refreshed automatically once a day, instead of a fixed value that was already several seconds stale for this eclipse - matches the ~6 second discrepancy Alessandro found against besselianelements.com. Falls back to the last successfully fetched value if today's update fails, so a network hiccup never leaves the app without one. The current value is now also shown in the Solar Simulator status bar
+
+### John Melson
+- Confirmed on 2+ physical cameras that camera-to-track assignment works correctly: each camera lands in the same slot every time regardless of USB connection order, tracks show the right model+GUID for each connected camera, and a new track appears automatically when an additional camera is detected
 
 ## 2026-07-20
 

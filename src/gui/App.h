@@ -48,6 +48,7 @@ struct CamStatus {
     std::string fnum;
     std::string focus;
     std::string drive;
+    std::string shutterType;   // "mechanical","electronic","auto","" — see resonance/vibration note in CLAUDE.md
     std::string slot1Status;
     std::string slot2Status;
     int         slot1Remaining = -1;
@@ -392,23 +393,28 @@ private:
     char                      m_snapNameBuf[128] = {};
 
     // ── Bracket calibration ──────────────────────────────────────────────────
-    // Per-model lookup: camModel → { (count,ev) → lat_max_ms+10 }
-    // Loaded from DB at startup; reloaded after SaveCalibFromBuf.
-    std::map<std::string,
-             std::map<std::pair<int,std::string>, int>> m_calibCache;
+    // Per-model lookup: camModel → { count → overhead_avg_ms+50 }. Keyed by
+    // count only, NOT ev — see BktCalibEntry comment (Database.h) for why:
+    // the exposure-time component is now computed exactly by
+    // BracketExposureSumMs(), so only the per-shot hardware overhead needs
+    // empirical calibration, and that's ev-independent. Same shape as
+    // m_armCalibCache. Loaded from DB at startup; reloaded after SaveCalibFromBuf.
+    std::map<std::string, std::map<int, int>> m_calibCache;
 
     // camModel is recorded per-sample (not assumed from m_cameras[0]) because
     // all kMaxCamTracks camera threads push into the same buffer concurrently
     // — a run with 4 different camera models mixes their samples together
-    // otherwise (see Change log).
-    struct SeqCalibSample { int count = 0; std::string ev; int latMs = 0; std::string camModel; };
+    // otherwise (see Change log). ss is recorded so SaveCalibFromBuf can
+    // subtract each sample's own analytic exposure time before averaging —
+    // this makes samples from any ss (including an SS Sweep run) safe to
+    // fold into calibration, instead of being a corruption risk.
+    struct SeqCalibSample { int count = 0; std::string ev; std::string ss; int latMs = 0; std::string camModel; };
     // Samples collected during the current/last TEST RUN or RUN (Bracket only).
     // Written by up to kMaxCamTracks sequencer threads concurrently — guarded
     // by m_seqCalibMtx; read by main thread only after all threads join.
     std::vector<SeqCalibSample> m_seqCalibBuf;
 
     void LoadCalibCache();                              // DB → m_calibCache
-    void SeedBuiltinCalib();                            // seed ILCE-7RM4A if absent
     // Saves + removes only camModel's samples from m_seqCalibBuf — other
     // models' still-unsaved samples are left intact for their own button.
     void SaveCalibFromBuf(const std::string& camModel);
@@ -428,7 +434,6 @@ private:
     std::vector<ArmCalibSample> m_armCalibBuf;  // guarded by m_seqCalibMtx, same as m_seqCalibBuf
 
     void LoadArmCalibCache();                    // DB -> m_armCalibCache
-    void SeedArmCalibFromWhitepaper();            // one-time seed, 2026-07-21 measurement
     // Saves + removes only camModel's ARM samples from m_armCalibBuf.
     void SaveArmCalibFromBuf(const std::string& camModel);
     // ArmEstMs: member function (not static) so it can access m_armCalibCache.

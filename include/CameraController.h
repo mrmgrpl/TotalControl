@@ -45,6 +45,7 @@ struct CameraStatus {
     std::wstring focusIndicator;            // "focused","not-focused","unlocked"
     // Drive
     std::wstring driveMode;                 // "single","cont-hi","bracket-1ev-5", ...
+    std::wstring shutterType;               // "mechanical","electronic","auto","?" (unconfirmed on hardware — see CLAUDE.md)
     // WB / Image
     std::wstring whiteBalance;              // "AWB","daylight","color-temp", ...
     int          colorTemp      = 0;        // K (when WB=color-temp)
@@ -74,12 +75,28 @@ public:
     // Enumerate wszystkich podłączonych kamer (wymaga wcześniejszego InitSDK).
     static std::vector<CameraInfo> Enumerate(int timeoutSec = 5);
 
+    // Jak Enumerate(), ale NIE zwalnia surowego wyniku SDK — zwraca go jako
+    // opaque handle (ICrEnumCameraObjectInfo* pod spodem, ale nagłówek tego
+    // nie ujawnia — reguła izolacji SDK zostaje nietknięta), żeby wielokrotne
+    // Connect(guid, handle, ...) mogło go współdzielić zamiast wielokrotnie
+    // skanować USB od nowa (main.cpp: 1 enumeracja zamiast 1+N dla N kamer).
+    // Wywołujący MUSI zwolnić handle przez ReleaseEnum() po zakończeniu pętli
+    // connect (nawet jeśli część połączeń się nie powiodła).
+    static void* EnumerateRaw(int timeoutSec, std::vector<CameraInfo>& out);
+    static void  ReleaseEnum(void* handle);
+
     // ── Instance lifecycle ───────────────────────────────────────────────────
     bool Init();     // wywołuje InitSDK + tworzy callback
     void Shutdown(); // Disconnect + wywołuje ReleaseSDK
-    // guid=nullptr → łączy z pierwszą kamerą (compat jednej kamery)
+    // guid=nullptr → łączy z pierwszą kamerą (compat jednej kamery).
+    // Enumeruje samodzielnie od zera — wygodne dla pojedynczego ad-hoc connect,
+    // ale przy łączeniu wielu kamer pod rząd wolniejsze niż wariant poniżej.
     bool Connect(const wchar_t* guid = nullptr,
                  int enumTimeoutSec = 5, int connectTimeoutMs = 8000);
+    // Jak wyżej, ale szuka guid w JUŻ posiadanym wyniku EnumerateRaw() zamiast
+    // enumerować USB od nowa — wywołujący nadal jest właścicielem handle
+    // (Connect go nie zwalnia; wywołaj ReleaseEnum() po całej pętli connect).
+    bool Connect(const wchar_t* guid, void* preEnumeratedHandle, int connectTimeoutMs);
     void Disconnect();
     bool IsConnected() const { return m_connected; }
     const std::wstring& Model() const { return m_model; }
@@ -153,6 +170,11 @@ private:
     uint32_t NearestShutterSpeed(uint32_t targetRaw);
     void     PopulateSupportedCodes();
     void     WarmCache();
+    // Shared tail of both Connect() overloads: targetInfo is an
+    // ICrCameraObjectInfo* already resolved by the caller (opaque here to
+    // keep SDK types out of this header) — issues SDK::Connect, waits for
+    // OnConnected, stabilises PopulateSupportedCodes, warms the prop cache.
+    bool     ConnectToTarget(void* targetInfo, int connectTimeoutMs);
 
     bool                         m_initialized  = false;
     bool                         m_connected    = false;

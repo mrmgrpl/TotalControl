@@ -112,20 +112,29 @@ static std::wstring ExeDir() {
 }
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-static constexpr wchar_t kVersion[] = L"2026.05.28";
+static constexpr wchar_t kVersion[] = L"2026.07.23";
 
 // ─── Startup progress bar ─────────────────────────────────────────────────────
-// Two separate phases: camera search and camera connect, each targeting 25 s = 100%.
+// Search phase only — measured on real hardware 2026-07-22 (4 cameras):
+// search consistently takes ~26.3-26.8s (SDK::EnumCameraObjects itself, not
+// something this app controls — the kEnumTimeoutSec=5s parameter is a
+// per-attempt ceiling, not the real observed duration, so it can't be used
+// as the progress-bar target). The connect phase used to have its own bar
+// too, but dropped to ~0.3-1.0s/camera after eliminating the redundant
+// per-camera re-enumeration (see CameraController::EnumerateRaw, Change
+// log) — too fast for an animated bar to mean anything, so it was removed;
+// a plain log line is enough for that phase now.
 static constexpr int     kEnumTimeoutSec  = 5;      // Enumerate() timeout
 static constexpr int     kConnectTimeoutMs = 8000;  // Connect() callback timeout
-static constexpr int64_t kExpectedPhaseMs = 25000;  // 100% target per phase
+static constexpr int64_t kExpectedSearchMs = 27000; // 100% target, search phase
 
 static std::atomic<bool>                     g_progressActive{false};
 static std::chrono::steady_clock::time_point g_progStart;
 
-static void RenderProgress(int64_t elapsedMs) {
+static void RenderProgress(int64_t elapsedMs, int64_t expectedMs) {
     constexpr int W = 36;
-    double frac = static_cast<double>(elapsedMs) / static_cast<double>(kExpectedPhaseMs);
+    assert(expectedMs > 0);
+    double frac = static_cast<double>(elapsedMs) / static_cast<double>(expectedMs);
     if (frac > 1.0) frac = 1.0;
     const int filled = static_cast<int>(frac * W + 0.5);
     wchar_t bar[W + 4];
@@ -246,7 +255,7 @@ int main() {
     LogBanner(L"                                                                   ");	
     {
         wchar_t buf[128];
-        swprintf_s(buf, L"  v%s  |  pipe: \\\\.\\pipe\\TotalControl  |  stop: TotalControlCLI quit", kVersion);
+        swprintf_s(buf, L"  v%s", kVersion);
         LogBanner(buf);
     }
     LogBanner(L"");
@@ -267,7 +276,7 @@ int main() {
         return 1;
     }
 
-    // ── Camera search — progress bar (100% = 25 s) ───────────────────────────
+    // ── Camera search — progress bar (100% = kExpectedSearchMs) ──────────────
     LogLine(L"Searching for cameras...");
     g_progressActive = true;
     g_progStart = std::chrono::steady_clock::now();
@@ -275,12 +284,17 @@ int main() {
         while (g_progressActive) {
             const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - g_progStart).count();
-            RenderProgress(ms);
+            RenderProgress(ms, kExpectedSearchMs);
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
         }
     });
 
-    auto cameraList = TotalControl::CameraController::Enumerate(kEnumTimeoutSec);
+    // EnumerateRaw (not Enumerate) — keeps the raw SDK scan alive so the
+    // connect loop below can reuse it per camera instead of each Connect()
+    // call re-scanning USB from scratch (was: 1 scan here + N more inside
+    // the loop for N cameras). Released once after the loop, success or not.
+    std::vector<TotalControl::CameraInfo> cameraList;
+    void* rawEnum = TotalControl::CameraController::EnumerateRaw(kEnumTimeoutSec, cameraList);
 
     g_progressActive = false;
     progressSearch.join();
@@ -288,6 +302,7 @@ int main() {
 
     if (cameraList.empty()) {
         LogLine(L"ERROR: no cameras found");
+        TotalControl::CameraController::ReleaseEnum(rawEnum);
         TotalControl::CameraController::ReleaseSDK();
         return 2;
     }
@@ -311,19 +326,16 @@ int main() {
         }
     }
 
-    // ── Camera connect — progress bar (100% = 25 s) ──────────────────────────
+    // ── Camera connect — no progress bar: ~1s/camera post-speedup (was ~27s/
+    // camera), too fast for an animated bar to mean anything (see Change log
+    // 2026-07-22). A plain announcement + the existing per-camera log lines
+    // below are enough.
     std::vector<std::unique_ptr<TotalControl::CameraController>> camOwners;
-
-    g_progressActive = true;
-    g_progStart = std::chrono::steady_clock::now();
-    std::thread progressConnect([&]() {
-        while (g_progressActive) {
-            const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - g_progStart).count();
-            RenderProgress(ms);
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        }
-    });
+    {
+        wchar_t buf[64];
+        swprintf_s(buf, L"Connecting to %zu camera(s)...", cameraList.size());
+        LogLine(buf);
+    }
 
     for (size_t i = 0; i < cameraList.size(); ++i) {
         const auto& info = cameraList[i];
@@ -341,7 +353,7 @@ int main() {
             LogLine(buf);
             continue;
         }
-        if (!cam->Connect(info.guid.c_str(), kEnumTimeoutSec, kConnectTimeoutMs)) {
+        if (!cam->Connect(info.guid.c_str(), rawEnum, kConnectTimeoutMs)) {
             wchar_t buf[128];
             swprintf_s(buf, L"ERROR: camera Connect failed [%zu] %s", i, info.model.c_str());
             LogLine(buf);
@@ -350,10 +362,7 @@ int main() {
         }
         camOwners.push_back(std::move(cam));
     }
-
-    g_progressActive = false;
-    progressConnect.join();
-    ClearProgressLine();
+    TotalControl::CameraController::ReleaseEnum(rawEnum);  // one scan, shared by the whole loop above
 
     if (camOwners.empty()) {
         LogLine(L"ERROR: no cameras connected");

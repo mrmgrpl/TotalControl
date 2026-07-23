@@ -74,9 +74,22 @@ void CameraController::ReleaseSDK() {
 
 std::vector<CameraInfo> CameraController::Enumerate(int timeoutSec) {
     std::vector<CameraInfo> result;
+    void* raw = EnumerateRaw(timeoutSec, result);
+    ReleaseEnum(raw);
+    return result;
+}
+
+// Same USB scan as Enumerate(), but the caller keeps ownership of the raw
+// SDK enum result (returned as an opaque void*) instead of it being released
+// immediately — lets Connect(guid, handle, ...) below reuse a single scan for
+// several cameras instead of each one re-enumerating from scratch. Caller
+// MUST call ReleaseEnum() exactly once when done, even on partial failure.
+void* CameraController::EnumerateRaw(int timeoutSec, std::vector<CameraInfo>& out) {
+    assert(timeoutSec > 0);
+    out.clear();
     SDK::ICrEnumCameraObjectInfo* pEnum = nullptr;
     SDK::EnumCameraObjects(&pEnum, static_cast<CrInt8u>(timeoutSec));
-    if (!pEnum) return result;
+    if (!pEnum) return nullptr;
     CrInt32u n = pEnum->GetCount();
     for (CrInt32u i = 0; i < n; ++i) {
         const auto* info = pEnum->GetCameraObjectInfo(i);
@@ -87,10 +100,15 @@ std::vector<CameraInfo> CameraController::Enumerate(int timeoutSec) {
         else ci.model = L"Unknown";
         if (auto* nm = info->GetName();  nm && *nm) ci.name  = nm;
         else ci.name = ci.model;
-        result.push_back(std::move(ci));
+        out.push_back(std::move(ci));
     }
-    pEnum->Release();
-    return result;
+    assert(out.size() <= static_cast<size_t>(n));  // some entries may be null and get skipped
+    return pEnum;
+}
+
+void CameraController::ReleaseEnum(void* handle) {
+    if (!handle) return;
+    static_cast<SDK::ICrEnumCameraObjectInfo*>(handle)->Release();
 }
 
 // ─── DeviceCallback ───────────────────────────────────────────────────────────
@@ -282,15 +300,59 @@ bool CameraController::Connect(const wchar_t* guid, int enumTimeoutSec, int conn
         target = pEnum->GetCameraObjectInfo(0);
     }
 
+    bool ok = ConnectToTarget(const_cast<SDK::ICrCameraObjectInfo*>(target), connectTimeoutMs);
+    pEnum->Release();
+    return ok;
+}
+
+bool CameraController::Connect(const wchar_t* guid, void* preEnumeratedHandle, int connectTimeoutMs) {
+    if (!m_initialized)         { Log(L"Connect: Init() not called");             return false; }
+    if (m_callback == nullptr)  { Log(L"Connect: callback is null");              return false; }
+    if (!preEnumeratedHandle)   { Log(L"Connect: preEnumeratedHandle is null");   return false; }
+    if (connectTimeoutMs <= 0)  { Log(L"Connect: connTimeout must be > 0");       return false; }
+    if (m_connected) Disconnect();
+
+    // Reuses a scan the caller already has (EnumerateRaw) instead of asking
+    // the SDK to re-scan USB from scratch for every camera in a connect loop
+    // — see CLAUDE.md Change log 2026-07-22 (camera connect speedup).
+    auto* pEnum = static_cast<SDK::ICrEnumCameraObjectInfo*>(preEnumeratedHandle);
+    CrInt32u camCount = pEnum->GetCount();
+    if (camCount == 0) { Log(L"Connect: preEnumeratedHandle has no cameras"); return false; }
+
+    const SDK::ICrCameraObjectInfo* target = nullptr;
+    if (guid && *guid) {
+        for (CrInt32u i = 0; i < camCount; ++i) {
+            const auto* ci = pEnum->GetCameraObjectInfo(i);
+            if (ci && GuidOrIdHex(ci) == guid) { target = ci; break; }
+        }
+        if (!target) {
+            Logf(L"Connect: camera GUID '%s' not found", guid);
+            return false;
+        }
+    } else {
+        target = pEnum->GetCameraObjectInfo(0);
+    }
+
+    // NOTE: does NOT release pEnum — caller owns it (ReleaseEnum() after its
+    // whole connect loop finishes, success or not).
+    return ConnectToTarget(const_cast<SDK::ICrCameraObjectInfo*>(target), connectTimeoutMs);
+}
+
+// Shared tail of both Connect() overloads above: targetInfo is an already-
+// resolved ICrCameraObjectInfo* (passed as void* to keep SDK types out of
+// the header) — issues SDK::Connect, waits for OnConnected, stabilises
+// PopulateSupportedCodes, warms the property cache.
+bool CameraController::ConnectToTarget(void* targetInfo, int connectTimeoutMs) {
+    assert(targetInfo != nullptr);
+    assert(connectTimeoutMs > 0);
+    auto* target = static_cast<SDK::ICrCameraObjectInfo*>(targetInfo);
+
     m_model = (target->GetModel() && *target->GetModel()) ? target->GetModel() : L"Unknown";
     m_guid  = GuidOrIdHex(target);
-    auto* info = const_cast<SDK::ICrCameraObjectInfo*>(target);
 
     SDK::CrDeviceHandle h = 0;
     m_connectedSig = false;
-    err = SDK::Connect(info, m_callback, &h);
-    pEnum->Release();
-
+    SDK::CrError err = SDK::Connect(target, m_callback, &h);
     if (err != 0 || h == 0) { Logf(L"Connect FAILED err=0x%04X", err); return false; }
     m_deviceHandle = static_cast<uint64_t>(h);
 
@@ -895,6 +957,18 @@ CameraStatus CameraController::GetStatus() {
         // ── Drive ─────────────────────────────────────────────────────────────
         case SDK::CrDeviceProperty_DriveMode:
             s.driveMode = DecodeDriveMode(static_cast<uint32_t>(cur));
+            break;
+        // NOTE: read but not yet confirmed against real hardware behavior (see
+        // Focus Magnifier pitfall in CLAUDE.md — SDK header comments have been
+        // wrong before). Verify with dump_props before/after toggling Shutter
+        // Type on a physical camera if this ever looks suspicious.
+        case SDK::CrDeviceProperty_ShutterType:
+            switch (cur) {
+            case SDK::CrShutterType_MechanicalShutter: s.shutterType = L"mechanical"; break;
+            case SDK::CrShutterType_ElectronicShutter: s.shutterType = L"electronic"; break;
+            case SDK::CrShutterType_Auto:              s.shutterType = L"auto";       break;
+            default:                                    s.shutterType = L"?";          break;
+            }
             break;
         // ── WB / Image ────────────────────────────────────────────────────────
         case SDK::CrDeviceProperty_WhiteBalance:

@@ -219,6 +219,18 @@ add_custom_command(TARGET TotalControlGUI POST_BUILD
     COMMENT "Copy TotalControlData.db -> SRV output dir"
 )
 
+# Copy TotalControlDefaultConfig.db next to SRV exe (factory defaults, incl.
+# measured per-model bracket/ARM calibration -- App::EnsureDefaultConfig only
+# generates one from scratch if this file is absent, so shipping it here means
+# every fresh install/tester starts from real hardware measurements instead of
+# zero, without any hardcoded INSERTs in the app's own source code)
+add_custom_command(TARGET TotalControlGUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/data/TotalControlDefaultConfig.db"
+        "$<TARGET_FILE_DIR:TotalControlSRV>/TotalControlDefaultConfig.db"
+    COMMENT "Copy TotalControlDefaultConfig.db -> SRV output dir"
+)
+
 # Copy CHANGELOG.md next to SRV exe (read by About > What's New tab)
 add_custom_command(TARGET TotalControlGUI POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

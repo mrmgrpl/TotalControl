@@ -667,6 +667,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
            << L",\"focus_area\":\"" << s.focusArea  << L"\""
            << L",\"focus_ind\":\"" << s.focusIndicator << L"\""
            << L",\"drive\":\""   << s.driveMode     << L"\""
+           << L",\"shutter_type\":\"" << s.shutterType << L"\""
            << L",\"wb\":\""      << s.whiteBalance  << L"\""
            << L",\"color_temp\":" << s.colorTemp
            << L",\"img_size\":\"" << s.imageSize    << L"\""
@@ -1130,6 +1131,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         if (prop == L"focus_area")     { respVal(s.focusArea); return true; }
         if (prop == L"focus_ind" || prop == L"focus_indicator") { respVal(s.focusIndicator); return true; }
         if (prop == L"drive_mode")     { respVal(s.driveMode); return true; }
+        if (prop == L"shutter_type")   { respVal(s.shutterType); return true; }
         if (prop == L"white_balance")  { respVal(s.whiteBalance); return true; }
         if (prop == L"color_temp")     { respNum(s.colorTemp); return true; }
         if (prop == L"image_size")     { respVal(s.imageSize); return true; }

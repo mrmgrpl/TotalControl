@@ -57,23 +57,16 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   przy suwaku Live View każdej kamery, podświetlający aktywny wybór.
 
 ## Weryfikacja przypisania kamer (sortowanie po GUID, dynamiczne tory) na 2+ kamerach
-- Status: zaplanowane na 2026-07-21 (wtorek) — Andrzej wejdzie w posiadanie
-  dodatkowych kamer testowych
+- Status: **potwierdzone na sprzęcie i przeniesione do `CHANGELOG.md` → 2026-07-23**
 - Typ: bug (weryfikacja fixa)
 - Zgłosił: John Melson (pierwotne zgłoszenie — Timeline pokazywał kamerę pod
   cudzą, zaszytą na sztywno nazwą modelu; **naprawione i przeniesione do
   `CHANGELOG.md` → 2026-07-19**)
-- Opis: sama poprawka (pozycyjne przypisanie kamera↔tor, sortowanie po GUID
-  w SRV, dynamiczny przyrost liczby torów) jest zaimplementowana i
-  zweryfikowana build+log+zrzutem ekranu na **1 fizycznej kamerze** — to
-  wystarcza, żeby potwierdzić brak regresji i poprawność logiki dla
-  najczęstszego przypadku (1 kamera), ale nie testuje samego sedna zgłoszenia
-  Johna (dwie różne kamery, poprawne rozróżnienie która jest którą) ani
-  sortowania po GUID (efekt widoczny dopiero przy 2+ urządzeniach). Do
-  zrobienia we wtorek: podłączyć 2+ kamery, potwierdzić że (1) każdy tor
-  pokazuje właściwy, inny model+GUID, (2) kolejność slotów jest stabilna
-  między restartami SRV niezależnie od kolejności podłączania USB, (3) nowy
-  tor pojawia się automatycznie przy podłączeniu dodatkowej kamery.
+- Opis: pozycyjne przypisanie kamera↔tor + sortowanie po GUID w SRV +
+  dynamiczny przyrost liczby torów, potwierdzone na 2+ fizycznych kamerach:
+  (1) każdy tor pokazuje właściwy, inny model+GUID, (2) kolejność slotów
+  stabilna między restartami SRV niezależnie od kolejności podłączania USB,
+  (3) nowy tor pojawia się automatycznie przy podłączeniu dodatkowej kamery.
 
 ## Instrukcja "how-to" dla operatora: jak przygotować i podłączyć aparat
 - Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**

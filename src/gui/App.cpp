@@ -1480,12 +1480,6 @@ static int64_t ParseSsMs(const std::string& ss) {
 // Measured: 303 ms; conservative: 350 ms.
 static constexpr int64_t kCamOverheadMs = 350;
 
-// Shutter speed the bracket_calib table's lat_avg_ms/lat_max_ms values were
-// measured at (ss=1/125 => 8ms). BlockDurMs's ssExtra correction scales from
-// this baseline, so it must always match whatever ss the stored calibration
-// rows actually used (see BktCalibEntry::ss / SeedBuiltinCalib).
-static constexpr int64_t kCalibBaselineSsMs = 8;
-
 // Returns true if blocks a and b require an ARM command between them
 // (different drive mode, shutter speed, ISO, or f-stop).
 static bool BlockParamsDiffer(const TLBlock& a, const TLBlock& b) {
@@ -1576,26 +1570,40 @@ int64_t App::SnapMsToRelativeSecond(int64_t ms) {
     return best + roundedOffset;
 }
 
-// Standard 1/3-stop shutter-speed series, 30s down to 1/8000s — the real,
-// camera-enforced range and step set. CameraController::NearestShutterSpeed()
-// snaps any requested value to the camera's own live-queried valid-value
-// list, which follows this same standard geometric series (ratio 2^(1/3) per
-// step) and hard-caps at 30s: none of our camera bodies can shoot a
-// shutter-speed-based exposure beyond that (bulb is a different mechanism,
-// not used for brackets). Used by BracketExposureSumMs() below so predicted
-// bracket stops never exceed what the camera can actually produce.
+// Standard 1/3-stop shutter-speed series, 1/8000s to 30s — the same nominal
+// (dial/menu-displayed) values published in every interchangeable-lens
+// camera's manual and every third-stop exposure/ND-filter reference, cross-
+// checked 2026-07-22 against multiple independent published sources rather
+// than derived from a formula (a prior version of this table computed
+// `30/2^(i/3)` and got the wrong numbers — see below). This is a physical/
+// mechanical constraint (1/8000-30s, third-stop steps), not a per-camera-
+// model one, so it's shared across all bodies rather than looked up per
+// model — CameraController::NearestShutterSpeed() snaps to the same range
+// when querying the camera live via SDK::GetSelectDeviceProperties.
+//
+// Real camera firmware internally targets a pure power-of-two progression
+// anchored at 1 second (each third-stop step = cube root of 2 = 1.2599x)
+// and only ROUNDS the display to these familiar numbers — nominal "30s" is
+// an internal ~32s exposure, nominal "1/1000" is an internal ~1/1024s. This
+// table intentionally uses the published NOMINAL values instead of the
+// unrounded internal ones, because those are what a user actually types
+// into a block's `ss` field (e.g. "1/1000") — so a bracket's un-shifted
+// center stop matches that value exactly instead of drifting a few percent
+// like the old formula-generated table did.
 static const std::vector<double>& StandardShutterSpeedsSec() {
-    static const std::vector<double> table = [] {
-        std::vector<double> t;
-        constexpr int kMaxSteps = 64; // 30s..1/8000s spans ~38 steps; bounds the loop
-        for (int i = 0; i < kMaxSteps; ++i) {
-            double v = 30.0 / std::pow(2.0, i / 3.0);
-            if (v < 1.0 / 8000.0 - 1e-9) break;
-            t.push_back(v);
-        }
-        assert(!t.empty());
-        return t;
-    }();
+    static const std::vector<double> table = {
+        1.0/8000.0, 1.0/6400.0, 1.0/5000.0, 1.0/4000.0, 1.0/3200.0,
+        1.0/2500.0, 1.0/2000.0, 1.0/1600.0, 1.0/1250.0, 1.0/1000.0,
+        1.0/800.0,  1.0/640.0,  1.0/500.0,  1.0/400.0,  1.0/320.0,
+        1.0/250.0,  1.0/200.0,  1.0/160.0,  1.0/125.0,  1.0/100.0,
+        1.0/80.0,   1.0/60.0,   1.0/50.0,   1.0/40.0,   1.0/30.0,
+        1.0/25.0,   1.0/20.0,   1.0/15.0,   1.0/13.0,   1.0/10.0,
+        1.0/8.0,    1.0/6.0,    1.0/5.0,    1.0/4.0,    1.0/3.0,
+        1.0/2.5,    1.0/2.0,    1.0/1.6,    1.0/1.3,
+        1.0, 1.3, 1.6, 2.0, 2.5, 3.2, 4.0, 5.0, 6.0, 8.0,
+        10.0, 13.0, 15.0, 20.0, 25.0, 30.0,
+    };
+    assert(table.size() == 55);  // 1/8000s..30s in third-stops is 55 published values
     return table;
 }
 
@@ -1655,7 +1663,11 @@ int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
         const int64_t expSumMs = BracketExposureSumMs(b.count, evStep, ssMs);
 
         // Calibration lookup: prefer named model, fall back to first available.
-        const std::map<std::pair<int,std::string>, int>* table = nullptr;
+        // Keyed by count only — the exposure-time component above is exact
+        // physics (BracketExposureSumMs), so the calibrated value here is a
+        // pure per-shot hardware-overhead residual, confirmed ev/ss-
+        // independent for a given (model, count) — see Change log 2026-07-22.
+        const std::map<int, int>* table = nullptr;
         if (!camModel.empty()) {
             auto it = m_calibCache.find(std::string(camModel));
             if (it != m_calibCache.end()) table = &it->second;
@@ -1663,18 +1675,9 @@ int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
         if (!table && !m_calibCache.empty())
             table = &m_calibCache.begin()->second;
         if (table) {
-            auto jt = table->find({b.count, b.ev});
-            if (jt != table->end()) {
-                // jt->second = lat_avg_ms + 50, calibrated at ss=kCalibBaselineSsMs.
-                // Exposure time scales with the bracket's real (shutter-speed-clamped)
-                // exposure sum, not with count alone or a flat multiplier applied to the
-                // ss delta — clamping at the camera's 30s ceiling makes that relationship
-                // nonlinear, so both sums are computed directly (each stop snapped to a
-                // real camera shutter speed) and subtracted instead.
-                const int64_t baselineExpSumMs =
-                    BracketExposureSumMs(b.count, evStep, kCalibBaselineSsMs);
-                return jt->second + (expSumMs - baselineExpSumMs);
-            }
+            auto jt = table->find(b.count);
+            if (jt != table->end())
+                return jt->second + expSumMs;  // overhead residual + exact exposure sum
         }
         // No calibration — fall back to formula: per-shot overhead + summed exposure time.
         return int64_t(b.count) * kCamOverheadMs + expSumMs;
@@ -1783,6 +1786,7 @@ void App::StatusThreadProc() {
                     s.fnum           = JStr(*res, "f");
                     s.focus          = JStr(*res, "focus");
                     s.drive          = JStr(*res, "drive");
+                    s.shutterType    = JStr(*res, "shutter_type");
                     s.slot1Status    = JStr(*res, "slot1_status");
                     s.slot2Status    = JStr(*res, "slot2_status");
                     s.slot1Remaining = JInt(*res, "remaining",       -1);
@@ -2043,7 +2047,7 @@ void App::SeqCamThreadProc(int        camIdx,
                     if (ok && blk.type == BlockType::Bracket && logLat > 0 &&
                         !thisCamModel.empty()) {
                         std::lock_guard lk(m_seqCalibMtx);
-                        m_seqCalibBuf.push_back({blk.count, blk.ev,
+                        m_seqCalibBuf.push_back({blk.count, blk.ev, blk.ss,
                                                  static_cast<int>(logLat), thisCamModel});
                     }
                     m_lastResult = std::format("SEQ cam{} {} {}",
@@ -2667,8 +2671,10 @@ void App::AddAllBracketVariantsPreset() {
 // state) bias one variant's measurements more than another's; interleaving
 // spreads that drift evenly across all 16 variants instead (see
 // feedback_hw_testing_rigor memory / CLAUDE.md calibration methodology).
-// kReps=5, not 10 — full-resolution bracket bursts wear the shutter; 5 reps
-// is enough for a stable mean+max per (count,ev) without unnecessary shots.
+// kReps=3, not 5/10 — full-resolution bracket bursts wear the shutter; 3
+// reps is enough for a stable mean+max per (count,ev) without unnecessary
+// shots (confirmed 2026-07-22: a repeat 5x run made zero difference to the
+// already-clean 5x results, so 3 has margin to spare).
 void App::AddBracketArmCalibrationPreset() {
     assert(m_presetTargetTrack >= 0);
     assert(m_presetTargetTrack < static_cast<int>(m_tracks.size()));  // rule 5: target track must exist
@@ -2694,7 +2700,7 @@ void App::AddBracketArmCalibrationPreset() {
     };
     static constexpr int kNumVariants = static_cast<int>(std::size(kVariants));
     static_assert(kNumVariants == 16, "must mirror the Inspector's bracket-mode dropdown");
-    static constexpr int kReps  = 5;
+    static constexpr int kReps  = 3;
     static constexpr int64_t kGapMs = 2000; // ARM-end -> next block start
 
     TLTrack& trk = m_tracks[ti];
@@ -5441,14 +5447,15 @@ App::App() {
         // Migration: create named snapshot tables if they don't exist yet
         m_configDb.CreateSnapshotTables();
 
-        // Bracket calibration — create tables, seed built-in data, warm cache
+        // Bracket calibration — create tables, warm cache. Factory-default
+        // calibration rows now ship as real DB content in
+        // TotalControlDefaultConfig.db (copied into a fresh TotalControlConfig.db
+        // on first run, above) instead of hardcoded C++ seed functions.
         m_configDb.CreateCalibTables();
-        SeedBuiltinCalib();
         LoadCalibCache();
 
         // ARM (DriveMode-change) calibration — same pattern, separate table
         m_configDb.CreateArmCalibTable();
-        SeedArmCalibFromWhitepaper();
         LoadArmCalibCache();
 
         // Ephemeris cache tables (created if absent; data loaded on first fetch)
@@ -5852,6 +5859,19 @@ void App::RenderCameraSection() {
             [&](const CamStatus& s) { return std::pair{ s.focus.empty() ? "?" : s.focus, kWhite }; });
         Row("Drive", "Shutter drive mode (single / continuous / bracket) -- raw SDK code,\nnot always human-readable.",
             [&](const CamStatus& s) { return std::pair{ s.drive.empty() ? "?" : s.drive, kWhite }; });
+        Row("Shutter", "Physical (mechanical) shutter actuation on a long bracket sequence\n"
+                       "causes resonance/vibration that measurably degrades image sharpness --\n"
+                       "this is why every camera must be set to Silent (Electronic) Shutter for\n"
+                       "the eclipse sequence. RED = mechanical shutter is active right now --\n"
+                       "switch it on the camera before shooting a bracket. GREEN = electronic/\n"
+                       "silent, safe. This app does not set this for you -- it's a manual\n"
+                       "per-camera setting you must check yourself.",
+            [&](const CamStatus& s) -> std::pair<std::string, ImVec4> {
+            if (s.shutterType == "mechanical") return { "mechanical", kRed   };
+            if (s.shutterType == "electronic") return { "silent",     kGreen };
+            if (s.shutterType == "auto")       return { "auto",       kYellow };
+            return { "?", kDim };
+        });
 
         // Cards — remaining/max (shots) and % free when max is known
         auto CardVal = [&](const std::string& status, int remaining, int maxRem)
@@ -6833,56 +6853,13 @@ void App::LoadCalibCache() {
     assert(models.size() <= 100);  // bounded: realistic number of camera models
     for (const auto& model : models) {
         auto entries = m_configDb.LoadCalibData(model);
-        assert(entries.size() <= 1024);
+        assert(entries.size() <= 64);
         auto& cm = m_calibCache[model];
         for (const auto& e : entries)
-            cm[{e.count, e.ev}] = e.latAvgMs + 50;
+            cm[e.count] = e.latAvgMs + 50;
     }
     LogLine(std::format("Calibration: {} model(s) loaded into cache",
                         m_calibCache.size()));
-}
-
-void App::SeedBuiltinCalib() {
-    assert(m_configDb.IsOpen());
-    static constexpr char kModel[] = "ILCE-7RM4A";
-    if (!m_configDb.LoadCalibData(kModel).empty()) return; // already seeded
-
-    // Measured 2026-07-12: SS=1/125, ISO=100, f/8.0, 10 reps each.
-    // lat_max_ms / lat_avg_ms / lat_min_ms
-    struct Row { int cnt; const char* ev; int mx; int av; int mn; };
-    static constexpr Row kRows[] = {
-        {3,"0.3ev", 493,473,448}, {3,"0.5ev", 509,481,449},
-        {3,"0.7ev", 510,480,457}, {3,"1.0ev", 507,483,458},
-        {3,"2.0ev", 535,499,464}, {3,"3.0ev", 551,528,505},
-        {5,"0.3ev", 718,681,650}, {5,"0.5ev", 702,688,672},
-        {5,"0.7ev", 719,705,693}, {5,"1.0ev", 734,700,669},
-        {5,"2.0ev", 851,831,808}, {5,"3.0ev",1273,1243,1219},
-        {9,"0.3ev",1139,1118,1096},{9,"0.5ev",1165,1146,1127},
-        {9,"0.7ev",1197,1174,1146},{9,"1.0ev",1330,1303,1264},
-    };
-    static constexpr int kNumRows = static_cast<int>(std::size(kRows));
-
-    FILETIME ft; GetSystemTimePreciseAsFileTime(&ft);
-    ULARGE_INTEGER ui; ui.LowPart = ft.dwLowDateTime; ui.HighPart = ft.dwHighDateTime;
-    int64_t nowMs = static_cast<int64_t>(ui.QuadPart / 10000) - 11644473600000LL;
-
-    std::vector<BktCalibEntry> entries;
-    entries.reserve(kNumRows);
-    for (const auto& r : kRows) {
-        BktCalibEntry e;
-        e.camModel  = kModel;
-        e.count     = r.cnt;
-        e.ev        = r.ev;
-        e.latMaxMs  = r.mx;
-        e.latAvgMs  = r.av;
-        e.latMinMs  = r.mn;
-        e.reps      = 10;
-        e.ss        = "1/125";
-        e.createdMs = nowMs;
-        entries.push_back(std::move(e));
-    }
-    m_configDb.SaveCalibData(entries);
-    LogLine(std::format("Calibration: seeded {} entries for {}", kNumRows, kModel));
 }
 
 void App::SaveCalibFromBuf(const std::string& camModel) {
@@ -6893,38 +6870,46 @@ void App::SaveCalibFromBuf(const std::string& camModel) {
     ULARGE_INTEGER ui; ui.LowPart = ft.dwLowDateTime; ui.HighPart = ft.dwHighDateTime;
     int64_t nowMs = static_cast<int64_t>(ui.QuadPart / 10000) - 11644473600000LL;
 
-    // Group THIS model's samples by (count, ev) → collect latMs values.
-    // A run can mix several camera models firing concurrently, so only
-    // camModel's own samples are grouped/removed here — other models' still
-    // pending in m_seqCalibBuf are left alone for their own save button.
-    std::map<std::pair<int,std::string>, std::vector<int>> groups;
+    // Group THIS model's samples by count → collect per-shot overhead
+    // residuals (each sample's measured latency minus ITS OWN analytic
+    // exposure-time sum, computed from that sample's own ev/ss). Unlike the
+    // old raw-latency grouping, this makes samples from any ss/ev safe to
+    // mix — an SS Sweep run's samples are now valid calibration input
+    // instead of a corruption risk (see Change log 2026-07-22). A run can
+    // mix several camera models firing concurrently, so only camModel's own
+    // samples are grouped/removed here — other models' still pending in
+    // m_seqCalibBuf are left alone for their own save button.
+    std::map<int, std::vector<int>> groups;
     assert(m_seqCalibBuf.size() <= 4096);  // bounded: calibration sequence is finite
-    for (const auto& s : m_seqCalibBuf)
-        if (s.camModel == camModel)
-            groups[{s.count, s.ev}].push_back(s.latMs);
+    for (const auto& s : m_seqCalibBuf) {
+        if (s.camModel != camModel) continue;
+        double evStep = 1.0;
+        try { evStep = std::stod(s.ev); } catch (...) {}
+        int64_t ssMs = ParseSsMs(s.ss);
+        int64_t expSumMs = BracketExposureSumMs(s.count, evStep, ssMs);
+        groups[s.count].push_back(s.latMs - static_cast<int>(expSumMs));
+    }
 
     std::vector<BktCalibEntry> entries;
     entries.reserve(groups.size());
-    for (const auto& [key, lats] : groups) {
-        assert(!lats.empty());
+    for (const auto& [count, resid] : groups) {
+        assert(!resid.empty());
         BktCalibEntry e;
         e.camModel  = camModel;
-        e.count     = key.first;
-        e.ev        = key.second;
-        e.latMaxMs  = *std::max_element(lats.begin(), lats.end());
-        e.latMinMs  = *std::min_element(lats.begin(), lats.end());
+        e.count     = count;
+        e.latMaxMs  = *std::max_element(resid.begin(), resid.end());
+        e.latMinMs  = *std::min_element(resid.begin(), resid.end());
         int sum = 0;
-        for (int v : lats) sum += v;
-        e.latAvgMs  = sum / static_cast<int>(lats.size());
-        e.reps      = static_cast<int>(lats.size());
-        e.ss        = "1/100";
+        for (int v : resid) sum += v;
+        e.latAvgMs  = sum / static_cast<int>(resid.size());
+        e.reps      = static_cast<int>(resid.size());
         e.createdMs = nowMs;
         entries.push_back(std::move(e));
     }
     m_configDb.SaveCalibData(entries);
     LoadCalibCache();
     std::erase_if(m_seqCalibBuf, [&](const SeqCalibSample& s) { return s.camModel == camModel; });
-    m_lastResult = std::format("Calibration saved: {} combos for {}",
+    m_lastResult = std::format("Calibration saved: {} count(s) for {}",
                                entries.size(), camModel);
     LogLine(m_lastResult);
 
@@ -6945,61 +6930,6 @@ void App::LoadArmCalibCache() {
     }
     LogLine(std::format("ARM calibration: {} model(s) loaded into cache",
                         m_armCalibCache.size()));
-}
-
-// One-time seed from the 2026-07-21 4-camera concurrent calibration run
-// (docs/arm_latency_bionz_whitepaper.md) — 30/30/20 reps per count (16
-// variants x 5 reps, aggregated across the 6/6/4 ev steps per count=3/5/9).
-// ILCE-7C was independently cross-checked with a solo re-run and found
-// consistent with the concurrent-run numbers (within measurement noise),
-// so the concurrent-run data is used for all four models here.
-void App::SeedArmCalibFromWhitepaper() {
-    assert(m_configDb.IsOpen());
-    struct ModelRow { const char* model; int cnt; int mx; int av; int mn; int reps; };
-    static constexpr ModelRow kRows[] = {
-        {"ILCE-7SM3",  3,  437,  319,  125, 30},
-        {"ILCE-7SM3",  5,  437,  323,  265, 30},
-        {"ILCE-7SM3",  9,  391,  329,  266, 20},
-        {"ILCE-7M4",   3,  532,  450,  234, 30},
-        {"ILCE-7M4",   5,  546,  465,  390, 30},
-        {"ILCE-7M4",   9,  500,  450,  375, 20},
-        {"ILCE-7C",    3, 4484, 3817,  312, 30},
-        {"ILCE-7C",    5, 3438, 3017, 1984, 30},
-        {"ILCE-7C",    9, 3609, 3504, 3422, 20},
-        {"ILCE-7RM4A", 3, 5438, 4711,  297, 30},
-        {"ILCE-7RM4A", 5, 3828, 3581, 1500, 30},
-        {"ILCE-7RM4A", 9, 4266, 4157, 4094, 20},
-    };
-    static constexpr int kNumRows = static_cast<int>(std::size(kRows));
-
-    // Idempotent: skip any model that already has ARM calibration data
-    // (e.g. from a later, more thorough SAVE CALIB run superseding this seed).
-    bool anyMissing = false;
-    for (const char* m : {"ILCE-7SM3", "ILCE-7M4", "ILCE-7C", "ILCE-7RM4A"})
-        if (m_configDb.LoadArmCalibData(m).empty()) { anyMissing = true; break; }
-    if (!anyMissing) return;
-
-    FILETIME ft; GetSystemTimePreciseAsFileTime(&ft);
-    ULARGE_INTEGER ui; ui.LowPart = ft.dwLowDateTime; ui.HighPart = ft.dwHighDateTime;
-    int64_t nowMs = static_cast<int64_t>(ui.QuadPart / 10000) - 11644473600000LL;
-
-    std::vector<ArmCalibEntry> entries;
-    entries.reserve(kNumRows);
-    for (const auto& r : kRows) {
-        if (!m_configDb.LoadArmCalibData(r.model).empty()) continue;  // that model already calibrated
-        ArmCalibEntry e;
-        e.camModel  = r.model;
-        e.count     = r.cnt;
-        e.latMaxMs  = r.mx;
-        e.latAvgMs  = r.av;
-        e.latMinMs  = r.mn;
-        e.reps      = r.reps;
-        e.createdMs = nowMs;
-        entries.push_back(std::move(e));
-    }
-    m_configDb.SaveArmCalibData(entries);
-    LogLine(std::format("ARM calibration: seeded {} entries from 2026-07-21 measurement",
-                        entries.size()));
 }
 
 void App::SaveArmCalibFromBuf(const std::string& camModel) {
@@ -7552,9 +7482,9 @@ void App::RenderMenuBar() {
         // calibration/verification run, 2s gap from ARM-end to next block.
         if (ImGui::MenuItem("Add All Bracket Variants (calibration)"))
             AddAllBracketVariantsPreset();
-        // Repeated-measures calibration: 16 variants x 5 reps, interleaved —
+        // Repeated-measures calibration: 16 variants x 3 reps, interleaved —
         // feeds the per-model "SAVE CALIB" buttons with a stable mean+max.
-        if (ImGui::MenuItem("Bracket ARM Calibration (5x, interleaved)"))
+        if (ImGui::MenuItem("Bracket ARM Calibration (3x, interleaved)"))
             AddBracketArmCalibrationPreset();
         // Validates BlockDurMs()'s exposure-time scaling: full 1/8000-8s
         // sweep at count=3, 4-point spot check at count=5/9. 25 blocks,

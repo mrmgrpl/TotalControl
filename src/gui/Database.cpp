@@ -2,6 +2,7 @@
 #include "sqlite3.h"
 #include <windows.h>
 #include <cassert>
+#include <cstring>
 #include <format>
 #include <vector>
 
@@ -650,43 +651,59 @@ static constexpr const char* kCreateCalib = R"SQL(
     CREATE TABLE IF NOT EXISTS bracket_calibration (
         cam_model   TEXT    NOT NULL,
         count       INTEGER NOT NULL,
-        ev          TEXT    NOT NULL,
         lat_max_ms  INTEGER NOT NULL,
         lat_avg_ms  INTEGER NOT NULL,
         lat_min_ms  INTEGER NOT NULL,
-        reps        INTEGER NOT NULL DEFAULT 3,
-        ss          TEXT    NOT NULL DEFAULT '1/100',
+        reps        INTEGER NOT NULL DEFAULT 0,
         created_ms  INTEGER NOT NULL,
-        PRIMARY KEY (cam_model, count, ev)
+        PRIMARY KEY (cam_model, count)
     );
 )SQL";
 
 void Database::CreateCalibTables() {
     assert(m_db != nullptr);  // DB must be open before creating tables
+    // Schema changed 2026-07-22: bracket_calibration used to be keyed by
+    // (cam_model, count, ev) and stored the raw measured bracket-shoot total.
+    // That conflated the exposure-time component (now computed exactly by
+    // BracketExposureSumMs(), no calibration needed for it) with the
+    // genuinely hardware-dependent per-shot overhead. Old rows are unusable
+    // under the new column meaning (residual, not raw total) — detect the
+    // old schema via its `ev` column and rebuild.
+    bool hasOldSchema = false;
+    sqlite3_stmt* chk = nullptr;
+    if (sqlite3_prepare_v2(m_db, "PRAGMA table_info(bracket_calibration);", -1, &chk, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(chk) == SQLITE_ROW) {
+            const auto* name = sqlite3_column_text(chk, 1);
+            if (name && std::strcmp(reinterpret_cast<const char*>(name), "ev") == 0) {
+                hasOldSchema = true;
+                break;
+            }
+        }
+        sqlite3_finalize(chk);
+    }
+    if (hasOldSchema) Exec("DROP TABLE bracket_calibration;");
     Exec(kCreateCalib);
 }
 
 void Database::SaveCalibData(const std::vector<BktCalibEntry>& entries) {
     assert(m_db != nullptr);
-    assert(entries.size() <= 1024);  // bounded: no camera has >1024 bracket combos
+    assert(entries.size() <= 64);  // bounded: at most a handful of counts per model
     if (!m_db || entries.empty()) return;
     sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
     for (const auto& e : entries) {
         sqlite3_stmt* st = nullptr;
         sqlite3_prepare_v2(m_db,
             "INSERT OR REPLACE INTO bracket_calibration"
-            " (cam_model,count,ev,lat_max_ms,lat_avg_ms,lat_min_ms,reps,ss,created_ms)"
-            " VALUES (?,?,?,?,?,?,?,?,?);",
+            " (cam_model,count,lat_max_ms,lat_avg_ms,lat_min_ms,reps,created_ms)"
+            " VALUES (?,?,?,?,?,?,?);",
             -1, &st, nullptr);
         sqlite3_bind_text (st, 1, e.camModel.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_int  (st, 2, e.count);
-        sqlite3_bind_text (st, 3, e.ev.c_str(),       -1, SQLITE_STATIC);
-        sqlite3_bind_int  (st, 4, e.latMaxMs);
-        sqlite3_bind_int  (st, 5, e.latAvgMs);
-        sqlite3_bind_int  (st, 6, e.latMinMs);
-        sqlite3_bind_int  (st, 7, e.reps);
-        sqlite3_bind_text (st, 8, e.ss.c_str(),       -1, SQLITE_STATIC);
-        sqlite3_bind_int64(st, 9, e.createdMs);
+        sqlite3_bind_int  (st, 3, e.latMaxMs);
+        sqlite3_bind_int  (st, 4, e.latAvgMs);
+        sqlite3_bind_int  (st, 5, e.latMinMs);
+        sqlite3_bind_int  (st, 6, e.reps);
+        sqlite3_bind_int64(st, 7, e.createdMs);
         sqlite3_step(st); sqlite3_finalize(st);
     }
     sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
@@ -698,16 +715,11 @@ std::vector<BktCalibEntry> Database::LoadCalibData(const std::string& camModel) 
     std::vector<BktCalibEntry> result;
     if (!m_db) return result;
 
-    auto col = [](sqlite3_stmt* s, int i) -> std::string {
-        const auto* p = sqlite3_column_text(s, i);
-        return p ? reinterpret_cast<const char*>(p) : "";
-    };
-
     sqlite3_stmt* st = nullptr;
     int rc = sqlite3_prepare_v2(m_db,
-        "SELECT count,ev,lat_max_ms,lat_avg_ms,lat_min_ms,reps,ss,created_ms"
+        "SELECT count,lat_max_ms,lat_avg_ms,lat_min_ms,reps,created_ms"
         " FROM bracket_calibration WHERE cam_model=?"
-        " ORDER BY count, ev;",
+        " ORDER BY count;",
         -1, &st, nullptr);
     if (rc != SQLITE_OK) return result;
     sqlite3_bind_text(st, 1, camModel.c_str(), -1, SQLITE_STATIC);
@@ -715,13 +727,11 @@ std::vector<BktCalibEntry> Database::LoadCalibData(const std::string& camModel) 
         BktCalibEntry e;
         e.camModel  = camModel;
         e.count     = sqlite3_column_int  (st, 0);
-        e.ev        = col(st, 1);
-        e.latMaxMs  = sqlite3_column_int  (st, 2);
-        e.latAvgMs  = sqlite3_column_int  (st, 3);
-        e.latMinMs  = sqlite3_column_int  (st, 4);
-        e.reps      = sqlite3_column_int  (st, 5);
-        e.ss        = col(st, 6);
-        e.createdMs = sqlite3_column_int64(st, 7);
+        e.latMaxMs  = sqlite3_column_int  (st, 1);
+        e.latAvgMs  = sqlite3_column_int  (st, 2);
+        e.latMinMs  = sqlite3_column_int  (st, 3);
+        e.reps      = sqlite3_column_int  (st, 4);
+        e.createdMs = sqlite3_column_int64(st, 5);
         result.push_back(std::move(e));
     }
     sqlite3_finalize(st);

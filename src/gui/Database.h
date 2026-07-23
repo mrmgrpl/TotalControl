@@ -28,16 +28,21 @@ struct CamConfig {
 };
 
 // ─── Bracket calibration ─────────────────────────────────────────────────────
+// Keyed by (camModel, count) only — NOT ev, NOT ss. Confirmed empirically
+// 2026-07-22: once BracketExposureSumMs()'s analytic exposure-time sum is
+// subtracted from a raw measured bracket-shoot duration, the residual
+// (per-shot mirror/shutter/buffer/USB/SDK overhead) is ev- and ss-independent
+// for a given (model, count) — see CLAUDE.md Change log. latAvgMs etc. store
+// that residual, not the raw total, so this table has the same shape as
+// arm_calibration (which the App.cpp SAVE CALIB code already mirrors).
 
 struct BktCalibEntry {
     std::string camModel;
     int         count     = 0;
-    std::string ev;
-    int         latMaxMs  = 0;   // max latency across reps
-    int         latAvgMs  = 0;
+    int         latMaxMs  = 0;   // max per-shot overhead residual across reps
+    int         latAvgMs  = 0;   // avg per-shot overhead residual (used by BlockDurMs)
     int         latMinMs  = 0;
-    int         reps      = 3;   // number of repetitions measured
-    std::string ss        = "1/100";
+    int         reps      = 0;   // number of samples averaged
     int64_t     createdMs = 0;
 };
 
