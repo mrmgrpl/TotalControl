@@ -310,6 +310,9 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **BracketExposureSumMs — shutter-speed 30s ceiling clamp** | **DONE 2026-07-22** |
 | **bracket_calibration corruption from SS Sweep runs (missing `ss` tag on samples)** | **OPEN — diagnosed, not fixed, see Change log 2026-07-22** |
 | **Camera USB connect speedup — eliminate redundant re-enumeration** | **DONE 2026-07-22, verified on 4-camera hardware: ~27s/cam → ~0.3-1.0s/cam** — see Change log |
+| **bracket_calibration restructure (model,count,ev) → (model,count) + factory-default calib DB** | **DONE 2026-07-22, see Change log** |
+| **Timeline camera GUID-sort — verified on 2+ physical cameras** | **DONE 2026-07-23** (previously verified on 1 camera only) |
+| **Release v2026-07-23** | **PUBLISHED, see Change log** — About-screen EN-only + author-credit corrections (2 follow-up republishes same day) |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -976,6 +979,65 @@ retimed) — at ~1s/camera it's too fast for an animated bar to convey
 anything; replaced with a single `"Connecting to N camera(s)..."` log line.
 Only the search-phase bar remains (`kExpectedSearchMs`), since that phase is
 still genuinely ~27s and benefits from visual feedback.
+
+### 2026-07-23 — Release v2026-07-23: SRV banner, About-screen localization/attribution
+
+Third public release. Two follow-up issues surfaced only after the first
+publish, each requiring a full delete-and-recreate of the release (see
+pitfall below) — both are recorded here so the same gaps aren't repeated.
+
+**1. SRV startup banner** (`main.cpp`): `kVersion` was still `"2026.05.28"`,
+unedited since May while every other part of the app moved on. Bumped to
+`"2026.07.23"`. Also removed `pipe: \\.\pipe\TotalControl | stop:
+TotalControlCLI quit` from the printed banner line — internal wiring detail,
+not useful to an end user starting the server.
+
+**2. About screen (`RenderAboutModal`, `App.cpp`) had leftover Polish text**
+in a GUI that ships publicly in English: section headers were bilingual
+duplicates ("Biblioteki / Libraries", "Podziekowania / Acknowledgments",
+etc.) and the entire Acknowledgments list was Polish prose. Translated to
+English-only, removed the PL/EN duplication. `START_HERE.md` (packaged into
+the release ZIP, not tracked in git) had the same issue from prior releases
+— also translated. `CLAUDE.md`/`ROADMAP.md` stay Polish deliberately
+(dev-only, never packaged) — the fix only touches user-facing files.
+
+**3. About menu's last row** (after the separator, previously the static
+`"TSE 2026-08-12 Burgos/Lerma"` line) now shows the build version
+(`"v2026-07-23"`) instead.
+
+**4. Author-credit correction, in two passes** — the first pass changed only
+the About modal's author line to "Maciej Szupiluk"; `CHANGELOG.md` and
+`ROADMAP.md` still said "Andrzej Nowak" in their own, independent
+occurrences (a section header and four `Zgłosił:` fields respectively) and
+GitHub kept showing the old name until this was caught directly from the
+published release. **Lesson: a name/attribution change must be
+`grep -r`'d across the whole repo before publishing, not fixed file-by-file
+as each is edited** — same failure shape as the 2026-07-19 Loc-column bug
+(a derived UI element was missed when `Primary` selection logic changed).
+Per explicit request, all formal occurrences (CHANGELOG contributor
+headers, ROADMAP `Zgłosił:`, About modal) also gained the "mgr" title
+("mgr Maciej Szupiluk"), and the `(mrmgrpl)` suffix was dropped from the
+About modal's credit line (the GitHub repo link below it is unaffected).
+
+**5. Release re-publish pitfall — staging folder used as a live app
+directory**: between fixes, `TotalControlGUI.exe` was run directly from
+`out/release_stage/TotalControl_2026-07-23/` to check the About screen.
+That generated real runtime state right there — `TotalControlConfig.db*`,
+`TotalControlGUI.log`, `TotalControlMoon.jpg`, and a **700MB `suvi_cache/`**
+(the GOES-19 SUVI animation frame cache) — inside the exact folder about to
+be zipped. The first `Compress-Archive` after that produced a 751MB ZIP
+instead of the expected ~22MB. Always verify the folder/zip size before
+uploading if anyone has run the app from the staging directory; delete
+`suvi_cache/`, `*.log`, `TotalControlMoon.jpg`, and any `*.db`/`-shm`/`-wal`
+other than the two intentional shipped databases before re-zipping.
+
+**Release-fix procedure used successfully** (three times, same day): to
+move an already-published tag to a new commit, `gh release delete <tag>
+--yes --cleanup-tag` removes the release and the tag together in one step
+— cleaner than the separate `git tag -d` + manual detachment issue hit on
+the 2026-07-20 release (see below) — then recreate the tag on the new
+commit, push, and `gh release create` from scratch. Don't try to move a
+tag under an existing release by deleting/recreating it manually.
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
