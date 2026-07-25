@@ -235,7 +235,9 @@ static constexpr const char* kCreateTlBlocks = R"SQL(
         audio_dur_ms  INTEGER NOT NULL DEFAULT 10000,
         label         TEXT    NOT NULL DEFAULT '',
         snap_to_prev  INTEGER NOT NULL DEFAULT 0,
-        snap_to_sec   INTEGER NOT NULL DEFAULT 0
+        snap_to_sec   INTEGER NOT NULL DEFAULT 0,
+        anchor        INTEGER NOT NULL DEFAULT 0,
+        anchor_off_ms INTEGER NOT NULL DEFAULT 0
     );
 )SQL";
 
@@ -253,6 +255,12 @@ void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
         nullptr, nullptr, nullptr);
     sqlite3_exec(m_db,
         "ALTER TABLE tl_blocks ADD COLUMN snap_to_sec INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_blocks ADD COLUMN anchor INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_blocks ADD COLUMN anchor_off_ms INTEGER NOT NULL DEFAULT 0;",
         nullptr, nullptr, nullptr);
 
     sqlite3_exec(m_db, "BEGIN;",                 nullptr, nullptr, nullptr);
@@ -282,8 +290,9 @@ void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
                 "INSERT INTO tl_blocks"
                 " (track_id, at_ms, block_type, ss, iso, fstop,"
                 "  cnt, ev, burst_drive, burst_dur_ms,"
-                "  audio_file, audio_dur_ms, label, snap_to_prev, snap_to_sec)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+                "  audio_file, audio_dur_ms, label, snap_to_prev, snap_to_sec,"
+                "  anchor, anchor_off_ms)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
                 -1, &bs, nullptr);
             sqlite3_bind_int64(bs,  1, trackId);
             sqlite3_bind_int64(bs,  2, b.atMs);
@@ -300,6 +309,8 @@ void Database::SaveTimeline(const std::vector<TLTrack>& tracks) {
             sqlite3_bind_text (bs, 13, b.label.c_str(),      -1, SQLITE_STATIC);
             sqlite3_bind_int  (bs, 14, b.snapToPrev ? 1 : 0);
             sqlite3_bind_int  (bs, 15, b.snapToSec  ? 1 : 0);
+            sqlite3_bind_int  (bs, 16, static_cast<int>(b.anchor));
+            sqlite3_bind_int64(bs, 17, b.anchorOffsetMs);
             sqlite3_step(bs);
             sqlite3_finalize(bs);
         }
@@ -327,6 +338,12 @@ std::vector<TLTrack> Database::LoadTimeline() const {
     // startup, before any Save. Error ignored if the column already exists.
     sqlite3_exec(m_db,
         "ALTER TABLE tl_blocks ADD COLUMN snap_to_sec INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_blocks ADD COLUMN anchor INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_blocks ADD COLUMN anchor_off_ms INTEGER NOT NULL DEFAULT 0;",
         nullptr, nullptr, nullptr);
 
     auto col = [](sqlite3_stmt* s, int i) -> std::string {
@@ -356,7 +373,8 @@ std::vector<TLTrack> Database::LoadTimeline() const {
         rc = sqlite3_prepare_v2(m_db,
             "SELECT id, at_ms, block_type, ss, iso, fstop,"
             "       cnt, ev, burst_drive, burst_dur_ms,"
-            "       audio_file, audio_dur_ms, label, snap_to_prev, snap_to_sec"
+            "       audio_file, audio_dur_ms, label, snap_to_prev, snap_to_sec,"
+            "       anchor, anchor_off_ms"
             " FROM tl_blocks WHERE track_id=? ORDER BY at_ms;",
             -1, &bs, nullptr);
         if (rc != SQLITE_OK) continue;
@@ -379,6 +397,8 @@ std::vector<TLTrack> Database::LoadTimeline() const {
             b.label      = col(bs, 12);
             b.snapToPrev = sqlite3_column_int(bs, 13) != 0;
             b.snapToSec  = sqlite3_column_int(bs, 14) != 0;
+            b.anchor         = static_cast<TLAnchor>(sqlite3_column_int(bs, 15));
+            b.anchorOffsetMs = sqlite3_column_int64(bs, 16);
             tr.blocks.push_back(std::move(b));
         }
         sqlite3_finalize(bs);
@@ -420,7 +440,9 @@ static constexpr const char* kCreateSnapshots = R"SQL(
         audio_dur_ms INTEGER NOT NULL DEFAULT 10000,
         label        TEXT    NOT NULL DEFAULT '',
         snap_to_prev INTEGER NOT NULL DEFAULT 0,
-        snap_to_sec  INTEGER NOT NULL DEFAULT 0
+        snap_to_sec  INTEGER NOT NULL DEFAULT 0,
+        anchor       INTEGER NOT NULL DEFAULT 0,
+        anchor_off_ms INTEGER NOT NULL DEFAULT 0
     );
 )SQL";
 
@@ -433,6 +455,12 @@ void Database::CreateSnapshotTables() {
         nullptr, nullptr, nullptr);
     sqlite3_exec(m_db,
         "ALTER TABLE tl_snap_blocks ADD COLUMN snap_to_sec INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_snap_blocks ADD COLUMN anchor INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(m_db,
+        "ALTER TABLE tl_snap_blocks ADD COLUMN anchor_off_ms INTEGER NOT NULL DEFAULT 0;",
         nullptr, nullptr, nullptr);
 }
 
@@ -506,8 +534,9 @@ void Database::SaveSnapshot(const std::string& name,
             sqlite3_prepare_v2(m_db,
                 "INSERT INTO tl_snap_blocks"
                 " (track_id,at_ms,block_type,ss,iso,fstop,cnt,ev,"
-                "  burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev,snap_to_sec)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+                "  burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev,snap_to_sec,"
+                "  anchor,anchor_off_ms)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
                 -1, &bs, nullptr);
             sqlite3_bind_int64(bs,  1, trackId);
             sqlite3_bind_int64(bs,  2, b.atMs);
@@ -524,6 +553,8 @@ void Database::SaveSnapshot(const std::string& name,
             sqlite3_bind_text (bs, 13, b.label.c_str(),      -1, SQLITE_STATIC);
             sqlite3_bind_int  (bs, 14, b.snapToPrev ? 1 : 0);
             sqlite3_bind_int  (bs, 15, b.snapToSec  ? 1 : 0);
+            sqlite3_bind_int  (bs, 16, static_cast<int>(b.anchor));
+            sqlite3_bind_int64(bs, 17, b.anchorOffsetMs);
             sqlite3_step(bs); sqlite3_finalize(bs);
         }
     }
@@ -585,7 +616,8 @@ std::vector<TLTrack> Database::LoadSnapshot(int64_t id) const {
         sqlite3_stmt* bs = nullptr;
         rc = sqlite3_prepare_v2(m_db,
             "SELECT at_ms,block_type,ss,iso,fstop,cnt,ev,"
-            "       burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev,snap_to_sec"
+            "       burst_drive,burst_dur_ms,audio_file,audio_dur_ms,label,snap_to_prev,snap_to_sec,"
+            "       anchor,anchor_off_ms"
             " FROM tl_snap_blocks WHERE track_id=? ORDER BY at_ms;",
             -1, &bs, nullptr);
         if (rc != SQLITE_OK) continue;
@@ -606,6 +638,8 @@ std::vector<TLTrack> Database::LoadSnapshot(int64_t id) const {
             b.label      = col(bs, 11);
             b.snapToPrev = sqlite3_column_int(bs, 12) != 0;
             b.snapToSec  = sqlite3_column_int(bs, 13) != 0;
+            b.anchor         = static_cast<TLAnchor>(sqlite3_column_int(bs, 14));
+            b.anchorOffsetMs = sqlite3_column_int64(bs, 15);
             tr.blocks.push_back(std::move(b));
         }
         sqlite3_finalize(bs);
@@ -825,6 +859,141 @@ std::vector<ArmCalibEntry> Database::LoadArmCalibData(const std::string& camMode
         e.latMinMs  = sqlite3_column_int  (st, 3);
         e.reps      = sqlite3_column_int  (st, 4);
         e.createdMs = sqlite3_column_int64(st, 5);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
+// ─── Card write-speed calibration ────────────────────────────────────────────
+// One row per model (PK) — see CardCalibEntry comment in Database.h for why
+// this doesn't average across reps the way bracket/arm calibration do.
+
+static constexpr const char* kCreateCardCalib = R"SQL(
+    CREATE TABLE IF NOT EXISTS card_write_calibration (
+        cam_model      TEXT    NOT NULL PRIMARY KEY,
+        shots_per_sec  REAL    NOT NULL,
+        measured_shots INTEGER NOT NULL,
+        measured_ms    INTEGER NOT NULL,
+        created_ms     INTEGER NOT NULL
+    );
+)SQL";
+
+void Database::CreateCardCalibTable() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateCardCalib);
+}
+
+bool Database::SaveCardCalib(const CardCalibEntry& entry) {
+    assert(m_db != nullptr);
+    assert(!entry.camModel.empty());
+    if (!m_db) return false;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+        "INSERT OR REPLACE INTO card_write_calibration"
+        " (cam_model,shots_per_sec,measured_shots,measured_ms,created_ms)"
+        " VALUES (?,?,?,?,?);",
+        -1, &st, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text  (st, 1, entry.camModel.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_double(st, 2, entry.shotsPerSec);
+    sqlite3_bind_int   (st, 3, entry.measuredShots);
+    sqlite3_bind_int64 (st, 4, entry.measuredMs);
+    sqlite3_bind_int64 (st, 5, entry.createdMs);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+std::vector<CardCalibEntry> Database::LoadCardCalibAll() const {
+    assert(m_db != nullptr);  // DB must be open to load calibration
+    std::vector<CardCalibEntry> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT cam_model,shots_per_sec,measured_shots,measured_ms,created_ms"
+        " FROM card_write_calibration;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        CardCalibEntry e;
+        const auto* p = sqlite3_column_text(st, 0);
+        e.camModel      = p ? reinterpret_cast<const char*>(p) : "";
+        e.shotsPerSec   = sqlite3_column_double(st, 1);
+        e.measuredShots = sqlite3_column_int   (st, 2);
+        e.measuredMs    = sqlite3_column_int64 (st, 3);
+        e.createdMs     = sqlite3_column_int64 (st, 4);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
+// ─── Buffer capacity calibration ─────────────────────────────────────────────
+// One row per model (PK) — complementary to card_write_calibration above.
+
+static constexpr const char* kCreateBufferCapacity = R"SQL(
+    CREATE TABLE IF NOT EXISTS buffer_capacity_calibration (
+        cam_model             TEXT    NOT NULL PRIMARY KEY,
+        total_shots           INTEGER NOT NULL,
+        buffer_capacity_shots INTEGER NOT NULL,
+        fast_fps              REAL    NOT NULL,
+        slow_fps              REAL    NOT NULL,
+        slowdown_observed     INTEGER NOT NULL,
+        created_ms            INTEGER NOT NULL
+    );
+)SQL";
+
+void Database::CreateBufferCapacityTable() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateBufferCapacity);
+}
+
+bool Database::SaveBufferCapacity(const BufferCapacityEntry& entry) {
+    assert(m_db != nullptr);
+    assert(!entry.camModel.empty());
+    if (!m_db) return false;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+        "INSERT OR REPLACE INTO buffer_capacity_calibration"
+        " (cam_model,total_shots,buffer_capacity_shots,fast_fps,slow_fps,"
+        "  slowdown_observed,created_ms)"
+        " VALUES (?,?,?,?,?,?,?);",
+        -1, &st, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text  (st, 1, entry.camModel.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int   (st, 2, entry.totalShots);
+    sqlite3_bind_int   (st, 3, entry.bufferCapacityShots);
+    sqlite3_bind_double(st, 4, entry.fastFps);
+    sqlite3_bind_double(st, 5, entry.slowFps);
+    sqlite3_bind_int   (st, 6, entry.slowdownObserved ? 1 : 0);
+    sqlite3_bind_int64 (st, 7, entry.createdMs);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+std::vector<BufferCapacityEntry> Database::LoadBufferCapacityAll() const {
+    assert(m_db != nullptr);  // DB must be open to load calibration
+    std::vector<BufferCapacityEntry> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT cam_model,total_shots,buffer_capacity_shots,fast_fps,slow_fps,"
+        "       slowdown_observed,created_ms"
+        " FROM buffer_capacity_calibration;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        BufferCapacityEntry e;
+        const auto* p = sqlite3_column_text(st, 0);
+        e.camModel             = p ? reinterpret_cast<const char*>(p) : "";
+        e.totalShots           = sqlite3_column_int   (st, 1);
+        e.bufferCapacityShots  = sqlite3_column_int   (st, 2);
+        e.fastFps              = sqlite3_column_double(st, 3);
+        e.slowFps              = sqlite3_column_double(st, 4);
+        e.slowdownObserved     = sqlite3_column_int   (st, 5) != 0;
+        e.createdMs            = sqlite3_column_int64 (st, 6);
         result.push_back(std::move(e));
     }
     sqlite3_finalize(st);

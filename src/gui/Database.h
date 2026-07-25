@@ -61,6 +61,36 @@ struct ArmCalibEntry {
     int64_t     createdMs = 0;
 };
 
+// Card write-speed calibration — one row per camera model (PRIMARY KEY),
+// unlike bracket/ARM calibration which are also keyed by count. This is a
+// property of the camera+card combo's sustained write throughput, not of any
+// particular block's shape, and the SDK has no way to identify which
+// physical card is inserted -- an operator who swaps cards must re-run the
+// "Card Write-Speed Calibration" preset. Each run overwrites the previous
+// value for that model (no averaging across reps, unlike bracket/ARM calib —
+// this is a one-off operator-run test, not a multi-variant sweep).
+struct CardCalibEntry {
+    std::string camModel;
+    double      shotsPerSec    = 0.0;
+    int         measuredShots  = 0;
+    int64_t     measuredMs     = 0;
+    int64_t     createdMs      = 0;
+};
+
+// Buffer capacity — complementary to CardCalibEntry: how many shots fit
+// before the camera falls back to card-write-limited speed, not the
+// steady-state write throughput itself. Same one-row-per-model, no-averaging
+// rationale (operator-run one-off test, re-run after a card swap).
+struct BufferCapacityEntry {
+    std::string camModel;
+    int         totalShots          = 0;   // shots fired during the test
+    int         bufferCapacityShots = 0;   // shots before the slowdown (== totalShots if none seen)
+    double      fastFps             = 0.0;
+    double      slowFps             = 0.0; // == fastFps if no slowdown observed
+    bool        slowdownObserved    = false;
+    int64_t     createdMs           = 0;
+};
+
 // ─── Named snapshot ───────────────────────────────────────────────────────────
 
 struct SnapshotInfo {
@@ -113,6 +143,17 @@ public:
     void                       SaveArmCalibData(const std::vector<ArmCalibEntry>& entries);
     std::vector<ArmCalibEntry> LoadArmCalibData(const std::string& camModel) const;
     std::vector<std::string>   LoadArmCalibModels() const;
+
+    // Card write-speed calibration (TotalControlConfig.db) — one row per
+    // model, feeds App::WrEstMs() the way LoadArmCalibData feeds ArmEstMs().
+    void            CreateCardCalibTable();
+    bool            SaveCardCalib(const CardCalibEntry& entry);  // false = sqlite3_step didn't return SQLITE_DONE
+    std::vector<CardCalibEntry> LoadCardCalibAll() const;
+
+    // Buffer capacity calibration (TotalControlConfig.db) — one row per model.
+    void            CreateBufferCapacityTable();
+    bool            SaveBufferCapacity(const BufferCapacityEntry& entry);  // false = sqlite3_step didn't return SQLITE_DONE
+    std::vector<BufferCapacityEntry> LoadBufferCapacityAll() const;
 
     // named timeline snapshots (TotalControlConfig.db)
     void                      CreateSnapshotTables();

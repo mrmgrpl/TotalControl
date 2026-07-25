@@ -766,6 +766,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         int timeout = JHas(req, L"timeout_ms") ? JInt(req, L"timeout_ms")
                                                 : (count > 1 ? count * 1500 + 5000 : 5000);
         int latency = 0;
+        int actualCount = 0;
         bool ok;
 
         std::wstring driveStr = JHas(req, L"drive") ? JStr(req, L"drive") : L"";
@@ -796,7 +797,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
                 resp = Err(L"arm_failed", L"shutter speed / drive mode not confirmed by camera");
                 return true;
             }
-            ok = cam->Shoot(&latency, timeout, count, /*holdForBurst=*/true);
+            ok = cam->Shoot(&latency, timeout, count, /*holdForBurst=*/true, &actualCount);
         } else {
             // Single shot: if "drive":"single" specified, switch drive mode back from bracket
             if (driveStr == L"single" &&
@@ -809,10 +810,23 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             ok = cam->Shoot(&latency, timeout);
         }
 
-        if (ok) {
+        // count==9999 is the duration-hold sentinel (continuous drive fired
+        // with no explicit count -- see the "count <= 1" reassignment above):
+        // Shoot() holds the shutter for the FULL timeout_ms and, by design,
+        // never reaches 9999 captures, so it always reports ok=false/TIMEOUT
+        // even on a fully successful hold. actualCount (real
+        // CrNotify_Captured_Event arrivals) is the authoritative signal for
+        // this case instead — same reasoning as buffer_capacity_calib, which
+        // already checks actualCount rather than Shoot()'s return value.
+        // Confirmed on real hardware 2026-07-25: a 25s cont-lo hold correctly
+        // fired 122 captures but was reported to the sequencer as a failed
+        // block until this fix.
+        bool sentinelHold = (count == 9999);
+        if (ok || (sentinelHold && actualCount >= 1)) {
             std::wostringstream ss;
             ss << L"\"latency_ms\":" << latency;
-            if (count > 1) ss << L",\"captures\":" << count;
+            if (sentinelHold)   ss << L",\"captures\":" << actualCount;
+            else if (count > 1) ss << L",\"captures\":" << count;
             resp = Ok(ss.str());
         } else {
             resp = Err(L"timeout", L"captured event timeout");
@@ -1209,6 +1223,72 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         }
         std::wostringstream ss;
         ss << L"\"latency_ms\":" << latMs;
+        resp = Ok(ss.str());
+        return true;
+    }
+
+    // ── buffer_capacity_calib ────────────────────────────────────────────────
+    // Measures buffer CAPACITY (how many shots fit before the camera falls
+    // back to card-write-limited speed) — and, via slow_fps in the response,
+    // this is ALSO the card write-speed measurement now. A separate
+    // "card_calib" command existed earlier but was retired: a short
+    // duration-held burst can only ever measure buffer-fill-limited speed,
+    // never true card-write-limited speed, since it never holds long enough
+    // to exhaust the buffer (measured ~74 shots on the test camera+card) —
+    // slow_fps here, the sustained rate AFTER the buffer fills, is the
+    // physically correct number. card_calib's OTHER dependency,
+    // WaitForBufferIdle, was also confirmed broken on real hardware
+    // (GetPropRaw hard-fails on MediaSLOT1_WritingState every single poll,
+    // not a timing issue) — this command doesn't need it at all: the whole
+    // measurement comes from CrNotify_Captured_Event arrival timing, which
+    // this session has confirmed is delivered reliably.
+    // {"cmd":"buffer_capacity_calib","duration_ms":10000,"drive":"cont-hi-plus","ss":"1/1000","iso":100,"f":8.0}
+    if (cmd == L"buffer_capacity_calib") {
+        if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
+
+        int durationMs = JHas(req, L"duration_ms") ? JInt(req, L"duration_ms", 10000) : 10000;
+        if (durationMs < 2000) durationMs = 2000;
+        std::wstring driveStr = JHas(req, L"drive") ? JStr(req, L"drive") : L"cont-hi-plus";
+
+        bool armed = true;
+        if (!cam->SetPCRemotePriority()) armed = false;
+        if (JHas(req, L"iso") && !cam->SetISO(JInt(req, L"iso")))   armed = false;
+        if (JHas(req, L"f")   && !cam->SetFNumber(JFlt(req, L"f"))) armed = false;
+        if (JHas(req, L"ss")  && !cam->SetShutterSpeed(JStr(req, L"ss").c_str())) armed = false;
+        if (!cam->SetStoreDestination(L"card")) armed = false;
+        if (!armed) {
+            resp = Err(L"arm_failed", L"exposure settings not confirmed by camera");
+            return true;
+        }
+
+        long long driveRaw = 0;
+        if (!EncodePropValue(0x010e, driveStr, driveRaw) || driveRaw == 0) {
+            resp = Err(L"invalid_value", L"unknown drive mode");
+            return true;
+        }
+        if (!cam->SetPropAndVerify(0x010e, 0x0003, driveRaw,
+                                    L"DriveMode(buffer_capacity_calib)", kDriveModeVerifyMs)) {
+            resp = Err(L"arm_failed", L"drive mode not confirmed by camera");
+            return true;
+        }
+
+        int latency = 0, actualCount = 0;
+        int shootTimeoutMs = durationMs + 2000;
+        (void)cam->Shoot(&latency, shootTimeoutMs, /*expectedCaptures=*/9999,
+                          /*holdForBurst=*/true, &actualCount);
+        if (actualCount < 1) {
+            resp = Err(L"timeout", L"no captures during held burst");
+            return true;
+        }
+
+        auto bc = cam->AnalyzeBufferCapacity(actualCount);
+        std::wostringstream ss;
+        ss << L"\"latency_ms\":" << latency
+           << L",\"total_shots\":" << bc.totalShots
+           << L",\"buffer_capacity_shots\":" << bc.bufferCapacityShots
+           << L",\"fast_fps\":" << bc.fastFps
+           << L",\"slow_fps\":" << bc.slowFps
+           << L",\"slowdown_observed\":" << (bc.slowdownObserved ? L"true" : L"false");
         resp = Ok(ss.str());
         return true;
     }

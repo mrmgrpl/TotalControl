@@ -47,8 +47,14 @@ public:
 
     // Send one JSON request line, receive one JSON response line.
     // On error the pipe is closed and state set to Disconnected.
+    // readTimeoutMs overrides kIoTimeoutMs for the RESPONSE wait only (the
+    // request write always uses kIoTimeoutMs — writing a small JSON command
+    // should always be fast) — for commands that are legitimately slow by
+    // design, e.g. "buffer_capacity_calib" holding the shutter for its own
+    // multi-second duration (can take tens of seconds), not because
+    // anything is stuck.
     std::expected<std::string, PipeError>
-    SendRequest(std::string_view request);
+    SendRequest(std::string_view request, DWORD readTimeoutMs = kIoTimeoutMs);
 
     // Fire-and-forget: sends request, discards response.
     std::expected<void, PipeError>

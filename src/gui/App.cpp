@@ -1491,6 +1491,37 @@ static bool BlockParamsDiffer(const TLBlock& a, const TLBlock& b) {
     return false;
 }
 
+// Rough fps for a continuous-drive mode string — used only for the
+// CardCalib block's TIMELINE DISPLAY WIDTH (an estimate before the test has
+// even run), not for anything the actual shoot depends on.
+static float DriveFpsEstimate(const std::string& drive) {
+    if (drive == "cont-hi-plus") return 10.0f;
+    if (drive == "cont-hi")      return 8.0f;
+    if (drive == "cont-mid")     return 5.0f;
+    if (drive == "cont-lo")      return 3.0f;
+    return 5.0f;  // unrecognized drive string — reasonable default
+}
+
+// How many frames a block actually fires — feeds ComputeWrMsPerBlock's
+// running buffer-occupancy estimate. Burst has no exact count field (it's
+// duration-based), so this is an fps x duration estimate, same as the
+// Inspector's own "~N frames @ Xfps" readout.
+static int BlockShotCount(const TLBlock& b) {
+    switch (b.type) {
+    case BlockType::Single:  return 1;
+    case BlockType::Bracket: return std::max(1, b.count);
+    // Both duration-held sentinel bursts: real count isn't known until the
+    // camera reports it back -- fps x duration is an ESTIMATE only, same
+    // as the Inspector's own "~N frames @ Xfps".
+    case BlockType::Burst:
+    case BlockType::BufferCapacity: {
+        float fps = DriveFpsEstimate(b.burstDrive);
+        return std::max(1, static_cast<int>(fps * (b.burstDurMs / 1000.0f) + 0.5f));
+    }
+    default: return 0;  // Audio
+    }
+}
+
 // Conservative estimate of ARM overhead after block b fires — the LONGER of:
 //  (a) pure settings-change latency (SDK/USB round-trip when the camera isn't
 //      busy), and
@@ -1527,6 +1558,66 @@ int64_t App::ArmEstMs(const TLBlock& b, std::string_view camModel) const {
     return std::max(kSettingsChangeMs, bufferClearMs);
 }
 
+// Card-write-buffer drain time for a virtual occupancy of occupancyShots
+// "shots pending write", at this camera's calibrated sustained write rate.
+// Returns 0 when camModel has no card_write_calibration yet (graceful
+// degradation, same as ArmEstMs falling back to a flat estimate when
+// uncalibrated -- except here there's no physically-derived fallback
+// formula, since write throughput is purely a camera+card property with no
+// analytic model) or when there's nothing pending.
+int64_t App::WrEstMs(std::string_view camModel, double occupancyShots) const {
+    assert(occupancyShots >= 0.0);
+    if (camModel.empty() || occupancyShots <= 0.0) return 0;
+
+    auto it = m_cardCalibCache.find(std::string(camModel));
+    if (it == m_cardCalibCache.end() || it->second <= 0.0) return 0;
+
+    double drainMs = occupancyShots / it->second * 1000.0;
+    return static_cast<int64_t>(std::llround(drainMs));
+}
+
+std::vector<int64_t> App::ComputeWrMsPerBlock(const TLTrack& tr,
+                                               std::string_view camModel) const {
+    assert(tr.blocks.size() <= 4096);  // bounded: sensible sequence length
+    std::vector<int64_t> wrMsAt(tr.blocks.size(), 0);
+    if (!tr.IsCamera()) return wrMsAt;
+
+    double writeFps = 0.0;
+    if (!camModel.empty()) {
+        auto it = m_cardCalibCache.find(std::string(camModel));
+        if (it != m_cardCalibCache.end()) writeFps = it->second;
+    }
+    double capacityShots = 0.0;
+    if (!camModel.empty()) {
+        auto it = m_bufferCapacityCache.find(std::string(camModel));
+        if (it != m_bufferCapacityCache.end()) capacityShots = static_cast<double>(it->second);
+    }
+
+    double occupancy = 0.0;  // virtual "shots pending write", carried across every block
+    for (int bi = 0; bi < static_cast<int>(tr.blocks.size()); ++bi) {
+        const TLBlock& blk = tr.blocks[bi];
+        if (blk.atMs < 0) continue;
+
+        int64_t durMs = BlockDurMs(blk, camModel);
+        occupancy += BlockShotCount(blk);
+        if (writeFps > 0.0)
+            occupancy = std::max(0.0, occupancy - (durMs / 1000.0) * writeFps);
+        if (capacityShots > 0.0)
+            occupancy = std::min(occupancy, capacityShots);
+
+        bool needsArm = bi + 1 < static_cast<int>(tr.blocks.size())
+                      && tr.blocks[bi + 1].atMs >= 0
+                      && BlockParamsDiffer(blk, tr.blocks[bi + 1]);
+        if (!needsArm) continue;
+
+        wrMsAt[bi] = WrEstMs(camModel, occupancy);
+        // WR is defined as "wait long enough for occupancy to drain to 0" --
+        // once it elapses (by this model) the buffer is empty.
+        occupancy = 0.0;
+    }
+    return wrMsAt;
+}
+
 std::string App::CamModelForPos(int camPos) const {
     if (camPos < 0) return {};
     std::lock_guard lk(m_camerasMutex);
@@ -1541,6 +1632,14 @@ std::string App::CamModelForTrackIndex(int ti) const {
     for (int i = 0; i < ti; ++i)
         if (m_tracks[i].IsCamera()) ++camPos;
     return CamModelForPos(camPos);
+}
+
+bool App::IsCameraOnline(const std::string& guid) const {
+    if (guid.empty()) return false;
+    std::lock_guard lk(m_camerasMutex);
+    for (const auto& cs : m_cameras)
+        if (cs.guid == guid) return cs.valid;
+    return false;
 }
 
 ContactTimes App::PrimaryContacts() {
@@ -1625,6 +1724,24 @@ static double SnapToRealShutterSpeedSec(double nominalSec) {
     return bestVal;
 }
 
+// Formats a snapped shutter-speed value (seconds) as the camera-menu-style
+// label an operator would recognize — "1/100" below ~1/3s, "X.Ys"/"Xs"
+// above — mirroring the labels in the Inspector's SS dropdown (kSS[]).
+// Used by the bracket hover tooltip to list each shot's real, camera-snapped
+// SS (SnapToRealShutterSpeedSec already clamps to a value the camera can
+// actually produce) for cross-checking against captured EXIF.
+static std::string FormatSsLabel(double sec) {
+    assert(sec > 0.0);
+    if (sec < 0.35) {
+        int64_t denom = std::llround(1.0 / sec);
+        return std::format("1/{}", denom);
+    }
+    double rounded = std::round(sec);
+    if (std::abs(sec - rounded) < 1e-6)
+        return std::format("{}s", static_cast<int64_t>(rounded));
+    return std::format("{:.1f}s", sec);
+}
+
 // Sum of per-shot exposure times (ms) for a symmetric N-stop bracket, each
 // stop clamped to a shutter speed the camera can really produce. An N-shot
 // bracket at `evStep` EV spans stops -(N-1)/2 .. +(N-1)/2 around the base ss,
@@ -1648,10 +1765,136 @@ static int64_t BracketExposureSumMs(int count, double evStep, int64_t baseSsMs) 
     return static_cast<int64_t>(std::llround(sumSec * 1000.0));
 }
 
+// Predicted per-shot timestamp offsets (ms, relative to a block's own start)
+// for the live buffer-occupancy leaky-bucket model (App::LiveOccupancy /
+// CurrentBufferOccupancy). Bracket reuses BracketExposureSumMs's exact
+// per-stop physics instead of a flat per-block average, so a slow, wildly
+// uneven bracket (e.g. 3.2s/1.6s/0.8s/0.4s/0.2s/...) produces an accurate
+// shot-arrival schedule — this is what fixes the occupancy display's drift
+// over time (see Change log 2026-07-26). Burst/BufferCapacity have no known
+// analytic per-shot schedule (continuous drive, camera-internal pacing), so
+// they fall back to flat spacing at DriveFpsEstimate — same estimate
+// BlockShotCount already used; a real capture count still corrects the
+// TOTAL once the block's response lands (AdvanceOccupancyThroughBlock's
+// realShotCount override), just not the intra-block shape.
+static std::vector<int64_t> PredictedShotOffsetsMs(const TLBlock& b) {
+    std::vector<int64_t> out;
+    switch (b.type) {
+    case BlockType::Single:
+        out.push_back(0);
+        break;
+    case BlockType::Bracket: {
+        assert(b.count >= 1 && b.count % 2 == 1);
+        double evStep = 1.0;
+        try { evStep = std::stod(b.ev); } catch (...) {}
+        const int64_t ssMs  = ParseSsMs(b.ss);
+        const int     half  = (b.count - 1) / 2;
+        const double  baseSec = double(ssMs) / 1000.0;
+        double cumSec = 0.0;
+        out.reserve(static_cast<size_t>(b.count));
+        for (int k = -half; k <= half; ++k) {
+            const double nominalSec = baseSec * std::pow(2.0, k * evStep);
+            cumSec += SnapToRealShutterSpeedSec(nominalSec);
+            out.push_back(static_cast<int64_t>(std::llround(cumSec * 1000.0)));
+        }
+        break;
+    }
+    case BlockType::Burst:
+    case BlockType::BufferCapacity: {
+        float fps = DriveFpsEstimate(b.burstDrive);
+        int totalShots = std::max(1, static_cast<int>(fps * (b.burstDurMs / 1000.0f) + 0.5f));
+        out.reserve(static_cast<size_t>(totalShots));
+        for (int i = 1; i <= totalShots; ++i)
+            out.push_back(static_cast<int64_t>(std::llround(i * 1000.0 / fps)));
+        break;
+    }
+    default: break;  // Audio
+    }
+    assert(out.size() <= 2000);  // bounded: realistic bracket/burst shot counts
+    return out;
+}
+
+// Advances a buffer-occupancy checkpoint (shots, atMs) through block `blk`'s
+// predicted per-shot schedule (PredictedShotOffsetsMs, anchored at
+// blockStartMs), applying the leaky-bucket recurrence at each shot
+// (+1, draining continuously at writeFps since the previous checkpoint) up
+// to uptoMs, then decays the remainder to uptoMs. If realShotCount >= 0, the
+// predicted list is truncated or extended (repeating its last interval) to
+// exactly that count first — this is how a block's real capture count
+// (known exactly for Single/Bracket, from the response's "captures" field
+// for Burst/BufferCapacity) replaces the prediction without discarding its
+// relative timing shape. Bounded by PredictedShotOffsetsMs's own bound, no
+// recursion.
+static void AdvanceOccupancyThroughBlock(const TLBlock& blk, int64_t blockStartMs,
+                                          int realShotCount, double writeFps,
+                                          double capacityShots, int64_t uptoMs,
+                                          double& shots, int64_t& atMs) {
+    auto offsets = PredictedShotOffsetsMs(blk);
+    if (realShotCount >= 0) {
+        if (offsets.empty()) {
+            if (realShotCount > 0) offsets.push_back(0);
+        } else if (realShotCount < static_cast<int>(offsets.size())) {
+            offsets.resize(static_cast<size_t>(realShotCount));
+        } else {
+            int64_t lastOff = offsets.back();
+            int64_t step = offsets.size() >= 2
+                          ? (offsets.back() - offsets[offsets.size() - 2]) : lastOff;
+            if (step <= 0) step = 1;
+            assert(realShotCount <= 2000);
+            while (static_cast<int>(offsets.size()) < realShotCount) {
+                lastOff += step;
+                offsets.push_back(lastOff);
+            }
+        }
+    }
+
+    for (int64_t off : offsets) {
+        int64_t shotMs = blockStartMs + off;
+        if (shotMs > uptoMs) break;
+        if (shotMs < atMs) shotMs = atMs;  // out-of-order safety, not expected
+        double drained = writeFps > 0.0 ? (shotMs - atMs) / 1000.0 * writeFps : 0.0;
+        shots = std::max(0.0, shots - drained) + 1.0;
+        if (capacityShots > 0.0) shots = std::min(shots, capacityShots);
+        atMs = shotMs;
+    }
+    double drained = writeFps > 0.0 && uptoMs > atMs
+                    ? (uptoMs - atMs) / 1000.0 * writeFps : 0.0;
+    shots = std::max(0.0, shots - drained);
+    atMs  = uptoMs;
+}
+
+double App::CurrentBufferOccupancy(int camIdx, std::string_view camModel) const {
+    if (camIdx < 0 || camIdx >= kMaxCamTracks || camModel.empty()) return -1.0;
+    auto cwIt = m_cardCalibCache.find(std::string(camModel));
+    if (cwIt == m_cardCalibCache.end() || cwIt->second <= 0.0) return -1.0;
+    double writeFps = cwIt->second;
+    double capacityShots = 0.0;
+    {
+        auto bcIt = m_bufferCapacityCache.find(std::string(camModel));
+        if (bcIt != m_bufferCapacityCache.end()) capacityShots = static_cast<double>(bcIt->second);
+    }
+
+    std::lock_guard lk(m_liveOccupancyMtx);
+    const auto& s = m_liveOccupancy[camIdx];
+    int64_t nowMs = UtcNowMs();
+    double  shots = s.shots;
+    int64_t atMs  = s.shotsAtMs;
+    if (s.inFlight) {
+        AdvanceOccupancyThroughBlock(s.inFlightBlock, s.inFlightStartMs, /*realShotCount=*/-1,
+                                      writeFps, capacityShots, nowMs, shots, atMs);
+    } else {
+        double drained = writeFps > 0.0 && nowMs > atMs
+                        ? (nowMs - atMs) / 1000.0 * writeFps : 0.0;
+        shots = std::max(0.0, shots - drained);
+    }
+    return shots;
+}
+
 int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
     assert(b.type == BlockType::Audio || !b.ss.empty());  // camera blocks must have a shutter speed
     assert(b.type != BlockType::Bracket || b.count >= 1); // bracket must have at least 1 shot
-    assert(b.type != BlockType::Burst   || b.burstDurMs > 0);
+    assert(b.type != BlockType::Burst          || b.burstDurMs > 0);
+    assert(b.type != BlockType::BufferCapacity || b.burstDurMs > 0);
     assert(b.type != BlockType::Audio   || b.audioDurMs > 0);
     int64_t ssMs = ParseSsMs(b.ss);
     switch (b.type) {
@@ -1683,6 +1926,7 @@ int64_t App::BlockDurMs(const TLBlock& b, std::string_view camModel) const {
         return int64_t(b.count) * kCamOverheadMs + expSumMs;
     }
     case BlockType::Burst:
+    case BlockType::BufferCapacity:
         return b.burstDurMs;
     case BlockType::Audio:
         return b.audioDurMs;
@@ -1696,18 +1940,23 @@ static ImU32 BlockColor(BlockType t) {
     case BlockType::Single:  return IM_COL32( 40, 160,  70, 220);
     case BlockType::Burst:   return IM_COL32( 50, 120, 200, 220);
     case BlockType::Bracket: return IM_COL32(200, 130,  30, 220);
-    case BlockType::Audio:   return IM_COL32(140,  80, 200, 220);
-    default:                 return IM_COL32(100, 100, 100, 220);
+    case BlockType::Audio:     return IM_COL32(140,  80, 200, 220);
+    // Same blue as Burst -- it fires the exact same way (continuous drive,
+    // held shutter), so there's no reason for the operator to see it as a
+    // visually distinct block type.
+    case BlockType::BufferCapacity: return IM_COL32( 50, 120, 200, 220);
+    default:                        return IM_COL32(100, 100, 100, 220);
     }
 }
 
 static const char* BlockTypeName(BlockType t) {
     switch (t) {
-    case BlockType::Single:  return "Single";
-    case BlockType::Burst:   return "Burst";
-    case BlockType::Bracket: return "Bracket";
-    case BlockType::Audio:   return "Audio";
-    default:                 return "?";
+    case BlockType::Single:    return "Single";
+    case BlockType::Burst:     return "Burst";
+    case BlockType::Bracket:   return "Bracket";
+    case BlockType::Audio:     return "Audio";
+    case BlockType::BufferCapacity: return "BufferCapacity";
+    default:                        return "?";
     }
 }
 
@@ -1773,7 +2022,27 @@ void App::StatusThreadProc() {
                     std::string req =
                         std::format(R"({{"cmd":"status","cam":"{}"}})", guid);
                     auto res = m_pipe.SendRequest(req);
-                    if (!res) continue;
+                    if (!res) {
+                        // A long-running command on this camera (e.g. Buffer
+                        // Capacity Calibration, 10-12s) holds SRV's
+                        // per-camera lock for longer than this status
+                        // thread's own pipe timeout (kIoTimeoutMs=10s) --
+                        // this is the status POLL timing out waiting for the
+                        // lock, not the camera actually disconnecting.
+                        // Carry the last known-good entry forward instead of
+                        // dropping it: previously, a dropped camera vanished
+                        // from m_cameras entirely for the whole duration of
+                        // the long command, which broke anything reading
+                        // m_cameras[camIdx].model during that window (e.g.
+                        // SeqCamThreadProc tagging a calibration sample with
+                        // its camera's model -- confirmed via diagnostic log
+                        // showing camModel="" on an otherwise-ok response).
+                        std::lock_guard lk(m_camerasMutex);
+                        for (const auto& prev : m_cameras) {
+                            if (prev.guid == guid) { next.push_back(prev); break; }
+                        }
+                        continue;
+                    }
                     CamStatus s;
                     s.valid          = JStr(*res, "connected") == "true";
                     s.guid           = guid;
@@ -1825,6 +2094,31 @@ void App::StatusThreadProc() {
 
 // ─── GUI sequencer ────────────────────────────────────────────────────────────
 //
+// SRV-side worst-case processing time for block b's pipe command (the same
+// value BuildBlockCmd sends as the SRV's own "timeout_ms"/"duration_ms").
+// Single source of truth shared with SeqCamThreadProc's PIPE read timeout —
+// the two must never drift apart: a long-held Burst (drive="cont-lo",
+// burstDurMs=25000) sent with only PipeClient's default 10s read timeout
+// made the GUI declare "timed out — no response from SRV" and tear down the
+// pipe while the camera was still correctly holding the shutter in the
+// background, cascading into "not connected" for every following block on
+// that track (found in a full-sequence test 2026-07-25 — only
+// BlockType::BufferCapacity had a special-cased longer read timeout at the
+// time, plain Burst did not).
+static int64_t BlockSrvTimeoutMs(const TLBlock& b) {
+    switch (b.type) {
+    case BlockType::Single:
+        return ParseSsMs(b.ss) + 5000;
+    case BlockType::Bracket:
+        return int64_t(b.count) * (ParseSsMs(b.ss) + kCamOverheadMs) + 5000;
+    case BlockType::Burst:
+    case BlockType::BufferCapacity:
+        return int64_t(b.burstDurMs) + 2000;
+    default:
+        return 0;  // Audio — no pipe command
+    }
+}
+
 // BuildBlockCmd: builds a pipe JSON command string for one timeline block.
 // camIdx is the 0-based camera-track index (used as "cam":<index> in the pipe protocol).
 
@@ -1835,16 +2129,9 @@ void App::StatusThreadProc() {
     if (blk.type == BlockType::Audio) return {};  // audio blocks have no pipe command
 
     std::string cam = std::to_string(camIdx);
+    int64_t timeoutMs = BlockSrvTimeoutMs(blk);
 
     if (blk.type == BlockType::Single) {
-        // Timeout must scale with shutter speed — the daemon's flat 5000ms
-        // default (CommandHandler.cpp, count==1 case) times out mid-exposure
-        // for long single shots (e.g. Earthshine 10-40s), which then leaves
-        // the camera physically still exposing when the next block's ARM
-        // fires, cascading into CrError_Api_Insufficient on every following
-        // property set until the real exposure finally ends.
-        int64_t ssMs = ParseSsMs(blk.ss);
-        int64_t timeoutMs = ssMs + 5000;
         return std::format(
             "{{\"cmd\":\"shoot\",\"drive\":\"single\","
             "\"ss\":\"{}\",\"iso\":{},\"f\":{},"
@@ -1852,12 +2139,6 @@ void App::StatusThreadProc() {
             blk.ss, blk.iso, blk.fstop, timeoutMs, cam);
     }
     if (blk.type == BlockType::Bracket) {
-        // Same scaling issue as Single: the daemon's flat 15000ms default
-        // (CommandHandler.cpp bracket branch) doesn't account for count x SS
-        // — a slow-corona bracket (e.g. 5 shots at several seconds each) can
-        // exceed it well before the real capture sequence finishes.
-        int64_t ssMs = ParseSsMs(blk.ss);
-        int64_t timeoutMs = int64_t(blk.count) * (ssMs + kCamOverheadMs) + 5000;
         return std::format(
             "{{\"cmd\":\"bracket\",\"mode\":\"cont\","
             "\"ss\":\"{}\",\"iso\":{},\"f\":{},"
@@ -1866,12 +2147,17 @@ void App::StatusThreadProc() {
             blk.ss, blk.iso, blk.fstop, blk.ev, blk.count, timeoutMs, cam);
     }
     if (blk.type == BlockType::Burst) {
-        int timeoutMs = blk.burstDurMs + 2000;
         return std::format(
             "{{\"cmd\":\"shoot\",\"drive\":\"{}\","
             "\"ss\":\"{}\",\"iso\":{},\"f\":{},"
             "\"timeout_ms\":{},\"cam\":\"{}\"}}",
             blk.burstDrive, blk.ss, blk.iso, blk.fstop, timeoutMs, cam);
+    }
+    if (blk.type == BlockType::BufferCapacity) {
+        return std::format(
+            "{{\"cmd\":\"buffer_capacity_calib\",\"duration_ms\":{},\"drive\":\"{}\","
+            "\"ss\":\"{}\",\"iso\":{},\"f\":{},\"cam\":\"{}\"}}",
+            blk.burstDurMs, blk.burstDrive, blk.ss, blk.iso, blk.fstop, cam);
     }
     return {};
 }
@@ -2020,7 +2306,37 @@ void App::SeqCamThreadProc(int        camIdx,
 
             if (!cmd.empty()) {
                 EnsureSeqPipeConnected(pipe, m_seqRun);
-                if (auto res = pipe.SendRequest(cmd)) {
+                // Live buffer occupancy (TEMPORARY diagnostic): mark this
+                // block in-flight BEFORE sending, so CurrentBufferOccupancy
+                // can walk its predicted per-shot schedule
+                // (PredictedShotOffsetsMs) while the pipe call is blocked
+                // waiting for the response — otherwise a 25s+ held Burst
+                // would leave the display frozen for the whole hold instead
+                // of visibly climbing. Cleared below once the response
+                // (real or error) lands, at which point the exact commit
+                // (with the real shot count when known) takes over.
+                {
+                    std::lock_guard lk(m_liveOccupancyMtx);
+                    auto& occ = m_liveOccupancy[camIdx];
+                    occ.inFlight        = true;
+                    occ.inFlightBlock   = blk;
+                    occ.inFlightStartMs = UtcNowMs();
+                }
+                // Read timeout must cover the SRV's own worst-case processing
+                // time (BlockSrvTimeoutMs — same value BuildBlockCmd sent as
+                // "timeout_ms"/"duration_ms") plus margin for ARM/property-
+                // verify overhead that runs INSIDE the same SRV call before
+                // the shoot itself starts. 15000ms margin is the value
+                // already proven sufficient in production for
+                // BufferCapacity; generalized here to every block type so a
+                // long Single (Earthshine), a slow multi-shot Bracket, or a
+                // long-held Burst can no longer make the GUI declare a
+                // healthy, still-working SRV "timed out" and tear down the
+                // pipe (see BlockSrvTimeoutMs comment for the incident this
+                // fixes).
+                DWORD readTimeoutMs = static_cast<DWORD>(std::max<int64_t>(
+                    PipeClient::kIoTimeoutMs, BlockSrvTimeoutMs(blk) + 15000));
+                if (auto res = pipe.SendRequest(cmd, readTimeoutMs)) {
                     int64_t latMs = UtcNowMs() - firedRealMs;
                     bool ok  = JStr(*res, "ok") == "true";
                     int  lat = JInt(*res, "latency_ms", -1);
@@ -2041,6 +2357,51 @@ void App::SeqCamThreadProc(int        camIdx,
                         " type={} count={} ev={} ss={} lbl={}",
                         seqNum, camIdx, ok ? 1 : 0, logLat, driftMs,
                         BlockTypeName(blk.type), blk.count, blk.ev, blk.ss, lbl));
+                    // Live buffer occupancy (TEMPORARY diagnostic, see
+                    // App.h's LiveOccupancy comment): commit this block's
+                    // real production through the same leaky-bucket walk
+                    // used for in-flight interpolation
+                    // (AdvanceOccupancyThroughBlock), using the real shot
+                    // count when known -- Single/Bracket always know theirs
+                    // exactly; Burst/BufferCapacity from the response's
+                    // "captures" field (accurate post-2026-07-26 sentinel
+                    // fix). A failed block (arm_failed etc.) is committed as
+                    // 0 real shots -- the sentinel-hold timeout case that
+                    // used to reach here as ok=false with real captures was
+                    // fixed at the CommandHandler level, so remaining
+                    // failures genuinely produced nothing.
+                    {
+                        std::string occCamModel = thisCamModel;
+                        if (occCamModel.empty()) {
+                            std::lock_guard lk(m_camerasMutex);
+                            if (camIdx < static_cast<int>(m_cameras.size()))
+                                occCamModel = m_cameras[camIdx].model;
+                        }
+                        if (!occCamModel.empty()) {
+                            double writeFps = 0.0;
+                            {
+                                auto it = m_cardCalibCache.find(occCamModel);
+                                if (it != m_cardCalibCache.end()) writeFps = it->second;
+                            }
+                            double capacityShots = 0.0;
+                            {
+                                auto it = m_bufferCapacityCache.find(occCamModel);
+                                if (it != m_bufferCapacityCache.end())
+                                    capacityShots = static_cast<double>(it->second);
+                            }
+                            int realShotCount;
+                            if (!ok)                                    realShotCount = 0;
+                            else if (blk.type == BlockType::Single)     realShotCount = 1;
+                            else if (blk.type == BlockType::Bracket)    realShotCount = std::max(1, blk.count);
+                            else /* Burst/BufferCapacity */             realShotCount = JInt(*res, "captures", -1);
+
+                            std::lock_guard lk(m_liveOccupancyMtx);
+                            auto& occ = m_liveOccupancy[camIdx];
+                            AdvanceOccupancyThroughBlock(blk, occ.inFlightStartMs, realShotCount,
+                                                          writeFps, capacityShots, UtcNowMs(),
+                                                          occ.shots, occ.shotsAtMs);
+                        }
+                    }
                     // Collect bracket samples for post-run calibration save —
                     // tagged with THIS camera's own model, since different
                     // camera threads can be different models running at once.
@@ -2050,6 +2411,44 @@ void App::SeqCamThreadProc(int        camIdx,
                         m_seqCalibBuf.push_back({blk.count, blk.ev, blk.ss,
                                                  static_cast<int>(logLat), thisCamModel});
                     }
+                    // Buffer capacity sample — auto-drained and saved every
+                    // frame in RenderSequencerButtons(), no manual "SAVE
+                    // CALIB" step. When slowdownObserved, this is ALSO the
+                    // card write-speed sample (slowFps == sustained
+                    // card-write-limited fps) -- see RenderSequencerButtons'
+                    // auto-save block for where that gets split into
+                    // card_write_calibration too.
+                    if (blk.type == BlockType::BufferCapacity) {
+                        // Diagnostic: nails down exactly which condition is
+                        // failing -- the sample has never once reached the
+                        // queue despite ok:true responses. Remove once found.
+                        LogLine(std::format(
+                            "BufferCapacity check: ok={} camModel=\"{}\" total_shots_raw=\"{}\"",
+                            ok, thisCamModel, JStr(*res, "total_shots")));
+                    }
+                    if (ok && blk.type == BlockType::BufferCapacity && !thisCamModel.empty()) {
+                        int totalShots = JInt(*res, "total_shots", 0);
+                        if (totalShots > 0) {
+                            BufferCapacitySample s;
+                            s.camModel             = thisCamModel;
+                            s.totalShots           = totalShots;
+                            s.bufferCapacityShots  = JInt(*res, "buffer_capacity_shots", totalShots);
+                            try { s.fastFps = std::stod(JStr(*res, "fast_fps")); } catch (...) {}
+                            try { s.slowFps = std::stod(JStr(*res, "slow_fps")); } catch (...) {}
+                            s.slowdownObserved = JStr(*res, "slowdown_observed") == "true";
+                            {
+                                std::lock_guard lk(m_seqCalibMtx);
+                                m_bufferCapacityBuf.push_back(s);
+                            }
+                            // Diagnostic: this sample has gone missing between here and
+                            // the RenderSequencerButtons drain twice now despite ok:true
+                            // responses and no bug found by code review -- keep this log
+                            // permanently until the root cause is actually found.
+                            LogLine(std::format(
+                                "BufferCapacity sample queued: model={} totalShots={} capacityShots={}",
+                                s.camModel, s.totalShots, s.bufferCapacityShots));
+                        }
+                    }
                     m_lastResult = std::format("SEQ cam{} {} {}",
                         camIdx, ok ? "OK" : "FAIL",
                         blk.label.empty() ? blk.ss : blk.label);
@@ -2058,6 +2457,40 @@ void App::SeqCamThreadProc(int        camIdx,
                     LogLine(std::format("SEQ seq={} cam={} ok=-1 err={}",
                         seqNum, camIdx, errMsg));
                     m_lastResult = std::format("SEQ ERROR cam{}: {}", camIdx, errMsg);
+                    // Live buffer occupancy: no response at all (pipe error) --
+                    // commit as 0 real shots, same reasoning as an ok=false
+                    // arm_failed above.
+                    std::string occCamModel;
+                    {
+                        std::lock_guard lk(m_camerasMutex);
+                        if (camIdx < static_cast<int>(m_cameras.size()))
+                            occCamModel = m_cameras[camIdx].model;
+                    }
+                    if (!occCamModel.empty()) {
+                        double writeFps = 0.0;
+                        {
+                            auto it = m_cardCalibCache.find(occCamModel);
+                            if (it != m_cardCalibCache.end()) writeFps = it->second;
+                        }
+                        double capacityShots = 0.0;
+                        {
+                            auto it = m_bufferCapacityCache.find(occCamModel);
+                            if (it != m_bufferCapacityCache.end())
+                                capacityShots = static_cast<double>(it->second);
+                        }
+                        std::lock_guard lk(m_liveOccupancyMtx);
+                        auto& occ = m_liveOccupancy[camIdx];
+                        AdvanceOccupancyThroughBlock(blk, occ.inFlightStartMs, /*realShotCount=*/0,
+                                                      writeFps, capacityShots, UtcNowMs(),
+                                                      occ.shots, occ.shotsAtMs);
+                    }
+                }
+                // Block finished executing (success or error) — the commit
+                // above is now authoritative; stop interpolating until the
+                // next in-flight block starts.
+                {
+                    std::lock_guard lk(m_liveOccupancyMtx);
+                    m_liveOccupancy[camIdx].inFlight = false;
                 }
             } else {
                 // Audio / empty block — no pipe call, log for timeline record
@@ -2519,6 +2952,7 @@ void App::AddPhotoPreset() {
 
     TLTrack& trk = m_tracks[ti];
     trk.blocks.clear();
+    m_multiSel.clear();  // preset rebuilds this track's blocks from scratch — old indices are meaningless
 
     // Skip C2..C3 (totality) — that window gets its own bracket sequence via
     // AddTotalityBracketPreset(); one single shot per minute isn't meant for
@@ -2633,6 +3067,7 @@ void App::AddAllBracketVariantsPreset() {
 
     TLTrack& trk = m_tracks[ti];
     trk.blocks.clear();
+    m_multiSel.clear();  // preset rebuilds this track's blocks from scratch — old indices are meaningless
     std::string camModel = CamModelForTrackIndex(ti);
 
     int64_t startMs = m_tlPlayheadMs.load();
@@ -2705,6 +3140,7 @@ void App::AddBracketArmCalibrationPreset() {
 
     TLTrack& trk = m_tracks[ti];
     trk.blocks.clear();
+    m_multiSel.clear();  // preset rebuilds this track's blocks from scratch — old indices are meaningless
     std::string camModel = CamModelForTrackIndex(ti);
 
     int64_t startMs = m_tlPlayheadMs.load();
@@ -2737,6 +3173,53 @@ void App::AddBracketArmCalibrationPreset() {
     m_tlDirty    = true;
     m_lastResult = std::format("Bracket ARM calibration: {} blocks ({} reps x {} variants) on track \"{}\"",
                                 blockCount, kReps, kNumVariants, trk.label);
+    LogLine(m_lastResult);
+}
+
+// "Buffer Capacity Calibration" — adds one BufferCapacity block held long
+// enough (10s default) for a slowdown to actually show up if the buffer
+// fills. Firing it measures how many shots fit before the camera's
+// continuous-shooting rate drops to card-write-limited speed, and
+// auto-saves the result — as well as the card write-speed calibration
+// (RenderSequencerButtons' auto-save block derives shots_per_sec from the
+// post-slowdown sustained fps and saves it into card_write_calibration too,
+// whenever a slowdown is actually observed). Operator-run, per camera
+// model, must be re-run if the memory card changes (the SDK has no way to
+// identify which physical card is inserted).
+void App::AddBufferCapacityPreset() {
+    assert(m_presetTargetTrack >= 0);
+    assert(m_presetTargetTrack < static_cast<int>(m_tracks.size()));  // rule 5: target track must exist
+
+    int ti = m_presetTargetTrack;
+    if (ti < 0 || ti >= static_cast<int>(m_tracks.size()) || m_tracks[ti].IsAudio()) {
+        ti = -1;
+        for (int i = 0; i < static_cast<int>(m_tracks.size()); ++i)
+            if (!m_tracks[i].IsAudio()) { ti = i; break; }
+        if (ti < 0) { m_lastResult = "Buffer Capacity Calibration: no camera track available"; return; }
+        m_presetTargetTrack = ti;
+    }
+
+    TLTrack& trk = m_tracks[ti];
+    trk.blocks.clear();
+    m_multiSel.clear();  // preset rebuilds this track's blocks from scratch — old indices are meaningless
+
+    int64_t startMs = m_tlPlayheadMs.load();
+    if (startMs < 0) startMs = UtcNowMs();
+
+    TLBlock b;
+    b.type       = BlockType::BufferCapacity;
+    b.ss         = "1/1000";  // fast enough not to bottleneck the burst itself
+    b.iso        = 100;
+    b.fstop      = "8.0";
+    b.burstDrive = "cont-hi-plus";
+    b.burstDurMs = 10000;  // operator's estimate: buffer fills around ~7s -- 10s covers it with margin
+    b.atMs       = startMs;
+    b.label      = "Buffer capacity calibration";
+    trk.blocks.push_back(b);
+
+    m_tlDirty    = true;
+    m_lastResult = std::format(
+        "Buffer Capacity Calibration: 1 block (10s hold, HI+) on track \"{}\"", trk.label);
     LogLine(m_lastResult);
 }
 
@@ -2800,6 +3283,7 @@ void App::AddShutterSpeedSweepPreset() {
 
     TLTrack& trk = m_tracks[ti];
     trk.blocks.clear();
+    m_multiSel.clear();  // preset rebuilds this track's blocks from scratch — old indices are meaningless
     std::string camModel = CamModelForTrackIndex(ti);
 
     int64_t startMs = m_tlPlayheadMs.load();
@@ -3011,6 +3495,85 @@ void App::RenderSequencerButtons() {
         ImGui::SetTooltip("Stops the active RUN execution.");
     ImGui::PopStyleColor(3);
     if (!canStopRun) ImGui::EndDisabled();
+
+    // Diagnostic: confirms RenderSequencerButtons() itself is actually being
+    // called/reached regularly and shows m_bufferCapacityBuf's size over
+    // time, even when 0 -- throttled to ~1/2s so it doesn't flood the log.
+    // Remove once the missing-sample bug below is found.
+    {
+        static int64_t s_lastBufCheckLogMs = 0;
+        int64_t nowMs = UtcNowMs();
+        if (nowMs - s_lastBufCheckLogMs > 2000) {
+            s_lastBufCheckLogMs = nowMs;
+            std::lock_guard lk(m_seqCalibMtx);
+            LogLine(std::format("RenderSequencerButtons tick: m_bufferCapacityBuf.size()={}",
+                                 m_bufferCapacityBuf.size()));
+        }
+    }
+
+    // ── Buffer capacity (+ card write-speed) calibration: auto-save ────────────
+    // Unlike bracket/ARM calibration (which average many reps and need an
+    // explicit review-then-save step), this is a single one-off operator
+    // measurement — save it to DB the instant it lands in the buffer. When
+    // slowdownObserved, slowFps (the sustained rate AFTER the buffer fills)
+    // is ALSO saved into card_write_calibration -- see CommandHandler.cpp's
+    // buffer_capacity_calib handler for why this replaced the earlier,
+    // separate "card_calib" measurement.
+    {
+        std::vector<BufferCapacityEntry> toSave;
+        {
+            std::lock_guard lk(m_seqCalibMtx);
+            if (!m_bufferCapacityBuf.empty()) {
+                LogLine(std::format("BufferCapacity drain: {} sample(s) found in buffer",
+                                     m_bufferCapacityBuf.size()));
+                for (const auto& s : m_bufferCapacityBuf) {
+                    BufferCapacityEntry e;
+                    e.camModel             = s.camModel;
+                    e.totalShots           = s.totalShots;
+                    e.bufferCapacityShots  = s.bufferCapacityShots;
+                    e.fastFps              = s.fastFps;
+                    e.slowFps              = s.slowFps;
+                    e.slowdownObserved     = s.slowdownObserved;
+                    toSave.push_back(std::move(e));
+                }
+                m_bufferCapacityBuf.clear();
+            }
+        }
+        if (!toSave.empty()) {
+            int64_t nowMs = UtcNowMs();
+            for (auto& e : toSave) {
+                e.createdMs = nowMs;
+                bool saved = m_configDb.SaveBufferCapacity(e);
+                std::string status = saved ? "saved" : "DB WRITE FAILED";
+                if (saved) LoadBufferCapacityCache();
+                if (e.slowdownObserved) {
+                    m_lastResult = std::format(
+                        "Buffer capacity calibration completed: {} = {} shots before slowdown"
+                        " ({:.1f}fps -> {:.1f}fps, {} total shots) — {}",
+                        e.camModel, e.bufferCapacityShots, e.fastFps, e.slowFps, e.totalShots, status);
+                    LogLine(m_lastResult);
+
+                    CardCalibEntry wr;
+                    wr.camModel      = e.camModel;
+                    wr.shotsPerSec   = e.slowFps;
+                    wr.measuredShots = e.totalShots - e.bufferCapacityShots;
+                    wr.measuredMs    = 0;
+                    wr.createdMs     = nowMs;
+                    bool wrSaved = m_configDb.SaveCardCalib(wr);
+                    LogLine(std::format(
+                        "Card write-speed calibration derived: {} = {:.2f} shots/s — {}",
+                        wr.camModel, wr.shotsPerSec, wrSaved ? "saved" : "DB WRITE FAILED"));
+                    if (wrSaved) LoadCardCalibCache();
+                } else {
+                    m_lastResult = std::format(
+                        "Buffer capacity calibration completed: {} = no slowdown within {} shots"
+                        " ({:.1f}fps sustained) — {}",
+                        e.camModel, e.totalShots, e.fastFps, status);
+                    LogLine(m_lastResult);
+                }
+            }
+        }
+    }
 
     // ── Save calibration (visible after any run that produced bracket samples) ─
     // One button PER distinct camera model present in the buffer — a run
@@ -3427,6 +3990,7 @@ void App::RenderSolarView() {
             for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
                 CamConfig& cc = m_camConfigs[ci];
                 if (cc.focalMm <= 0 || cc.trackMode != CamTrackMode::Horizon) continue;
+                if (!IsCameraOnline(cc.guid)) continue;
                 float f    = static_cast<float>(cc.focalMm);
                 float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
                 float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
@@ -3470,6 +4034,7 @@ void App::RenderSolarView() {
         for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
             const CamConfig& cc = m_camConfigs[ci];
             if (cc.focalMm <= 0) continue;
+            if (!IsCameraOnline(cc.guid)) continue;
             float  f    = static_cast<float>(cc.focalMm);
             float  fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
             float  fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
@@ -3527,6 +4092,7 @@ void App::RenderSolarView() {
         for (int ci = 0; ci < kMaxCamTracks && ci < (int)m_camConfigs.size(); ++ci) {
             if (!m_lvEnabled[ci] || !m_lvSrv[ci]) continue;
             if (m_camConfigs[ci].focalMm <= 0) continue;
+            if (!IsCameraOnline(m_camConfigs[ci].guid)) continue;
             lvOrder[lvCount++] = { m_camConfigs[ci].focalMm, ci };
         }
         // insertion sort (kMaxCamTracks ≤ 4, trivial)
@@ -3772,6 +4338,7 @@ void App::RenderSolarView() {
         for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
             const CamConfig& cc = m_camConfigs[ci];
             if (cc.focalMm <= 0) continue;
+            if (!IsCameraOnline(cc.guid)) continue;
             float f    = static_cast<float>(cc.focalMm);
             float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
             float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
@@ -3808,8 +4375,9 @@ void App::RenderSolarView() {
 
     dl->PopClipRect();
 
-    // ── P/q/rot/Alt/Obs + UTC/Home/Loc/PlayHead ───────────────────────────────
-    // Unified style: gray label, white value, fixed 25px gap between fields.
+    // ── P/q/rot/Alt/Obs/Tot/C1-C4 + UTC/Home/Loc/PlayHead ─────────────────────
+    // Unified style: gray label, white value, tight gap between fields (was
+    // 25px -- too wide once Tot/C1-C4 were added, fields ran off the row).
     ImGui::PushFont(m_fontMono);
     {
         static const ImVec4 kValWhite{0.88f, 0.88f, 0.90f, 1.0f};
@@ -3819,7 +4387,7 @@ void App::RenderSolarView() {
             ImGui::SameLine(0, 4);
             ImGui::TextColored(kValWhite, fmt, args...);
             if (tip) ImGui::SetItemTooltip("%s", tip);
-            ImGui::SameLine(0, 25);
+            ImGui::SameLine(0, 14);
         };
 
         if (hasEph && sunEph.utc_ms > 0) {
@@ -3842,6 +4410,15 @@ void App::RenderSolarView() {
             Field("Obs", "Percentage of the Sun's disc obscured by the Moon at this moment\n"
                          "(0%% = no eclipse, 100%% = totality/annularity).",
                          "%.2f%%", obscuration * 100.f);
+            {
+                ContactTimes ct = PrimaryContacts();
+                if (ct.valid && ct.c2Ms > 0 && ct.c3Ms > 0)
+                    Field("Tot", "Duration of totality/annularity at this location -- C3 minus C2.",
+                                 "%.1fs", static_cast<double>(ct.c3Ms - ct.c2Ms) / 1000.0);
+                if (ct.valid && ct.c1Ms > 0 && ct.c4Ms > 0)
+                    Field("C1-C4", "Total duration of the eclipse at this location, first to last\ncontact -- C4 minus C1.",
+                                 "%.1fm", static_cast<double>(ct.c4Ms - ct.c1Ms) / 60000.0);
+            }
         } else if (m_ephFetching.load()) {
             Field("EPH", nullptr, "%s", "fetching...");
         } else {
@@ -4015,8 +4592,10 @@ void App::RenderInspectorColumn() {
     {
         struct LvSlEnt { int focalMm; int ci; };
         LvSlEnt ents[kMaxCamTracks]; int nEnts = 0;
-        for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci)
+        for (int ci = 0; ci < (int)m_camConfigs.size() && ci < kMaxCamTracks; ++ci) {
+            if (!IsCameraOnline(m_camConfigs[ci].guid)) continue;
             ents[nEnts++] = { m_camConfigs[ci].focalMm, ci };
+        }
         for (int i = 1; i < nEnts; ++i) {
             LvSlEnt key = ents[i]; int j = i - 1;
             while (j >= 0 && ents[j].focalMm > key.focalMm) { ents[j+1] = ents[j]; --j; }
@@ -4170,6 +4749,11 @@ void App::RenderInspectorColumn() {
     } else {
         TLBlock& b = m_tracks[m_selTrack].blocks[m_selBlock];
         ImGui::PushFont(m_fontMono);
+        if (m_multiSel.size() > 1) {
+            ImGui::TextColored(ImVec4(1.f, 0.85f, 0.3f, 1.f),
+                "%d blocks selected -- edits apply to all", (int)m_multiSel.size());
+            ImGui::SetItemTooltip("Ctrl+click more blocks to add to the selection;\nCtrl+click a selected block to remove it.");
+        }
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
 
         // Field width: available minus widest label ("Burst duration") minus two
@@ -4216,6 +4800,22 @@ void App::RenderInspectorColumn() {
                 "block on the timeline to change it.");
         }
 
+        // Anchor indicator — read-only, informational
+        if (b.anchor != TLAnchor::None) {
+            double offS = b.anchorOffsetMs / 1000.0;
+            char anchBuf[24];
+            snprintf(anchBuf, sizeof(anchBuf), "%s %+.1fs",
+                     b.anchor == TLAnchor::C2 ? "C2" : "C3", offS);
+            ImGui::SetNextItemWidth(kFldW);
+            ImGui::InputText("##anchor_ro", anchBuf, sizeof(anchBuf), ImGuiInputTextFlags_ReadOnly);
+            ImGui::SameLine(); ImGui::TextColored(kGray, "Anchored");
+            ImGui::SetItemTooltip(
+                "This block follows this contact -- if the observer location\n"
+                "changes and the contact time shifts, this block moves with it,\n"
+                "keeping this same offset. Re-derived automatically whenever you\n"
+                "drag the block to a new position.");
+        }
+
         if (b.type != BlockType::Audio) {
             // Shutter speed combo — Sony standard values
             static constexpr const char* kSS[] = {
@@ -4232,7 +4832,10 @@ void App::RenderInspectorColumn() {
             if (ImGui::BeginCombo("##ss_c", ssPrev)) {
                 for (int i = 0; i < kSSN; ++i) {
                     bool sel = (b.ss == kSS[i]);
-                    if (ImGui::Selectable(kSS[i], sel)) { b.ss = kSS[i]; m_tlDirty = true; }
+                    if (ImGui::Selectable(kSS[i], sel)) {
+                        b.ss = kSS[i]; m_tlDirty = true;
+                        PropagateBlockField(&TLBlock::ss, b.ss);
+                    }
                     if (sel) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
@@ -4253,7 +4856,10 @@ void App::RenderInspectorColumn() {
                 for (int i = 0; i < kISOn; ++i) {
                     char lb[16]; snprintf(lb, sizeof(lb), "%d", kISO[i]);
                     bool sel = (b.iso == kISO[i]);
-                    if (ImGui::Selectable(lb, sel)) { b.iso = kISO[i]; m_tlDirty = true; }
+                    if (ImGui::Selectable(lb, sel)) {
+                        b.iso = kISO[i]; m_tlDirty = true;
+                        PropagateBlockField(&TLBlock::iso, b.iso);
+                    }
                     if (sel) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
@@ -4273,7 +4879,10 @@ void App::RenderInspectorColumn() {
             if (ImGui::BeginCombo("##fs_c", fsPrev)) {
                 for (int i = 0; i < kFSN; ++i) {
                     bool sel = (b.fstop == kFS[i]);
-                    if (ImGui::Selectable(kFS[i], sel)) { b.fstop = kFS[i]; m_tlDirty = true; }
+                    if (ImGui::Selectable(kFS[i], sel)) {
+                        b.fstop = kFS[i]; m_tlDirty = true;
+                        PropagateBlockField(&TLBlock::fstop, b.fstop);
+                    }
                     if (sel) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
@@ -4319,6 +4928,8 @@ void App::RenderInspectorColumn() {
                         b.ev    = kBrk[i].ev;
                         b.count = kBrk[i].count;
                         m_tlDirty = true;
+                        PropagateBlockField(&TLBlock::ev, b.ev);
+                        PropagateBlockField(&TLBlock::count, b.count);
                     }
                     if (i == idx) ImGui::SetItemDefaultFocus();
                 }
@@ -4353,6 +4964,7 @@ void App::RenderInspectorColumn() {
                     if (ImGui::Selectable(lbl, i == modeIdx)) {
                         b.burstDrive = kModes[i].drive;
                         m_tlDirty = true;
+                        PropagateBlockField(&TLBlock::burstDrive, b.burstDrive);
                     }
                     if (i == modeIdx) ImGui::SetItemDefaultFocus();
                 }
@@ -4370,6 +4982,7 @@ void App::RenderInspectorColumn() {
                 ds = std::isfinite(ds) ? std::clamp(ds, 0.1f, 3600.f) : 0.1f;
                 b.burstDurMs = int32_t(ds * 1000.f);
                 m_tlDirty = true;
+                PropagateBlockField(&TLBlock::burstDurMs, b.burstDurMs);
             }
             ImGui::SetItemTooltip("How long to hold the shutter down in continuous-drive mode (seconds).");
             ImGui::SameLine(); ImGui::TextColored(kGray, "Burst duration");
@@ -4492,8 +5105,8 @@ void App::RenderInspectorColumn() {
         ImGui::Checkbox("Snap to previous##snp", &b.snapToPrev);
         ImGui::SetItemTooltip(
             "Block starts exactly when the previous block on the same track\n"
-            "ends (plus ARM time, if settings change) -- instead of holding a\n"
-            "fixed UTC time.");
+            "ends (plus WR+ARM time, if settings change) -- instead of\n"
+            "holding a fixed UTC time.");
         ImGui::PopStyleColor();
         if (b.snapToPrev != prevSnap) {
             if (b.snapToPrev && m_selBlock > 0) {
@@ -4501,8 +5114,11 @@ void App::RenderInspectorColumn() {
                 std::string camModel = CamModelForTrackIndex(m_selTrack);
                 b.atMs = prev.atMs + BlockDurMs(prev, camModel);
                 if (prev.type != BlockType::Audio && b.type != BlockType::Audio &&
-                    BlockParamsDiffer(prev, b))
-                    b.atMs += ArmEstMs(prev, camModel);
+                    BlockParamsDiffer(prev, b)) {
+                    std::vector<int64_t> wrMsAt =
+                        ComputeWrMsPerBlock(m_tracks[m_selTrack], camModel);
+                    b.atMs += wrMsAt[m_selBlock - 1] + ArmEstMs(prev, camModel);
+                }
             }
             m_tlDirty = true;
         }
@@ -4546,12 +5162,86 @@ void App::RenderInspectorColumn() {
 
 // ─── Timeline (bottom, full width) ────────────────────────────────────────────
 
+// Keeps blocks anchored to C2/C3 correct as the observer location changes.
+// Two things happen here, both driven by comparing PrimaryContacts() against
+// the C2/C3 this function last saw:
+//  1. Any block that's still TLAnchor::None (freshly created, or loaded from
+//     a save made before this feature existed) adopts an anchor the first
+//     time valid totality contacts exist: before Max -> C2, at/after Max ->
+//     C3, offset = its current atMs minus that contact's time. This makes a
+//     brand-new block "anchored" within one frame of being placed, with no
+//     need to touch every block-creation call site individually.
+//  2. Any block that's ALREADY anchored gets its atMs re-derived from the
+//     (possibly new) contact time + its stored offset -- this is what makes
+//     a whole sequence follow a location change instead of staying frozen at
+//     its old absolute time. Totality duration itself can grow or shrink
+//     between locations, so C2-anchored and C3-anchored blocks can end up
+//     overlapping or with a gap near Max -- expected, per the design: the
+//     operator only has to touch blocks near Max, not redo the whole plan.
+void App::ResyncTimelineAnchors() {
+    assert(m_tracks.size() <= 64);
+    ContactTimes ct = PrimaryContacts();
+    if (ct.c2Ms <= 0 || ct.c3Ms <= 0 || ct.maxMs <= 0)
+        return;  // no totality at this location (yet) -- leave blocks absolute
+
+    bool haveBaseline = m_tlAnchorC2Ms > 0 && m_tlAnchorC3Ms > 0;
+    bool contactsMoved = haveBaseline &&
+        (ct.c2Ms != m_tlAnchorC2Ms || ct.c3Ms != m_tlAnchorC3Ms);
+
+    for (auto& tr : m_tracks) {
+        bool trackTouched = false;
+        for (auto& b : tr.blocks) {
+            if (b.atMs < 0) continue;
+            if (b.anchor == TLAnchor::None) {
+                b.anchor = (b.atMs < ct.maxMs) ? TLAnchor::C2 : TLAnchor::C3;
+                b.anchorOffsetMs = b.atMs - (b.anchor == TLAnchor::C2 ? ct.c2Ms : ct.c3Ms);
+                trackTouched = true;
+            } else if (contactsMoved) {
+                b.atMs = (b.anchor == TLAnchor::C2 ? ct.c2Ms : ct.c3Ms) + b.anchorOffsetMs;
+                trackTouched = true;
+            }
+        }
+        if (trackTouched)
+            std::sort(tr.blocks.begin(), tr.blocks.end(),
+                [](const TLBlock& a, const TLBlock& b2) { return a.atMs < b2.atMs; });
+    }
+
+    if (contactsMoved) {
+        LogLine(std::format(
+            "Timeline: location changed contacts (C2 {}->{}  C3 {}->{}) — anchored blocks resynced",
+            m_tlAnchorC2Ms, ct.c2Ms, m_tlAnchorC3Ms, ct.c3Ms));
+        m_tlDirty = true;
+    }
+    m_tlAnchorC2Ms = ct.c2Ms;
+    m_tlAnchorC3Ms = ct.c3Ms;
+}
+
 void App::RenderTimelineBottom() {
     static const float kLabelW  = 140.0f;
     static const float kMarkerH =  14.0f;
     static const float kPhaseH  =  20.0f;
     static const float kRulerH  =  85.0f;
     static const float kTrackH  =  28.0f;
+
+    ResyncTimelineAnchors();
+
+    // Apply a track removal requested (offline-track "×" button) during LAST
+    // frame's render, before anything below snapshots m_tracks.size() — erasing
+    // mid-render would desync the several loops in this function that all
+    // assume a stable track count for the frame.
+    if (m_pendingTrackRemoval >= 0 &&
+        m_pendingTrackRemoval < static_cast<int>(m_tracks.size())) {
+        m_tracks.erase(m_tracks.begin() + m_pendingTrackRemoval);
+        if (m_selTrack == m_pendingTrackRemoval)      { m_selTrack = -1; m_selBlock = -1; }
+        else if (m_selTrack > m_pendingTrackRemoval)  --m_selTrack;
+        // Removing a track shifts every later track's index — any multi-selected
+        // (ti,bi) pairs on those tracks would now silently point at a different
+        // track's blocks.
+        m_multiSel.clear();
+        m_tlDirty = true;
+        LogLine(std::format("Timeline: removed offline camera track {}", m_pendingTrackRemoval));
+    }
+    m_pendingTrackRemoval = -1;
 
     ImVec2 winPos  = ImGui::GetWindowPos();
     float  winW    = ImGui::GetWindowWidth();
@@ -4566,8 +5256,11 @@ void App::RenderTimelineBottom() {
     // the operator doesn't need to manually add a track when connecting another
     // camera; a new track appears next to the existing camera tracks with a
     // "CamN" placeholder and immediately picks up the real model+GUID via
-    // TrackLabel() below. Never shrinks — a camera briefly dropping out must
-    // not delete a track's configured blocks.
+    // TrackLabel() below. Auto-grow never auto-shrinks on its own — a camera
+    // briefly dropping out must not silently delete a track's configured
+    // blocks — but an offline track can be removed explicitly via its "×"
+    // button (see the label-column render loop below), which sets
+    // m_pendingTrackRemoval for next frame.
     {
         int numCamTracks = 0, lastCamIdx = -1;
         for (int i = 0; i < static_cast<int>(m_tracks.size()); ++i)
@@ -4983,15 +5676,33 @@ void App::RenderTimelineBottom() {
                             m_selBlock = i; break;
                         }
                     }
-                    // Apply snap-to-prev if enabled
+                    // Apply snap-to-prev if enabled: snap to the end of the
+                    // previous block, or to the end of ITS WR+ARM zone if
+                    // this block needs different settings from it.
                     if (m_selBlock > 0 && trk.blocks[m_selBlock].snapToPrev) {
                         auto& prev = trk.blocks[m_selBlock - 1];
                         auto& cur  = trk.blocks[m_selBlock];
                         std::string camModel = CamModelForTrackIndex(m_tlDragTrack);
                         cur.atMs = prev.atMs + BlockDurMs(prev, camModel);
                         if (prev.type != BlockType::Audio && cur.type != BlockType::Audio &&
-                            BlockParamsDiffer(prev, cur))
-                            cur.atMs += ArmEstMs(prev, camModel);
+                            BlockParamsDiffer(prev, cur)) {
+                            std::vector<int64_t> wrMsAt = ComputeWrMsPerBlock(trk, camModel);
+                            cur.atMs += wrMsAt[m_selBlock - 1] + ArmEstMs(prev, camModel);
+                        }
+                    }
+                    // Re-derive the anchor from this new position -- otherwise
+                    // the next ResyncTimelineAnchors() call would snap this
+                    // block back toward its OLD anchor+offset and silently
+                    // discard the manual move the operator just made.
+                    {
+                        TLBlock& moved = trk.blocks[m_selBlock];
+                        if (ct.c2Ms > 0 && ct.c3Ms > 0 && ct.maxMs > 0) {
+                            moved.anchor = (moved.atMs < ct.maxMs) ? TLAnchor::C2 : TLAnchor::C3;
+                            moved.anchorOffsetMs = moved.atMs -
+                                (moved.anchor == TLAnchor::C2 ? ct.c2Ms : ct.c3Ms);
+                        } else {
+                            moved.anchor = TLAnchor::None;
+                        }
                     }
                 }
                 m_tlDirty = true;
@@ -5011,33 +5722,63 @@ void App::RenderTimelineBottom() {
             float ty = tracksY + ti*kTrackH;
             if (mp.y < ty || mp.y >= ty+kTrackH) continue;
             std::string camModel = CamModelForTrackIndex(ti);
+            std::vector<int64_t> wrMsAt = ComputeWrMsPerBlock(m_tracks[ti], camModel);
             for (int bi = 0; bi < (int)m_tracks[ti].blocks.size(); ++bi) {
                 auto& blk = m_tracks[ti].blocks[bi];
                 float bx  = toPx(blk.atMs);
                 int64_t blkEnd = blk.atMs + BlockDurMs(blk, camModel);
-                // Extend hit box to cover ARM extension zone.
+                // Extend hit box to cover the WR+ARM extension zone.
                 if (blk.type != BlockType::Audio &&
                     bi + 1 < (int)m_tracks[ti].blocks.size()) {
                     const TLBlock& nxt = m_tracks[ti].blocks[bi + 1];
                     if (nxt.atMs >= 0 && BlockParamsDiffer(blk, nxt))
-                        blkEnd += ArmEstMs(blk, camModel);
+                        blkEnd += wrMsAt[bi] + ArmEstMs(blk, camModel);
                 }
                 float bx2 = toPx(blkEnd);
                 if (mp.x >= bx && mp.x <= bx2) {
-                    m_selTrack = ti; m_selBlock = bi;
-                    // Arm drag state (actual drag starts after threshold)
-                    m_tlDragTrack   = ti;
-                    m_tlDragBlock   = bi;
-                    m_tlDragStartMs = blk.atMs;
-                    m_tlDragMouseX0 = mp.x;
+                    if (ImGui::GetIO().KeyCtrl) {
+                        // Ctrl+click: toggle this block in the multi-selection instead
+                        // of replacing it. No drag armed — dragging is ambiguous with
+                        // more than one block selected, and this is a selection
+                        // gesture, not a move gesture.
+                        auto it = std::find(m_multiSel.begin(), m_multiSel.end(),
+                                             std::make_pair(ti, bi));
+                        if (it != m_multiSel.end()) {
+                            m_multiSel.erase(it);
+                            if (m_selTrack == ti && m_selBlock == bi) {
+                                // Primary removed — promote the last remaining
+                                // selection (if any) to primary so the Inspector
+                                // still shows a valid block.
+                                if (!m_multiSel.empty()) {
+                                    m_selTrack = m_multiSel.back().first;
+                                    m_selBlock = m_multiSel.back().second;
+                                } else {
+                                    m_selTrack = -1; m_selBlock = -1;
+                                }
+                            }
+                        } else {
+                            if (m_multiSel.empty() && m_selTrack >= 0 && m_selBlock >= 0)
+                                m_multiSel.emplace_back(m_selTrack, m_selBlock);
+                            m_multiSel.emplace_back(ti, bi);
+                            m_selTrack = ti; m_selBlock = bi;
+                        }
+                    } else {
+                        m_selTrack = ti; m_selBlock = bi;
+                        m_multiSel.clear();
+                        // Arm drag state (actual drag starts after threshold)
+                        m_tlDragTrack   = ti;
+                        m_tlDragBlock   = bi;
+                        m_tlDragStartMs = blk.atMs;
+                        m_tlDragMouseX0 = mp.x;
+                    }
                     hit = true; break;
                 }
             }
         }
-        if (!hit) {
+        if (!hit && !ImGui::GetIO().KeyCtrl) {
             bool inArea = mp.x >= winPos.x+kLabelW && mp.x <= winPos.x+winW
                        && mp.y >= tracksY && mp.y < tracksY+tracksH;
-            if (inArea) { m_selTrack = -1; m_selBlock = -1; }
+            if (inArea) { m_selTrack = -1; m_selBlock = -1; m_multiSel.clear(); }
         }
     }
 
@@ -5070,6 +5811,11 @@ void App::RenderTimelineBottom() {
                 tr.blocks.push_back(nb);
                 std::sort(tr.blocks.begin(), tr.blocks.end(),
                     [](const TLBlock& a, const TLBlock& b){ return a.atMs < b.atMs; });
+                // Inserting can shift every other block's index in this track —
+                // any (ti,bi) pairs already in m_multiSel could now silently
+                // point at a different block. Drop out of multi-select rather
+                // than risk a later bulk-edit landing on the wrong block.
+                m_multiSel.clear();
                 m_selTrack = ti;
                 auto it = std::find_if(tr.blocks.begin(), tr.blocks.end(),
                     [&](const TLBlock& blk){ return blk.atMs==atMs && blk.type==bt; });
@@ -5091,6 +5837,10 @@ void App::RenderTimelineBottom() {
         float ty     = tracksY + ti * kTrackH;
         float tyFill = ty + kTrackH - 2.f;   // bottom of visible content (2px gap below)
         int   myCamPos = tr.IsCamera() ? camPos++ : -1;
+        // This slot's camera was connected when the track was created (tracks
+        // only ever auto-grow up to the live camera count) but isn't in the
+        // current live snapshot — the camera was disconnected/removed.
+        bool  offline  = tr.IsCamera() && myCamPos >= static_cast<int>(camSnap.size());
 
         // Label column — highlighted when track is selected
         bool isSelTrack = (ti == m_selTrack);
@@ -5098,6 +5848,7 @@ void App::RenderTimelineBottom() {
         dl->AddRectFilled({winPos.x, ty}, {winPos.x + kLabelW - 2.f, tyFill}, labelBg);
         ImU32 lc = tr.IsAudio() ? IM_COL32(150,100,210,255) : TrackColor(myCamPos);
         std::string dynLbl = TrackLabel(tr, myCamPos);
+        if (offline) { lc = IM_COL32(90, 90, 96, 255); dynLbl += "  [OFFLINE]"; }
 
         dl->AddText({winPos.x + 8.f, ty + 7.f}, lc, dynLbl.c_str());
         // Left-click on track label → select track (highlights label background)
@@ -5112,11 +5863,32 @@ void App::RenderTimelineBottom() {
             }
         }
 
+        // Offline tracks get an explicit, one-click "remove this track" button —
+        // never automatic, so a camera that's merely mid-USB-hiccup can't lose
+        // its configured blocks. Deferred to next frame (see top of function).
+        if (offline) {
+            ImGui::SetCursorScreenPos({winPos.x + kLabelW - 18.f, ty + 1.f});
+            std::string rmId = std::format("x##rmtrack_{}", ti);
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 20, 20, 200));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(160, 40, 40, 230));
+            if (ImGui::SmallButton(rmId.c_str()))
+                m_pendingTrackRemoval = ti;
+            ImGui::PopStyleColor(2);
+            ImGui::SetItemTooltip("Remove this track and its blocks -- camera no longer connected");
+        }
+
         // Track content bg
         ImU32 bg = (ti % 2 == 0) ? IM_COL32(14,14,20,255) : IM_COL32(12,12,18,255);
         dl->AddRectFilled({winPos.x+kLabelW, ty}, {winPos.x+winW, tyFill}, bg);
 
         std::string camModel = CamModelForPos(myCamPos);
+
+        // WR (card-write-buffer wait) duration per block that triggers an
+        // ARM transition — computed over ALL blocks (not gated by the
+        // pixel-visibility check below), same helper used by hit-testing,
+        // the overlap check, drag snap-to-prev, and the pass-2 selection
+        // outline, so all of them agree with what's actually drawn here.
+        std::vector<int64_t> wrMsAt = ComputeWrMsPerBlock(tr, camModel);
 
         // Block fills + text labels (no selection border here — drawn in pass 2)
         for (int bi = 0; bi < (int)tr.blocks.size(); ++bi) {
@@ -5131,26 +5903,114 @@ void App::RenderTimelineBottom() {
             float dx2 = std::min(bx2, cx2);
             bool  dragged  = (m_tlDragging && m_tlDragTrack==ti && m_tlDragBlock==bi);
             bool  willDel  = dragged && (ImGui::GetMousePos().y < m_tlScreenTopY);
-            // Audio overlap: red when this block's playback ends after the next block starts.
-            bool  audOverlap = blk.type == BlockType::Audio
-                            && bi + 1 < (int)tr.blocks.size()
-                            && tr.blocks[bi+1].atMs > 0
-                            && blk.atMs + blk.audioDurMs > tr.blocks[bi+1].atMs;
-            ImU32 col = willDel   ? IM_COL32(200, 40,  40, 200)
-                      : audOverlap ? IM_COL32(220, 40,  40, 220)
-                      :              BlockColor(blk.type);
+            // Overlap: red when this block hasn't finished before the next one starts.
+            // Audio: end = atMs + playback duration. Camera: end = atMs + shoot
+            // duration, plus the ARM zone too when the next block needs different
+            // settings (the camera genuinely can't be shooting block N+1 until
+            // block N's shot AND any resulting settings change have completed) —
+            // same "occupied span" the ARM-extension bar below already draws.
+            bool overlap = false;
+            if (bi + 1 < (int)tr.blocks.size() && tr.blocks[bi + 1].atMs > 0) {
+                const TLBlock& nxt = tr.blocks[bi + 1];
+                if (blk.type == BlockType::Audio) {
+                    overlap = blk.atMs + blk.audioDurMs > nxt.atMs;
+                } else {
+                    int64_t blkEnd = blk.atMs + BlockDurMs(blk, camModel);
+                    if (BlockParamsDiffer(blk, nxt)) blkEnd += wrMsAt[bi] + ArmEstMs(blk, camModel);
+                    overlap = blkEnd > nxt.atMs;
+                }
+            }
+            ImU32 col = willDel ? IM_COL32(200, 40,  40, 200)
+                      : overlap ? IM_COL32(220, 40,  40, 220)
+                      :           BlockColor(blk.type);
             dl->AddRectFilled({dx, ty+2}, {dx2, tyFill}, col, 2.f);
             if (dx2-dx > 20.f && !blk.label.empty())
                 dl->AddText({dx+4.f, ty+6.f}, IM_COL32(240,240,240,215), blk.label.c_str());
 
-            // ARM extension: dim bar showing camera write+arm time that follows a
-            // block when the next block has different params.
+            // Hover tooltip — mini Block Inspector summary, no need to select
+            // the block first to see what it's set to.
+            if (!m_tlDragging) {
+                ImVec2 mp = ImGui::GetMousePos();
+                if (mp.x >= dx && mp.x <= dx2 && mp.y >= ty + 2.f && mp.y < tyFill) {
+                    ImGui::BeginTooltip();
+                    ImGui::PushFont(m_fontMono);
+                    ImGui::TextUnformatted(BlockTypeName(blk.type));
+                    if (blk.atMs > 0) {
+                        int64_t s = blk.atMs / 1000;
+                        ImGui::Text("UTC %02d:%02d:%02d.%03d",
+                            static_cast<int>((s / 3600) % 24), static_cast<int>((s / 60) % 60),
+                            static_cast<int>(s % 60), static_cast<int>(blk.atMs % 1000));
+                    }
+                    if (blk.type == BlockType::Audio) {
+                        ImGui::Text("File: %s", blk.audioFile.empty() ? "(none)" : blk.audioFile.c_str());
+                        ImGui::Text("Duration: %.1fs", blk.audioDurMs / 1000.f);
+                    } else {
+                        ImGui::Text("SS %s   ISO %d   f/%s",
+                                     blk.ss.c_str(), blk.iso, blk.fstop.c_str());
+                        if (blk.type == BlockType::Bracket) {
+                            ImGui::Text("Bracket %s / %d shots", blk.ev.c_str(), blk.count);
+                            // Per-shot SS list — the real, camera-snapped values
+                            // each frame of the bracket fires at, for cross-
+                            // checking against captured EXIF (same math as
+                            // BracketExposureSumMs, which the Timeline duration
+                            // prediction already relies on).
+                            double evStep = 1.0;
+                            try { evStep = std::stod(blk.ev); } catch (...) {}
+                            int64_t ssMs = ParseSsMs(blk.ss);
+                            if (evStep > 0.0 && ssMs > 0 && blk.count >= 1 && blk.count % 2 == 1) {
+                                const int half = (blk.count - 1) / 2;
+                                const double baseSec = static_cast<double>(ssMs) / 1000.0;
+                                std::string list;
+                                for (int k = -half; k <= half; ++k) {
+                                    double nominalSec = baseSec * std::pow(2.0, k * evStep);
+                                    double snappedSec = SnapToRealShutterSpeedSec(nominalSec);
+                                    if (k != -half) list += "  ";
+                                    list += FormatSsLabel(snappedSec);
+                                }
+                                ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.7f, 1.f), "%s", list.c_str());
+                            }
+                        }
+                        else if (blk.type == BlockType::Burst)
+                            ImGui::Text("Burst %s / %.1fs",
+                                         blk.burstDrive.c_str(), blk.burstDurMs / 1000.f);
+                    }
+                    if (!blk.label.empty()) ImGui::Text("\"%s\"", blk.label.c_str());
+                    if (overlap) ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f),
+                                                     "Overlaps next block!");
+                    ImGui::PopFont();
+                    ImGui::EndTooltip();
+                }
+            }
+
+            // WR + ARM extension: gray bar (predicted card-write-buffer wait,
+            // see WrEstMs/wrMsAt above) immediately followed by the dim amber
+            // ARM bar, when the next block has different params. WR comes
+            // first because ARM genuinely can't succeed until the buffer is
+            // clear — this mirrors the real firing order.
             if (!tr.IsAudio() && bi + 1 < (int)tr.blocks.size()) {
                 const TLBlock& nxt = tr.blocks[bi + 1];
                 if (nxt.atMs >= 0 && blk.type != BlockType::Audio &&
                     BlockParamsDiffer(blk, nxt)) {
-                    float bxA  = toPx(blk.atMs + BlockDurMs(blk, camModel));
-                    float bxA2 = toPx(blk.atMs + BlockDurMs(blk, camModel) + ArmEstMs(blk, camModel));
+                    int64_t wrMs = wrMsAt[bi];
+                    int64_t shootEndMs = blk.atMs + BlockDurMs(blk, camModel);
+
+                    if (wrMs > 0) {
+                        float bxW  = toPx(shootEndMs);
+                        float bxW2 = toPx(shootEndMs + wrMs);
+                        bxW2 = std::max(bxW2, bxW + 2.f);
+                        float dxW  = std::max(bxW,  cx1);
+                        float dxW2 = std::min(bxW2, cx2);
+                        if (dxW2 > dxW) {
+                            dl->AddRectFilled({dxW, ty+4.f}, {dxW2, tyFill-2.f},
+                                              IM_COL32(130, 130, 140, 110));
+                            if (dxW2 - dxW > 24.f)
+                                dl->AddText({dxW + 3.f, ty + 6.f},
+                                            IM_COL32(190, 190, 200, 180), "WR");
+                        }
+                    }
+
+                    float bxA  = toPx(shootEndMs + wrMs);
+                    float bxA2 = toPx(shootEndMs + wrMs + ArmEstMs(blk, camModel));
                     bxA2 = std::max(bxA2, bxA + 2.f);
                     float dxA  = std::max(bxA,  cx1);
                     float dxA2 = std::min(bxA2, cx2);
@@ -5172,7 +6032,10 @@ void App::RenderTimelineBottom() {
         float ty     = tracksY + ti * kTrackH;
         float tyFill = ty + kTrackH - 2.f;
         for (int bi = 0; bi < (int)tr.blocks.size(); ++bi) {
-            bool sel     = (m_selTrack == ti && m_selBlock == bi);
+            bool sel = m_multiSel.empty()
+                ? (m_selTrack == ti && m_selBlock == bi)
+                : (std::find(m_multiSel.begin(), m_multiSel.end(),
+                             std::make_pair(ti, bi)) != m_multiSel.end());
             bool dragged = (m_tlDragging && m_tlDragTrack == ti && m_tlDragBlock == bi);
             if (!sel && !dragged) continue;
             const TLBlock& blk = tr.blocks[bi];
@@ -5182,8 +6045,10 @@ void App::RenderTimelineBottom() {
             int64_t selEnd = blk.atMs + BlockDurMs(blk, camModel);
             if (blk.type != BlockType::Audio && bi + 1 < (int)tr.blocks.size()) {
                 const TLBlock& nxt = tr.blocks[bi + 1];
-                if (nxt.atMs >= 0 && BlockParamsDiffer(blk, nxt))
-                    selEnd += ArmEstMs(blk, camModel);
+                if (nxt.atMs >= 0 && BlockParamsDiffer(blk, nxt)) {
+                    std::vector<int64_t> wrMsAt = ComputeWrMsPerBlock(tr, camModel);
+                    selEnd += wrMsAt[bi] + ArmEstMs(blk, camModel);
+                }
             }
             float bx2 = toPx(selEnd);
             bx2 = std::max(bx2, bx + 3.f);
@@ -5457,6 +6322,15 @@ App::App() {
         // ARM (DriveMode-change) calibration — same pattern, separate table
         m_configDb.CreateArmCalibTable();
         LoadArmCalibCache();
+
+        // Card write-speed calibration — same pattern, separate table
+        m_configDb.CreateCardCalibTable();
+        LoadCardCalibCache();
+
+        // Buffer capacity calibration — same pattern; feeds ComputeWrMsPerBlock's
+        // buffer-occupancy ceiling clamp
+        m_configDb.CreateBufferCapacityTable();
+        LoadBufferCapacityCache();
 
         // Ephemeris cache tables (created if absent; data loaded on first fetch)
         m_configDb.CreateEphTables();
@@ -5847,8 +6721,33 @@ void App::RenderCameraSection() {
             return { buf, batCol };
         });
 
-        Row("Mode", "Camera exposure mode (e.g. M = Manual). Set on the camera itself,\nnot in this app.",
-            [&](const CamStatus& s) { return std::pair{ s.mode.empty()  ? "?" : s.mode,  kWhite }; });
+        // TEMPORARY diagnostic, replaces "Mode" (always "M" for the eclipse
+        // sequence, so never actually operator-relevant): live estimated
+        // shots pending write to card, for visual comparison against real
+        // camera behavior while ComputeWrMsPerBlock's occupancy model is
+        // still being validated on hardware. See App.h's LiveOccupancy /
+        // CurrentBufferOccupancy for the running estimate this reads, and
+        // CLAUDE.md Change log 2026-07-26 for why. ci is needed for
+        // CurrentBufferOccupancy(camIdx, ...), which the generic Row()
+        // helper's getValue callback doesn't have access to -- hand-rolled
+        // instead of going through Row().
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextColored(kGray, "Buf");
+        ImGui::SetItemTooltip("TEMPORARY: estimated shots still pending write to card,\n"
+                               "live during sequence playback (not the pre-run Timeline\n"
+                               "prediction). \"-\" = this camera model has no card write-speed\n"
+                               "calibration yet (Photo Sequence > Buffer Capacity + Write-Speed\n"
+                               "Calibration).");
+        for (int ci = 0; ci < kMaxCamTracks; ++ci) {
+            ImGui::TableSetColumnIndex(ci + 1);
+            const CamStatus* s = CamAt(ci);
+            if (!s || !s->valid) { ImGui::TextColored(kDim, "-"); continue; }
+            double occ = CurrentBufferOccupancy(ci, s->model);
+            if (occ < 0.0) { ImGui::TextColored(kDim, "-"); continue; }
+            ImGui::TextColored(occ >= 0.5 ? kYellow : kWhite, "%.0f", occ);
+        }
+
         Row("SS", "Shutter speed currently set on the camera.",
             [&](const CamStatus& s) { return std::pair{ s.ss.empty()    ? "?" : s.ss,    kWhite }; });
         Row("ISO", "ISO sensitivity currently set on the camera.",
@@ -6792,6 +7691,7 @@ void App::NewTimeline() {
     m_tracks.clear();
     InitTracks();
     m_selTrack = -1; m_selBlock = -1;
+    m_multiSel.clear();
     m_tlDragging = false; m_tlDragTrack = -1; m_tlDragBlock = -1;
     m_tlViewStart = -1;   // will re-init from contacts on next frame
     m_tlViewEnd   = -1;
@@ -6800,6 +7700,24 @@ void App::NewTimeline() {
 }
 
 void App::DeleteSelectedBlock() {
+    if (!m_multiSel.empty()) {
+        // Erase highest block-index first within each track so earlier
+        // indices in that same track stay valid for the rest of the loop.
+        std::vector<std::pair<int, int>> sel = m_multiSel;
+        std::sort(sel.begin(), sel.end(), [](const auto& a, const auto& b) {
+            return a.first != b.first ? a.first < b.first : a.second > b.second;
+        });
+        for (const auto& [ti, bi] : sel) {
+            if (ti < 0 || ti >= (int)m_tracks.size()) continue;
+            auto& blocks = m_tracks[ti].blocks;
+            if (bi < 0 || bi >= (int)blocks.size()) continue;
+            blocks.erase(blocks.begin() + bi);
+        }
+        m_multiSel.clear();
+        m_selBlock = -1; m_selTrack = -1;
+        m_tlDirty = true;
+        return;
+    }
     if (m_selTrack < 0 || m_selTrack >= (int)m_tracks.size()) return;
     auto& tr = m_tracks[m_selTrack];
     if (m_selBlock < 0 || m_selBlock >= (int)tr.blocks.size()) return;
@@ -6815,9 +7733,19 @@ void App::DuplicateSelectedBlock() {
     TLBlock copy = tr.blocks[m_selBlock];
     copy.id   = -1;
     copy.atMs += BlockDurMs(copy) + 500; // offset by own duration + 0.5s gap
+    // The struct copy above also copied the original's anchor+offset, which
+    // no longer matches this shifted atMs -- reset to None so the next
+    // ResyncTimelineAnchors() pass derives a fresh anchor from the
+    // duplicate's actual new position instead of snapping it back toward
+    // the original.
+    copy.anchor = TLAnchor::None;
+    copy.anchorOffsetMs = 0;
     tr.blocks.push_back(copy);
     std::sort(tr.blocks.begin(), tr.blocks.end(),
         [](const TLBlock& a, const TLBlock& b){ return a.atMs < b.atMs; });
+    // Inserting shifts indices — any existing multi-selection could now point
+    // at the wrong block (see the DnD-drop insertion for the same reasoning).
+    m_multiSel.clear();
     // Select the duplicate
     for (int i = 0; i < (int)tr.blocks.size(); ++i) {
         if (tr.blocks[i].atMs == copy.atMs && tr.blocks[i].type == copy.type) {
@@ -6930,6 +7858,28 @@ void App::LoadArmCalibCache() {
     }
     LogLine(std::format("ARM calibration: {} model(s) loaded into cache",
                         m_armCalibCache.size()));
+}
+
+void App::LoadCardCalibCache() {
+    assert(m_configDb.IsOpen());
+    m_cardCalibCache.clear();
+    auto entries = m_configDb.LoadCardCalibAll();
+    assert(entries.size() <= 100);  // bounded: realistic number of camera models
+    for (const auto& e : entries)
+        m_cardCalibCache[e.camModel] = e.shotsPerSec;
+    LogLine(std::format("Card write-speed calibration: {} model(s) loaded into cache",
+                        m_cardCalibCache.size()));
+}
+
+void App::LoadBufferCapacityCache() {
+    assert(m_configDb.IsOpen());
+    m_bufferCapacityCache.clear();
+    auto entries = m_configDb.LoadBufferCapacityAll();
+    assert(entries.size() <= 100);  // bounded: realistic number of camera models
+    for (const auto& e : entries)
+        m_bufferCapacityCache[e.camModel] = e.bufferCapacityShots;
+    LogLine(std::format("Buffer capacity calibration: {} model(s) loaded into cache",
+                        m_bufferCapacityCache.size()));
 }
 
 void App::SaveArmCalibFromBuf(const std::string& camModel) {
@@ -7071,6 +8021,7 @@ void App::RenderSnapshotModal() {
                 m_tracks  = std::move(loaded);
                 m_tlDirty = true;
                 m_selTrack = m_selBlock = -1;
+                m_multiSel.clear();
 
                 // Auto-fit view to loaded blocks so they are always visible,
                 // regardless of where their at_ms falls on the timeline.
@@ -7468,6 +8419,7 @@ void App::RenderMenuBar() {
             for (auto& tr : m_tracks) if (tr.IsCamera()) tr.blocks.clear();
             m_tlDirty  = true;
             m_selTrack = m_selBlock = -1;
+            m_multiSel.clear();
             m_lastResult = "Photo sequence reset";
             LogLine("Menu: Reset Photo Sequence");
         }
@@ -7491,6 +8443,12 @@ void App::RenderMenuBar() {
         // 107 shots/cam.
         if (ImGui::MenuItem("Bracket SS Sweep (1/8000-8s, x3 full + x5/x9 spot)"))
             AddShutterSpeedSweepPreset();
+        // Operator-run, per-camera-model test: how many shots fit before the
+        // camera slows down (buffer full), AND — from the post-slowdown
+        // sustained fps — card write-speed for WrEstMs()'s gray WR block.
+        // Both auto-save on completion, no manual step.
+        if (ImGui::MenuItem("Buffer Capacity + Write-Speed Calibration (10s hold, HI+)"))
+            AddBufferCapacityPreset();
         ImGui::Separator();
         ImGui::MenuItem("Validate Timeline [FUTURE FUNCTION]", nullptr, false, false);
         ImGui::MenuItem("Auto-optimize [FUTURE FUNCTION]",     nullptr, false, false);
@@ -7504,6 +8462,7 @@ void App::RenderMenuBar() {
             for (auto& tr : m_tracks) if (tr.IsAudio()) tr.blocks.clear();
             m_tlDirty  = true;
             m_selTrack = m_selBlock = -1;
+            m_multiSel.clear();
             m_lastResult = "Audio sequence reset";
             LogLine("Menu: Reset Audio Sequence");
         }

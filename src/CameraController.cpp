@@ -212,6 +212,14 @@ private:
         while (cur < m_owner->m_capturedTarget) {
             if (m_owner->m_capturedCount.compare_exchange_weak(
                     cur, cur + 1, std::memory_order_release, std::memory_order_relaxed)) {
+                // Record this capture's arrival time for AnalyzeBufferCapacity —
+                // index `cur` is this capture's 0-based position, since cur was
+                // the pre-increment count.
+                if (cur < CameraController::kMaxCaptureTimestamps) {
+                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    m_owner->m_captureTimestampsMs[cur] = ms;
+                }
                 m_owner->m_waitCv.notify_all();
                 return true;
             }
@@ -448,12 +456,27 @@ bool CameraController::SetPropRaw(unsigned code, unsigned type, long long value,
 }
 
 bool CameraController::SetPropAndVerify(uint32_t code, uint32_t dataType, long long value,
-                                         const wchar_t* desc, int maxWaitMs) {
+                                         const wchar_t* desc, int maxWaitMs,
+                                         bool forceRecheck) {
     if (!m_connected) return false;
     auto it = m_propSetCache.find(code);
     if (it != m_propSetCache.end() && it->second == value) {
-        Logf(L"Skip %-26s = 0x%llX (cached)", desc ? desc : L"?", (unsigned long long)value);
-        return true;
+        if (!forceRecheck) {
+            Logf(L"Skip %-26s = 0x%llX (cached)", desc ? desc : L"?", (unsigned long long)value);
+            return true;
+        }
+        // Cache says this is already set -- but confirm the camera still
+        // actually holds it before trusting that (see header comment).
+        uint64_t cur = 0;
+        if (GetPropRaw(code, cur) &&
+            static_cast<long long>(static_cast<uint32_t>(cur)) == value) {
+            Logf(L"Skip %-26s = 0x%llX (cached, live-verified)", desc ? desc : L"?",
+                 (unsigned long long)value);
+            return true;
+        }
+        Logf(L"%-26s cache STALE (camera now reports 0x%llX, expected 0x%llX) — re-asserting",
+             desc ? desc : L"?", (unsigned long long)cur, (unsigned long long)value);
+        m_propSetCache.erase(it);
     }
     assert(maxWaitMs > 0);
     assert(code != 0);
@@ -710,9 +733,15 @@ uint32_t CameraController::NearestShutterSpeed(uint32_t targetRaw) {
 static constexpr int kExposurePropVerifyMs = 6000;
 
 bool CameraController::SetPCRemotePriority() {
+    // forceRecheck=true: PC Remote priority is the one property that, if it
+    // silently lapses, lets the physical dial move OTHER properties (e.g.
+    // ShutterSpeed) out from under us with no error anywhere -- a permanent
+    // "Skip (cached)" here would mean we'd never notice. Every other
+    // SetPropAndVerify caller keeps the default cache-forever behavior; this
+    // is deliberately the one exception.
     return SetPropAndVerify(SDK::CrDeviceProperty_PriorityKeySettings,
                             SDK::CrDataType_UInt16, SDK::CrPriorityKey_PCRemote,
-                            L"PriorityKey", kExposurePropVerifyMs);
+                            L"PriorityKey", kExposurePropVerifyMs, /*forceRecheck=*/true);
 }
 
 bool CameraController::SetExposureMode(const wchar_t* mode) {
@@ -779,7 +808,8 @@ void CameraController::RequestShutdown() {
     m_waitCv.notify_all();
 }
 
-bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures, bool holdForBurst) {
+bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures,
+                              bool holdForBurst, int* actualCaptures) {
     assert(timeoutMs > 0);          // caller contract — negative timeout makes no sense
     assert(expectedCaptures >= 1);  // caller contract — at least one capture expected
     if (!m_connected)        { Log(L"Shoot: not connected");              return false; }
@@ -817,9 +847,67 @@ bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - t0).count());
     if (latencyMs) *latencyMs = ms;
+    if (actualCaptures) *actualCaptures = m_capturedCount.load();
     Logf(L"Shoot: %s  captures=%d/%d  %d ms",
          ok ? L"OK" : L"TIMEOUT", m_capturedCount.load(), m_capturedTarget, ms);
     return ok;
+}
+
+CameraController::BufferCapacityResult
+CameraController::AnalyzeBufferCapacity(int actualCaptures) const {
+    assert(actualCaptures >= 0);
+    BufferCapacityResult r;
+    r.totalShots          = actualCaptures;
+    r.bufferCapacityShots = actualCaptures;
+    if (actualCaptures < 5) return r;  // not enough data for a meaningful baseline
+
+    int n = std::min(actualCaptures, kMaxCaptureTimestamps);
+    assert(n >= 5 && n <= kMaxCaptureTimestamps);
+
+    // Baseline: average of the first few inter-capture intervals — the
+    // steady-state continuous-shooting rate before any buffer pressure.
+    static constexpr int kBaselineSamples = 4;
+    int baselineN = std::min(kBaselineSamples, n - 1);
+    int64_t baselineSumMs = 0;
+    for (int i = 0; i < baselineN; ++i)
+        baselineSumMs += m_captureTimestampsMs[i + 1] - m_captureTimestampsMs[i];
+    double baselineMs = static_cast<double>(baselineSumMs) / baselineN;
+    if (baselineMs <= 0.0) return r;
+    r.fastFps = 1000.0 / baselineMs;
+
+    // Scan the rest for the first interval significantly slower than
+    // baseline — that's the buffer filling up and the camera falling back
+    // to card-write-limited speed.
+    static constexpr double kSlowdownFactor = 1.6;
+    int inflection = -1;
+    for (int i = baselineN; i < n - 1; ++i) {
+        double intervalMs = static_cast<double>(
+            m_captureTimestampsMs[i + 1] - m_captureTimestampsMs[i]);
+        if (intervalMs > baselineMs * kSlowdownFactor) { inflection = i; break; }
+    }
+
+    if (inflection < 0) {
+        // No slowdown seen within the captured data — buffer capacity is at
+        // least `actualCaptures` shots. Genuinely useful information, not a
+        // failure (some camera/card combos never fill their buffer at all
+        // within a realistic hold — see project notes on this).
+        r.slowFps = r.fastFps;
+        return r;
+    }
+
+    r.slowdownObserved    = true;
+    r.bufferCapacityShots = inflection + 1;  // shots fired at the fast rate
+
+    int64_t slowSumMs = 0;
+    int     slowCount = 0;
+    for (int i = inflection; i < n - 1; ++i) {
+        slowSumMs += m_captureTimestampsMs[i + 1] - m_captureTimestampsMs[i];
+        ++slowCount;
+    }
+    r.slowFps = slowCount > 0
+        ? 1000.0 / (static_cast<double>(slowSumMs) / slowCount)
+        : r.fastFps;
+    return r;
 }
 
 // ─── GetStatus ────────────────────────────────────────────────────────────────

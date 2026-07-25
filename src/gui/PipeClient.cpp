@@ -110,7 +110,7 @@ void PipeClient::Disconnect() {
 }
 
 std::expected<std::string, PipeError>
-PipeClient::SendRequest(std::string_view request) {
+PipeClient::SendRequest(std::string_view request, DWORD readTimeoutMs) {
     assert(!request.empty());         // caller must not send an empty JSON command
     assert(request.size() < 65536);   // sanity: no single command should approach 64 KiB
     std::lock_guard lk(m_pipeMutex);
@@ -136,7 +136,7 @@ PipeClient::SendRequest(std::string_view request) {
 
     while (true) {
         DWORD read = 0;
-        if (!OverlappedIo(m_pipe, false, buf, sizeof(buf), read, kIoTimeoutMs, timedOut)) {
+        if (!OverlappedIo(m_pipe, false, buf, sizeof(buf), read, readTimeoutMs, timedOut)) {
             BreakPipe();
             return std::unexpected(timedOut ? PipeError::Timeout : PipeError::ReadFailed);
         }

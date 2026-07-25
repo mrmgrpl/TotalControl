@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -112,9 +113,20 @@ public:
     bool SetProp(uint32_t code, uint32_t dataType, long long value,
                  const wchar_t* desc = nullptr);
     // Set + poll until camera confirms value (or maxWaitMs).
-    // Skips both set and verify when already cached from a prior successful call.
+    // Skips both set and verify when already cached from a prior successful call
+    // -- unless forceRecheck is true, in which case a cache hit still costs one
+    // live GetPropRaw read to confirm the camera hasn't silently drifted off the
+    // cached value before trusting it (see PriorityKey's caller: PC Remote
+    // priority can silently lapse with no error surfaced anywhere else, letting
+    // the physical dial move properties like ShutterSpeed out from under a
+    // stale cache entry — confirmed on real hardware 2026-07-26, a "8s" shutter
+    // speed that SetPropAndVerify had confirmed drifted to 15s on the camera a
+    // few seconds later with zero commands sent in between). Does NOT re-issue
+    // SetPropRaw when the live read still matches -- only a genuinely stale
+    // cache falls through to the normal set+retry path below.
     bool SetPropAndVerify(uint32_t code, uint32_t dataType, long long value,
-                          const wchar_t* desc, int maxWaitMs = 2000);
+                          const wchar_t* desc, int maxWaitMs = 2000,
+                          bool forceRecheck = false);
     bool GetPropRaw(uint32_t code, uint64_t& outValue);
     // Diagnostic: snapshot every property code+value the camera currently reports.
     // Used to empirically identify undocumented property codes (see CommandHandler
@@ -145,8 +157,34 @@ public:
     // holdForBurst=true: keeps Release button pressed until all captures arrive,
     // then releases (required for CrDrive_Cont_Bracket_* — camera fires N shots
     // only while button is held). For single-shot and Single_Bracket, leave false.
+    // actualCaptures (optional): how many CrNotify_Captured_Event actually
+    // arrived by the time Shoot() returns — the real count, not
+    // expectedCaptures. Needed by callers using the duration-driven sentinel
+    // pattern (expectedCaptures=9999, holdForBurst for a fixed timeoutMs)
+    // where the real shot count isn't known in advance, e.g. card write-speed
+    // calibration, which must know exactly how many shots it's timing.
     bool Shoot(int* latencyMs = nullptr, int timeoutMs = 5000,
-               int expectedCaptures = 1, bool holdForBurst = false);
+               int expectedCaptures = 1, bool holdForBurst = false,
+               int* actualCaptures = nullptr);
+
+    // ── Buffer capacity ───────────────────────────────────────────────────────
+    struct BufferCapacityResult {
+        int    totalShots         = 0;      // actual captures during the whole hold
+        int    bufferCapacityShots = 0;     // shots fired before the fps slowdown (== totalShots if none observed)
+        double fastFps             = 0.0;   // steady-state fps before any slowdown
+        double slowFps             = 0.0;   // sustained fps after the slowdown (== fastFps if none observed)
+        bool   slowdownObserved    = false;
+    };
+    // Analyzes the per-capture timestamps recorded during the most recent
+    // Shoot() call (holdForBurst, sentinel target) to find where the shot
+    // interval jumps from steady-state to a slower sustained rate — that's
+    // the camera's buffer filling up and falling back to card-write-limited
+    // speed. actualCaptures must be the same value Shoot() just reported via
+    // its actualCaptures out-param. If no slowdown is seen within
+    // actualCaptures shots, bufferCapacityShots==totalShots and
+    // slowdownObserved==false — a real, useful result ("buffer capacity is
+    // at least this many shots"), not a failure.
+    BufferCapacityResult AnalyzeBufferCapacity(int actualCaptures) const;
 
     // ── Status ───────────────────────────────────────────────────────────────
     CameraStatus GetStatus();
@@ -190,6 +228,13 @@ private:
     std::atomic<bool>       m_shutdownReq   { false };
     std::atomic<int>        m_capturedCount { 0 };
     int                     m_capturedTarget { 1 };
+    // Per-capture timestamps (steady_clock ms) for buffer-capacity analysis
+    // (see AnalyzeBufferCapacity) — pre-allocated, no heap allocation after
+    // init (rule 3). Index i is written once, the instant capture i+1's
+    // CrNotify_Captured_Event arrives; capacity bounds any realistic hold
+    // (kMaxCaptureTimestamps at ~20fps sustained is well over a minute).
+    static constexpr int    kMaxCaptureTimestamps = 2000;
+    std::array<int64_t, kMaxCaptureTimestamps> m_captureTimestampsMs{};
     // Bumped by OnPropertyChanged/OnPropertyChangedCodes on every camera-reported
     // property change (incl. MediaSLOT_WritingState writing->idle). SetPropAndVerify
     // waits on this generation counter instead of polling on a fixed cadence.

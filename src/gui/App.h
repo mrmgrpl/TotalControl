@@ -136,8 +136,28 @@ private:
     void MergeCamerasIntoCamConfigs();
     void RenderCamConfigWindows();
     void NewTimeline();
+    // Keeps C2/C3-anchored blocks correct as the observer location (and
+    // therefore contact times) changes -- see TLAnchor in Timeline.h. Called
+    // once per frame from RenderTimelineBottom(), before anything reads atMs.
+    void ResyncTimelineAnchors();
     void DeleteSelectedBlock();
     void DuplicateSelectedBlock();
+
+    // Multi-select bulk edit: after the Inspector writes a new value for
+    // capture parameter `field` onto the primary selected block, this pushes
+    // the same value onto every OTHER block in m_multiSel. Position (atMs),
+    // id, and label are per-block identity, not capture parameters, so
+    // callers only ever pass ss/iso/fstop/count/ev/burstDrive/burstDurMs.
+    template <typename T>
+    void PropagateBlockField(T TLBlock::* field, const T& value) {
+        for (const auto& [ti, bi] : m_multiSel) {
+            if (ti == m_selTrack && bi == m_selBlock) continue;
+            if (ti < 0 || ti >= static_cast<int>(m_tracks.size())) continue;
+            auto& blocks = m_tracks[ti].blocks;
+            if (bi < 0 || bi >= static_cast<int>(blocks.size())) continue;
+            blocks[bi].*field = value;
+        }
+    }
     static void ApplyStyleDark();
     void RenderMarkdownBody(const std::string& md); // minimal # / ## / "- " renderer
     bool m_showAbout       = false;
@@ -352,8 +372,23 @@ private:
     bool                 m_tlDirty    = false;
     int                  m_selTrack    = -1;
     int                  m_selBlock    = -1;
+    // Ctrl+click multi-selection: (track, block) pairs, includes the primary
+    // (m_selTrack, m_selBlock) whenever it's non-empty. Empty = plain single
+    // selection (or nothing selected) -- everything single-select already did
+    // keeps working unchanged; multi-select is additive on top of it.
+    std::vector<std::pair<int, int>> m_multiSel;
     int64_t              m_tlViewStart = -1;
     int64_t              m_tlViewEnd   = -1;
+    // Last C2/C3 seen by ResyncTimelineAnchors() -- lets it tell "contacts
+    // just changed, re-derive every anchored block's atMs" apart from
+    // "nothing changed, only backfill any still-unanchored blocks".
+    int64_t               m_tlAnchorC2Ms = -1;
+    int64_t               m_tlAnchorC3Ms = -1;
+    // Set by the offline-track remove button (RenderTimelineBottom); applied at
+    // the top of the NEXT frame's RenderTimelineBottom() call, before nT/camSnap
+    // are captured — erasing m_tracks mid-render would desync the several loops
+    // in that function that all snapshot m_tracks.size() once per frame.
+    int                  m_pendingTrackRemoval = -1;
 
     // Drag-to-move existing blocks
     bool    m_tlDragging    = false;
@@ -441,6 +476,108 @@ private:
     // original ILCE-7RM4A-derived formula.
     int64_t ArmEstMs(const TLBlock& b, std::string_view camModel = {}) const;
 
+    // ── Card write-speed calibration ─────────────────────────────────────────
+    // One scalar per model (no per-count keying, no averaging across reps —
+    // see CardCalibEntry in Database.h). Derived from the Buffer Capacity
+    // test's post-slowdown sustained fps (see m_bufferCapacityBuf below and
+    // RenderSequencerButtons' auto-save block) rather than measured directly
+    // — a standalone measurement existed earlier but was retired, see
+    // CommandHandler.cpp's buffer_capacity_calib handler for why.
+    std::map<std::string, double> m_cardCalibCache;  // camModel -> shots/sec
+
+    // ── Buffer capacity calibration ──────────────────────────────────────────
+    // How many shots fit before the camera's rate slows (buffer full). Also
+    // the source of card write-speed calibration above, via the post-
+    // slowdown sustained fps -- see RenderSequencerButtons' auto-save block.
+    struct BufferCapacitySample {
+        std::string camModel;
+        int         totalShots          = 0;
+        int         bufferCapacityShots = 0;
+        double      fastFps             = 0.0;
+        double      slowFps             = 0.0;
+        bool        slowdownObserved    = false;
+    };
+    std::vector<BufferCapacitySample> m_bufferCapacityBuf;
+
+    // camModel -> buffer_capacity_shots (most recent one-off measurement).
+    // Used only as ComputeWrMsPerBlock's occupancy ceiling clamp.
+    std::map<std::string, int> m_bufferCapacityCache;
+
+    void LoadCardCalibCache();       // DB -> m_cardCalibCache
+    void LoadBufferCapacityCache();  // DB -> m_bufferCapacityCache
+    // WrEstMs: card-write-buffer drain time for a given virtual occupancy
+    // (shots currently estimated "pending write") at this camera's
+    // calibrated sustained write rate. Returns 0 when camModel isn't
+    // calibrated yet or occupancy is already 0.
+    int64_t WrEstMs(std::string_view camModel, double occupancyShots) const;
+    // Walks `tr`'s blocks left-to-right maintaining a continuous virtual
+    // card-write-buffer occupancy (shots pending write): each block adds its
+    // own shot count and drains at the camera's calibrated sustained write
+    // rate for its own real duration, clamped to the calibrated buffer
+    // capacity ceiling. The occupancy is carried across EVERY block
+    // (including same-param runs where no ARM happens) rather than being
+    // reset at group boundaries — a WR wait (long enough to drain occupancy
+    // to 0) is only surfaced right before a block that needs an ARM
+    // (BlockParamsDiffer), since that's the only point a camera-side command
+    // can actually be rejected by a still-full buffer. Bounded by
+    // tr.blocks.size(), no recursion. Returned vector is indexed 1:1 with
+    // tr.blocks; entries for blocks that don't trigger a transition are 0.
+    // Shared by every piece of code that needs to know "how long is the
+    // WR+ARM zone after block bi" — the main Timeline render pass, drag
+    // snap-to-prev, click hit-testing, the overlap check, and the
+    // selection-outline extent — so all of them agree with what the gray WR
+    // bar actually shows.
+    //
+    // Replaces an earlier group-based model (sum shots since the last ARM,
+    // compare against real elapsed group time) that could badly underpredict
+    // an isolated slow-drive burst — confirmed on real hardware 2026-07-25:
+    // a 25s cont-lo burst was predicted to need ~0 WR but the camera actually
+    // rejected the next property change for ~35s.
+    std::vector<int64_t> ComputeWrMsPerBlock(const TLTrack& tr,
+                                              std::string_view camModel) const;
+
+    // ── Live buffer occupancy (TEMPORARY diagnostic) ─────────────────────────
+    // Real-time running estimate of shots pending write, separate from
+    // ComputeWrMsPerBlock's pre-run PREDICTION over the whole static timeline.
+    // Displayed live in the camera status table (replaces the "Mode" row,
+    // which is always "M" and therefore not operator-relevant) so it can be
+    // visually checked against real hardware behavior (e.g. a video
+    // recording of the access light) while the occupancy model itself is
+    // still being validated -- see Change log 2026-07-26.
+    //
+    // Modeled as a leaky-bucket queue (+1 per shot, continuous drain at the
+    // camera's calibrated write rate) walked through each block's
+    // PREDICTED PER-SHOT schedule (App.cpp's PredictedShotOffsetsMs /
+    // AdvanceOccupancyThroughBlock) rather than a flat per-block average --
+    // a flat average loses the real, often wildly uneven intra-block shape
+    // (e.g. a slow symmetric bracket's per-stop exposure times: 3.2s, 1.6s,
+    // 0.8s, 0.4s, 0.2s, ...) and the resulting error compounds over time.
+    // `shots`/`shotsAtMs` is the last exactly-computed checkpoint (walked up
+    // to a real shot time or the current in-flight interpolation point);
+    // real capture counts (Bracket/Single always know their exact count;
+    // Burst/BufferCapacity from the response's "captures" field) replace the
+    // prediction the moment a block's response lands, so drift can only
+    // accumulate WITHIN one in-flight block, never across the whole session.
+    struct LiveOccupancy {
+        double  shots     = 0.0;  // occupancy at shotsAtMs (last exact checkpoint)
+        int64_t shotsAtMs = 0;    // UtcNowMs() at that checkpoint
+
+        // Block currently executing (no response yet) -- SeqCamThreadProc
+        // stores a copy here right before sending so CurrentBufferOccupancy
+        // can regenerate its predicted per-shot schedule on demand. Cleared
+        // once the real response (success or error) lands.
+        bool    inFlight        = false;
+        TLBlock inFlightBlock;
+        int64_t inFlightStartMs = 0;
+    };
+    std::array<LiveOccupancy, kMaxCamTracks> m_liveOccupancy{};
+    mutable std::mutex                       m_liveOccupancyMtx;
+
+    // Current estimated occupancy for camIdx, decayed from the last tracked
+    // event to now at camModel's calibrated write rate. Returns -1 when
+    // camModel has no card_write_calibration yet (nothing to show).
+    double CurrentBufferOccupancy(int camIdx, std::string_view camModel) const;
+
     // Resolves a camera track's live model name for BlockDurMs()/ArmEstMs()
     // per-model lookups. Two overloads: by position among camera tracks only
     // (0-based, top-to-bottom -- same numbering as BuildBlockCmd's camIdx and
@@ -450,6 +587,14 @@ private:
     // an empty camModel as "use the generic/fallback formula".
     std::string CamModelForPos(int camPos) const;
     std::string CamModelForTrackIndex(int ti) const;
+
+    // True if a camera with this GUID is in the current live m_cameras
+    // snapshot (i.e. actually connected right now) -- used to hide Solar
+    // Simulator elements (frame overlays, LV sliders) for a CamConfig entry
+    // whose camera has since been disconnected/returned. CamConfig entries
+    // themselves are never deleted (see camera_config table comment in
+    // Database.h) -- this only gates rendering.
+    bool IsCameraOnline(const std::string& guid) const;
 
     // Snap to Seconds: rounds so the OFFSET FROM THE NEAREST CONTACT
     // (C1/C2/C3/C4) is a whole number of seconds — matching the Relative
@@ -554,6 +699,7 @@ private:
     void AddAllBracketVariantsPreset();
     void AddBracketArmCalibrationPreset();
     void AddShutterSpeedSweepPreset();
+    void AddBufferCapacityPreset();
     int  m_presetTargetTrack = 0;  // camera track index that receives AddPhotoPreset blocks
 };
 

@@ -311,6 +311,11 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Timeline camera GUID-sort — verified on 2+ physical cameras** | **DONE 2026-07-23** (previously verified on 1 camera only) |
 | **Release v2026-07-23** | **PUBLISHED, see Change log** — About-screen EN-only + author-credit corrections (2 follow-up republishes same day) |
 | **ARM-during-buffer-write silent drop (ISO/f-number/etc. never retried)** | **DONE 2026-07-25, see Change log** — root cause of Dan Becker's filmed camera-desync report |
+| **Card write-speed / buffer-capacity calibration (retires `card_calib`)** | **DONE 2026-07-25/26, see Change log** |
+| **Pipe-timeout unification (`BlockSrvTimeoutMs`) — fixes cascading disconnect on long Burst/Single/Bracket** | **DONE 2026-07-26, see Change log** |
+| **Sentinel-hold `shoot` false `ok:false` on successful Burst** | **DONE 2026-07-26, see Change log** |
+| **Buffer-occupancy model — per-shot leaky bucket + live "Buf" diagnostic column** | **DONE 2026-07-26 (architecture), WR values still underestimated — see Change log "Known open issues"** |
+| **SS silently drifting upward on long exposures** | **OPEN — `PriorityKey` hypothesis tested and ruled out 2026-07-26, root cause unknown, see Change log** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -1086,6 +1091,111 @@ implemented. Per explicit product decision: the WB block's purpose is
 operator guidance (the timeline should reflect the hardware's real
 physical limits, not invite unrealistic expectations), not a substitute
 for this reactive fix — both are wanted.
+
+### 2026-07-26 — Card write-speed/buffer-capacity calibration, pipe-timeout unification, live buffer-occupancy diagnostic
+
+Follow-on from the buffer-capacity calibration feature (retiring `card_calib`,
+see previous entry): a full-sequence hardware test the same evening surfaced
+two more real bugs, plus an ongoing WR-modeling investigation that ended the
+day still open.
+
+**1. Pipe-timeout unification (`BlockSrvTimeoutMs`, `App.cpp`)**
+`SeqCamThreadProc`'s pipe read timeout only special-cased
+`BlockType::BufferCapacity` with an extended value; a plain `Burst` block
+with a long `burstDurMs` (e.g. a 25s `cont-lo` hold) still used
+`PipeClient::kIoTimeoutMs`'s flat 10s. The GUI declared "timed out — no
+response from SRV" and tore down the pipe while SRV was still correctly
+holding the shutter in the background, cascading into "not connected" for
+every following block on that track (confirmed on real hardware: several
+Bracket blocks silently skipped). Fixed by extracting `BlockSrvTimeoutMs(b)`
+— the same worst-case-processing-time formula `BuildBlockCmd` already used
+to set the SRV's own `timeout_ms`/`duration_ms` — as a single source of
+truth, and using `max(kIoTimeoutMs, BlockSrvTimeoutMs(b) + 15000)` as the
+GUI's read timeout for every block type, not just BufferCapacity.
+
+**2. Sentinel-hold `shoot` always reported `ok:false` (`CommandHandler.cpp`)**
+The duration-held sentinel pattern (`expectedCaptures=9999`,
+`holdForBurst=true`, adopted earlier for Burst blocks) means `Shoot()`
+*always* hits its internal timeout — it holds for the full `timeout_ms`,
+never reaches 9999 captures by design. The plain `shoot` command's handler
+(unlike `buffer_capacity_calib`, which already checked `actualCount` instead
+of `Shoot()`'s return value) still branched on that always-false return,
+so every Burst block in the app — not just calibration — was reported as a
+failure to the sequencer even when it fired every shot correctly (confirmed:
+a 122-shot `cont-lo` hold logged `ok:false,"err":"timeout"`). Fixed by
+threading `actualCaptures` through the `shoot` handler and treating
+`count==9999` (the sentinel) with `actualCaptures>=1` as success, returning
+the real capture count as `"captures"` instead of the sentinel value.
+
+**3. `PriorityKey` force-recheck — hypothesis tested, disproved, kept anyway**
+Same hardware session: SS silently drifted upward on its own between a
+confirmed ARM and the next `shoot` (e.g. "8s" confirmed via `GetPropRaw`,
+then "15.0s" on the very next `status` poll ~3s later, zero commands sent in
+between; the following `shoot` then timed out mid-exposure since it was
+still waiting on a 13s budget for what turned out to be a real 15s
+exposure). Leading hypothesis: `PriorityKey` (PC Remote priority) is
+cached forever after its first successful set and never re-verified, so a
+silent lapse would go undetected while letting the physical dial move other
+properties. Added `SetPropAndVerify(..., forceRecheck)`: a cache hit still
+costs one live `GetPropRaw` before being trusted; `SetPCRemotePriority()` is
+the only caller that passes `forceRecheck=true` (every other property keeps
+the original cache-forever behavior). Re-tested: `PriorityKey` logged
+`(cached, live-verified)` on every single check for the whole run — it never
+lapsed — yet SS drifted again anyway (confirmed visually by the operator,
+not just in the log). **Root cause still unknown** — this was a reasonable,
+cheap, safe hypothesis test, not a real fix; SS drift remains an open,
+safety-relevant bug (silent wrong exposure time, no error surfaced) for
+next session.
+
+**4. Buffer-occupancy model rewritten twice — group-based → continuous → per-shot leaky bucket**
+`ComputeWrMsPerBlock`/`WrEstMs` (the WR gray-block predictor) originally
+grouped shots between ARM transitions and compared against real elapsed
+group time — confirmed on hardware to badly underpredict an isolated block
+(a 25s `cont-lo` burst predicted ~0 WR; the camera actually rejected the
+next ARM for ~35s). Rewritten as a continuous virtual "shots pending write"
+occupancy carried across every block (not reset at group boundaries),
+clamped to `buffer_capacity_calibration`'s ceiling — fixed the architecture
+but was still fed a flat per-block average shot-rate estimate
+(`BlockShotCount`), which loses a slow bracket's real, wildly uneven
+per-stop timing (e.g. a symmetric 1EV bracket: 3.2s/1.6s/0.8s/0.4s/0.2s/…)
+and compounds error over elapsed time. Rewritten again as a per-shot
+leaky-bucket walk: `PredictedShotOffsetsMs(blk)` generates each shot's
+predicted timestamp within a block (Bracket reuses `BracketExposureSumMs`'s
+exact per-stop physics; Burst/BufferCapacity fall back to flat
+`DriveFpsEstimate` spacing, no analytic schedule available for continuous
+drive); `AdvanceOccupancyThroughBlock(...)` walks that list applying
+`occupancy = max(0, occupancy − μ·Δt) + 1` per shot, substituting the real
+capture count (exact for Single/Bracket, from the response's `"captures"`
+field for Burst/BufferCapacity) once known. The same function now drives
+both the pre-run Timeline WR prediction shape and a new **live diagnostic**.
+
+**5. Live "Buf" column (TEMPORARY diagnostic, camera status table)**
+Added `App::CurrentBufferOccupancy(camIdx, camModel)` + `LiveOccupancy`
+per-camera state (`m_liveOccupancy`, real-time, separate from the pre-run
+Timeline prediction): `SeqCamThreadProc` marks a block in-flight right
+before sending its command (storing a copy of the block + real start time),
+so the display can walk `PredictedShotOffsetsMs` up to "now" instead of
+freezing for the whole duration of a long-held Burst. The block's response
+(or a pipe error) commits the exact real count via the same
+`AdvanceOccupancyThroughBlock` call. Replaces the "Mode" row in the 4-column
+camera status table — Mode is always "M" for the eclipse sequence and was
+never actually operator-relevant, per explicit product decision — so the
+operator can visually compare the predicted value against a video recording
+of the camera. **Explicitly temporary**: exists to validate/calibrate the
+occupancy model itself, not a permanent UI feature.
+
+**Known open issues, end of session 2026-07-26, not fixed**:
+- WR block durations are confirmed **underestimated** even with the
+  per-shot leaky-bucket rewrite — the per-shot production schedule is more
+  accurate now, but the single calibrated drain constant μ
+  (`card_write_calibration`) still doesn't match the camera's real
+  post-hold settle time (the ~35s `cont-lo` case above). Per-shot timing
+  precision cannot fix a wrong physical constant; needs the dedicated
+  buffer-drain-time measurement discussed but not yet built (see prior
+  entry's "Known open bug" and this session's finding #4).
+- SS silently drifting upward on long exposures (finding #3) — root cause
+  unknown, `PriorityKey` ruled out. Reproducible on real hardware,
+  safety-relevant (wrong exposure with no surfaced error).
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
