@@ -447,19 +447,6 @@ bool CameraController::SetPropRaw(unsigned code, unsigned type, long long value,
     return err == 0;
 }
 
-bool CameraController::SetPropCached(unsigned code, unsigned type, long long value,
-                                      const wchar_t* desc) {
-    uint32_t k = static_cast<uint32_t>(code);
-    auto it = m_propSetCache.find(k);
-    if (it != m_propSetCache.end() && it->second == value) {
-        Logf(L"Skip %-26s = 0x%llX (cached)", desc ? desc : L"?", (unsigned long long)value);
-        return true;
-    }
-    bool ok = SetPropRaw(code, type, value, desc);
-    if (ok) m_propSetCache[k] = value;
-    return ok;
-}
-
 bool CameraController::SetPropAndVerify(uint32_t code, uint32_t dataType, long long value,
                                          const wchar_t* desc, int maxWaitMs) {
     if (!m_connected) return false;
@@ -713,9 +700,19 @@ uint32_t CameraController::NearestShutterSpeed(uint32_t targetRaw) {
 
 // ─── Exposure setters ─────────────────────────────────────────────────────────
 
+// Every SetPropAndVerify call below shares this budget with DriveMode
+// (kDriveModeVerifyMs in CommandHandler.cpp): a property write rejected while
+// the camera is still flushing the previous capture's buffer to card is the
+// same busy condition regardless of which property it is, so it needs the
+// same retry window, not a shorter one. Fire-and-forget SetPropCached (no
+// retry) silently dropped these writes during buffer-clear — see CLAUDE.md
+// Change log entry on ARM-during-buffer-write.
+static constexpr int kExposurePropVerifyMs = 6000;
+
 bool CameraController::SetPCRemotePriority() {
-    return SetPropCached(SDK::CrDeviceProperty_PriorityKeySettings,
-                         SDK::CrDataType_UInt16, SDK::CrPriorityKey_PCRemote, L"PriorityKey");
+    return SetPropAndVerify(SDK::CrDeviceProperty_PriorityKeySettings,
+                            SDK::CrDataType_UInt16, SDK::CrPriorityKey_PCRemote,
+                            L"PriorityKey", kExposurePropVerifyMs);
 }
 
 bool CameraController::SetExposureMode(const wchar_t* mode) {
@@ -723,8 +720,9 @@ bool CameraController::SetExposureMode(const wchar_t* mode) {
     if      (!wcscmp(mode, L"P")) val = SDK::CrExposure_P_Auto;
     else if (!wcscmp(mode, L"A")) val = SDK::CrExposure_A_AperturePriority;
     else if (!wcscmp(mode, L"S")) val = SDK::CrExposure_S_ShutterSpeedPriority;
-    return SetPropCached(SDK::CrDeviceProperty_ExposureProgramMode,
-                         SDK::CrDataType_UInt32, val, L"ExposureMode");
+    return SetPropAndVerify(SDK::CrDeviceProperty_ExposureProgramMode,
+                            SDK::CrDataType_UInt32, val, L"ExposureMode",
+                            kExposurePropVerifyMs);
 }
 
 bool CameraController::SetFocusMode(const wchar_t* mode) {
@@ -733,8 +731,9 @@ bool CameraController::SetFocusMode(const wchar_t* mode) {
     else if (!wcscmp(mode, L"AF-C")) val = SDK::CrFocus_AF_C;
     else if (!wcscmp(mode, L"AF-A")) val = SDK::CrFocus_AF_A;
     else if (!wcscmp(mode, L"DMF"))  val = SDK::CrFocus_DMF;
-    return SetPropCached(SDK::CrDeviceProperty_FocusMode,
-                         SDK::CrDataType_UInt16, val, L"FocusMode");
+    return SetPropAndVerify(SDK::CrDeviceProperty_FocusMode,
+                            SDK::CrDataType_UInt16, val, L"FocusMode",
+                            kExposurePropVerifyMs);
 }
 
 bool CameraController::SetShutterSpeed(const wchar_t* value) {
@@ -750,29 +749,27 @@ bool CameraController::SetISO(int iso) {
     uint32_t actual = NearestFromList32log(SDK::CrDeviceProperty_IsoSensitivity,
                                            static_cast<uint32_t>(iso));
     Logf(L"ISO: %d → %u", iso, actual);
-    return SetPropCached(SDK::CrDeviceProperty_IsoSensitivity,
-                         SDK::CrDataType_UInt32, actual, L"ISO");
+    return SetPropAndVerify(SDK::CrDeviceProperty_IsoSensitivity,
+                            SDK::CrDataType_UInt32, actual, L"ISO",
+                            kExposurePropVerifyMs);
 }
 
 bool CameraController::SetFNumber(float f) {
     uint32_t target = static_cast<uint32_t>(f * 100.0f + 0.5f);
     uint32_t actual = NearestFromList16(SDK::CrDeviceProperty_FNumber, target);
     Logf(L"FNumber: F/%.1f → F/%.2f", f, actual / 100.0);
-    return SetPropCached(SDK::CrDeviceProperty_FNumber,
-                         SDK::CrDataType_UInt16, actual, L"FNumber");
-}
-
-bool CameraController::IsPropCached(uint32_t code, long long value) const {
-    auto it = m_propSetCache.find(code);
-    return it != m_propSetCache.end() && it->second == value;
+    return SetPropAndVerify(SDK::CrDeviceProperty_FNumber,
+                            SDK::CrDataType_UInt16, actual, L"FNumber",
+                            kExposurePropVerifyMs);
 }
 
 bool CameraController::SetStoreDestination(const wchar_t* dest) {
     uint32_t val = SDK::CrStillImageStoreDestination_MemoryCard;
     if      (!wcscmp(dest, L"pc"))   val = SDK::CrStillImageStoreDestination_HostPC;
     else if (!wcscmp(dest, L"both")) val = SDK::CrStillImageStoreDestination_HostPCAndMemoryCard;
-    return SetPropCached(SDK::CrDeviceProperty_StillImageStoreDestination,
-                         SDK::CrDataType_UInt16, val, L"StoreDestination");
+    return SetPropAndVerify(SDK::CrDeviceProperty_StillImageStoreDestination,
+                            SDK::CrDataType_UInt16, val, L"StoreDestination",
+                            kExposurePropVerifyMs);
 }
 
 // ─── Shoot ────────────────────────────────────────────────────────────────────

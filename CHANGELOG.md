@@ -2,6 +2,11 @@
 
 ---
 
+## 2026-07-25
+
+### Dan Becker
+- Found (by filming the camera and the app running side by side) that exposure settings sent right after a shot - while the camera was still writing the previous shot(s) to the memory card - could be silently dropped, leaving the next shot fired with the old ISO or aperture instead of the one just requested. Traced to a shortcut in how those particular settings were sent: unlike shutter speed and drive mode, which already retried automatically until the camera confirmed the change, ISO/aperture/exposure mode/focus mode/storage destination were only ever tried once and never checked. All of these now retry the same way shutter speed already did, waiting for the camera to confirm before giving up - closes the gap that caused the desync
+
 ## 2026-07-23
 
 ### mgr Maciej Szupiluk

@@ -133,7 +133,6 @@ public:
     bool SetISO(int iso);
     bool SetFNumber(float f);
     bool SetStoreDestination(const wchar_t* dest); // "card","pc","both"
-    bool IsPropCached(uint32_t code, long long value) const; // true → no SDK call needed
 
     // ── Live View ────────────────────────────────────────────────────────────
     // StartLiveView enables the camera's LV stream and creates named shared memory
@@ -163,7 +162,6 @@ private:
     void Logf(const wchar_t* fmt, ...);
 
     bool     SetPropRaw(unsigned code, unsigned type, long long value, const wchar_t* desc);
-    bool     SetPropCached(unsigned code, unsigned type, long long value, const wchar_t* desc);
     uint32_t NearestFromList16(unsigned propCode, uint32_t target);
     uint32_t NearestFromList32log(unsigned propCode, uint32_t target);
     uint32_t ParseShutterSpeedToRaw(const wchar_t* value);

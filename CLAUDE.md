@@ -142,12 +142,9 @@ struct TLTrack {
 
 ## Property cache (m_propSetCache)
 
-After `Connect()`, `WarmCache()` is called — it reads all current camera values into `m_propSetCache`. Subsequent `Set*` calls check the cache before calling the SDK:
+After `Connect()`, `WarmCache()` is called — it reads all current camera values into `m_propSetCache`. Every `Set*` call goes through **SetPropAndVerify** (`SetPropCached` was removed 2026-07-25 — see Change log): hit → `Skip (cached)`, no SDK call; miss → SetPropRaw + polling `GetPropRaw` for confirmation (event-driven wait on `OnPropertyChanged`, bounded retry) + cache update after confirm; genuine timeout → returns `false`, caller must not assume applied.
 
-- **SetPropCached** — hit → `Skip (cached)`, no SDK call; miss → SetPropRaw + cache update
-- **SetPropAndVerify** — hit → skip; miss → SetPropRaw + polling `GetPropRaw` for confirmation + cache update after confirm; retry at mid-interval
-
-Used by: SetPCRemotePriority, SetExposureMode, SetISO, SetFNumber, SetFocusMode, SetStoreDestination → `SetPropCached`; SetShutterSpeed (3s), DriveMode bracket/burst/single (2s) → `SetPropAndVerify`.
+Used by: SetPCRemotePriority, SetExposureMode, SetISO, SetFNumber, SetFocusMode, SetStoreDestination (6s budget, `kExposurePropVerifyMs`); SetShutterSpeed (3s); DriveMode bracket/burst/single (6s, `kDriveModeVerifyMs`).
 
 ## Pipe protocol (JSON Lines)
 
@@ -313,6 +310,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **bracket_calibration restructure (model,count,ev) → (model,count) + factory-default calib DB** | **DONE 2026-07-22, see Change log** |
 | **Timeline camera GUID-sort — verified on 2+ physical cameras** | **DONE 2026-07-23** (previously verified on 1 camera only) |
 | **Release v2026-07-23** | **PUBLISHED, see Change log** — About-screen EN-only + author-credit corrections (2 follow-up republishes same day) |
+| **ARM-during-buffer-write silent drop (ISO/f-number/etc. never retried)** | **DONE 2026-07-25, see Change log** — root cause of Dan Becker's filmed camera-desync report |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -1038,6 +1036,56 @@ move an already-published tag to a new commit, `gh release delete <tag>
 the 2026-07-20 release (see below) — then recreate the tag on the new
 commit, push, and `gh release create` from scratch. Don't try to move a
 tag under an existing release by deleting/recreating it manually.
+
+### 2026-07-25 — ARM-during-buffer-write silent drop (SetPropCached had zero retry)
+
+Reported by Dan Becker, who tests by filming the camera and the GUI
+simultaneously: when an ARM section lands on the timeline while the camera
+is still flushing the previous capture's buffer to card, exposure settings
+sometimes silently fail to apply — the camera fires the next block with
+stale ISO/f-number. Root-caused to an asymmetry between two property-write
+paths in `CameraController.cpp`:
+
+- `SetShutterSpeed` and DriveMode already went through `SetPropAndVerify` —
+  event-driven retry (wakes on `OnPropertyChanged`, which fires the instant
+  `MediaSLOT_WritingState` flips writing→idle) bounded by a real budget
+  (3s / `kDriveModeVerifyMs`=6s). These survive a busy-buffer window.
+- `SetISO`, `SetFNumber`, `SetExposureMode`, `SetFocusMode`,
+  `SetStoreDestination`, `SetPCRemotePriority` went through `SetPropCached`
+  instead — a **single** `SetDeviceProperty` attempt, no retry, no
+  verification beyond the immediate `err==0` check. `sendArm()`
+  (`App.cpp`) fires the `arm` pipe command the instant the previous
+  `shoot`/`bracket` request returns — i.e. right when the camera is most
+  likely still writing — so these six properties hit the busy window on
+  almost every multi-block sequence and were silently dropped with no
+  retry and no error surfaced.
+
+Compounding it: `CommandHandler`'s `shoot`/`bracket`/`arm` handlers only
+folded `SetShutterSpeed`'s return value into the `armed` gate added
+2026-07-12 — `SetISO`/`SetFNumber`/etc.'s return values were never checked
+at all, so even a hard failure wouldn't have surfaced as `arm_failed`.
+
+**Fix**: removed `SetPropCached` entirely (and `IsPropCached`, its only
+other caller) — all six properties now go through `SetPropAndVerify` with
+a new `kExposurePropVerifyMs`=6000ms budget, matching `kDriveModeVerifyMs`
+on the reasoning that a property rejected for "camera busy clearing
+buffer" is the same underlying condition regardless of which property it
+is, so it needs the same retry window rather than a shorter guessed one.
+All three CommandHandler call sites (`shoot`/`bracket`/`arm`) now fold
+every one of these calls' return values into `armed`, closing the gap.
+`SetStoreDestination`'s old manual `IsPropCached` + fixed `Sleep(300/200)`
+dance is gone too — redundant now that the call itself blocks until
+confirmed.
+
+This is a correctness/reactive fix only (retry-until-confirmed). It does
+not address *when* ARM is attempted — a proactive fix (predicting
+buffer-clear time from shot count + per-camera/card calibration, to delay
+scheduling the ARM block until the camera is expected to be listening) is
+planned separately as a new timeline "WB" (Write Buffer) block, not yet
+implemented. Per explicit product decision: the WB block's purpose is
+operator guidance (the timeline should reflect the hardware's real
+physical limits, not invite unrealistic expectations), not a substitute
+for this reactive fix — both are wanted.
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 

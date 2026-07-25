@@ -745,28 +745,20 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
     if (cmd == L"shoot") {
         if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
 
-        cam->SetPCRemotePriority();
-
         // Tracks whether every exposure/drive property the camera was asked to
-        // change actually confirmed — SetShutterSpeed/SetPropAndVerify can now
-        // genuinely fail (busy flushing the previous capture's buffer) instead
-        // of silently proceeding with a stale value.
+        // change actually confirmed — SetPropAndVerify can now genuinely fail
+        // (busy flushing the previous capture's buffer) instead of silently
+        // proceeding with a stale value.
         bool armed = true;
-        if (JHas(req, L"mode"))  cam->SetExposureMode(JStr(req, L"mode").c_str());
-        if (JHas(req, L"focus")) cam->SetFocusMode(JStr(req, L"focus").c_str());
-        if (JHas(req, L"iso"))   cam->SetISO(JInt(req, L"iso"));
-        if (JHas(req, L"f"))     cam->SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss") && !cam->SetShutterSpeed(JStr(req, L"ss").c_str()))
-            armed = false;
+        if (!cam->SetPCRemotePriority()) armed = false;
+        if (JHas(req, L"mode")  && !cam->SetExposureMode(JStr(req, L"mode").c_str())) armed = false;
+        if (JHas(req, L"focus") && !cam->SetFocusMode(JStr(req, L"focus").c_str()))   armed = false;
+        if (JHas(req, L"iso")   && !cam->SetISO(JInt(req, L"iso")))                   armed = false;
+        if (JHas(req, L"f")     && !cam->SetFNumber(JFlt(req, L"f")))                 armed = false;
+        if (JHas(req, L"ss")    && !cam->SetShutterSpeed(JStr(req, L"ss").c_str()))   armed = false;
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
-        // Resolve destination code to check cache before calling SDK
-        uint32_t storeVal = 0x0002; // MemoryCard default
-        if (store == L"pc")   storeVal = 0x0001;
-        else if (store == L"both") storeVal = 0x0003;
-        bool storeWasCached = cam->IsPropCached(0x0119, (long long)storeVal);
-        cam->SetStoreDestination(store.c_str());
-        if (!storeWasCached) ::Sleep(300); // only wait if destination actually changed
+        if (!cam->SetStoreDestination(store.c_str())) armed = false;
 
         int count = JHas(req, L"count") ? JInt(req, L"count", 1) : 1;
         if (count < 1) count = 1;
@@ -864,19 +856,17 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         uint8_t bracketOrderVal = (orderStr == L"zero" || orderStr == L"0-to-minus-to-plus")
                                   ? 0x01 : 0x02;
 
-        cam->SetPCRemotePriority();
-
         // Tracks whether every exposure/drive property actually confirmed —
         // see equivalent comment in the "shoot" handler above.
         bool armed = true;
+        if (!cam->SetPCRemotePriority()) armed = false;
 
         // Apply optional exposure overrides
-        if (JHas(req, L"mode"))  cam->SetExposureMode(JStr(req, L"mode").c_str());
-        if (JHas(req, L"focus")) cam->SetFocusMode(JStr(req, L"focus").c_str());
-        if (JHas(req, L"iso"))   cam->SetISO(JInt(req, L"iso"));
-        if (JHas(req, L"f"))     cam->SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss") && !cam->SetShutterSpeed(JStr(req, L"ss").c_str()))
-            armed = false;
+        if (JHas(req, L"mode")  && !cam->SetExposureMode(JStr(req, L"mode").c_str())) armed = false;
+        if (JHas(req, L"focus") && !cam->SetFocusMode(JStr(req, L"focus").c_str()))   armed = false;
+        if (JHas(req, L"iso")   && !cam->SetISO(JInt(req, L"iso")))                   armed = false;
+        if (JHas(req, L"f")     && !cam->SetFNumber(JFlt(req, L"f")))                 armed = false;
+        if (JHas(req, L"ss")    && !cam->SetShutterSpeed(JStr(req, L"ss").c_str()))   armed = false;
 
         // Set bracket order
         if (cam->SupportsProperty(0x01fd))
@@ -895,8 +885,10 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         }
 
         std::wstring store = JHas(req, L"store") ? JStr(req, L"store") : L"card";
-        cam->SetStoreDestination(store.c_str());
-        ::Sleep(200);
+        if (!cam->SetStoreDestination(store.c_str())) {
+            resp = Err(L"arm_failed", L"store destination not confirmed by camera");
+            return true;
+        }
 
         int timeout = JHas(req, L"timeout_ms") ? JInt(req, L"timeout_ms") : 15000;
         int latency = 0;
@@ -1180,11 +1172,10 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         // see equivalent comment in the "shoot" handler above.
         bool armed = true;
 
-        cam->SetPCRemotePriority();
-        if (JHas(req, L"iso"))  cam->SetISO(JInt(req, L"iso"));
-        if (JHas(req, L"f"))    cam->SetFNumber(JFlt(req, L"f"));
-        if (JHas(req, L"ss") && !cam->SetShutterSpeed(JStr(req, L"ss").c_str()))
-            armed = false;
+        if (!cam->SetPCRemotePriority()) armed = false;
+        if (JHas(req, L"iso") && !cam->SetISO(JInt(req, L"iso")))   armed = false;
+        if (JHas(req, L"f")   && !cam->SetFNumber(JFlt(req, L"f"))) armed = false;
+        if (JHas(req, L"ss")  && !cam->SetShutterSpeed(JStr(req, L"ss").c_str())) armed = false;
 
         // Drive mode: bracket (ev+count) or direct drive string (single/burst)
         if (JHas(req, L"ev")) {
