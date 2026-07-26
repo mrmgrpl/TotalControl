@@ -91,6 +91,24 @@ struct BufferCapacityEntry {
     int64_t     createdMs           = 0;
 };
 
+// Drive-mode nominal fps — one row per (camModel, drive). Real, millisecond-
+// precision measurement (from AnalyzeBufferCapacity's per-shot capture
+// timestamps, the same fastFps already returned by buffer_capacity_calib)
+// instead of App::DriveFpsEstimate()'s old hardcoded 3/5/8/10 guess table.
+// Feeds App::BlockShotCount()/PredictedShotOffsetsMs()'s pre-run PREDICTION
+// of how many shots a Burst/BufferCapacity block will fire -- a live run
+// always corrects with the real captures count regardless, so this only
+// affects Timeline block-width display and the WR/ARM bar predictions drawn
+// before a sequence actually runs. Same one-row-per-key, no-averaging
+// rationale as CardCalibEntry (operator-run one-off test, re-run after a
+// card or lens swap that changes real continuous-drive throughput).
+struct DriveFpsEntry {
+    std::string camModel;
+    std::string drive;      // "cont-lo" | "cont-mid" | "cont-hi" | "cont-hi-plus"
+    double      fps        = 0.0;
+    int64_t     createdMs  = 0;
+};
+
 // ─── Named snapshot ───────────────────────────────────────────────────────────
 
 struct SnapshotInfo {
@@ -154,6 +172,12 @@ public:
     void            CreateBufferCapacityTable();
     bool            SaveBufferCapacity(const BufferCapacityEntry& entry);  // false = sqlite3_step didn't return SQLITE_DONE
     std::vector<BufferCapacityEntry> LoadBufferCapacityAll() const;
+
+    // Drive-mode fps calibration (TotalControlConfig.db) — one row per
+    // (model, drive), feeds App::DriveFpsEstimate().
+    void            CreateDriveFpsTable();
+    bool            SaveDriveFps(const DriveFpsEntry& entry);  // false = sqlite3_step didn't return SQLITE_DONE
+    std::vector<DriveFpsEntry> LoadDriveFpsAll() const;
 
     // named timeline snapshots (TotalControlConfig.db)
     void                      CreateSnapshotTables();

@@ -1000,6 +1000,68 @@ std::vector<BufferCapacityEntry> Database::LoadBufferCapacityAll() const {
     return result;
 }
 
+// ─── Drive-mode fps calibration ──────────────────────────────────────────────
+// One row per (model, drive) -- see DriveFpsEntry comment in Database.h.
+
+static constexpr const char* kCreateDriveFps = R"SQL(
+    CREATE TABLE IF NOT EXISTS drive_fps_calibration (
+        cam_model  TEXT    NOT NULL,
+        drive      TEXT    NOT NULL,
+        fps        REAL    NOT NULL,
+        created_ms INTEGER NOT NULL,
+        PRIMARY KEY (cam_model, drive)
+    );
+)SQL";
+
+void Database::CreateDriveFpsTable() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateDriveFps);
+}
+
+bool Database::SaveDriveFps(const DriveFpsEntry& entry) {
+    assert(m_db != nullptr);
+    assert(!entry.camModel.empty());
+    assert(!entry.drive.empty());
+    if (!m_db) return false;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+        "INSERT OR REPLACE INTO drive_fps_calibration"
+        " (cam_model,drive,fps,created_ms)"
+        " VALUES (?,?,?,?);",
+        -1, &st, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text  (st, 1, entry.camModel.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text  (st, 2, entry.drive.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_double(st, 3, entry.fps);
+    sqlite3_bind_int64 (st, 4, entry.createdMs);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+std::vector<DriveFpsEntry> Database::LoadDriveFpsAll() const {
+    assert(m_db != nullptr);  // DB must be open to load calibration
+    std::vector<DriveFpsEntry> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT cam_model,drive,fps,created_ms FROM drive_fps_calibration;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        DriveFpsEntry e;
+        const auto* p = sqlite3_column_text(st, 0);
+        e.camModel  = p ? reinterpret_cast<const char*>(p) : "";
+        const auto* d = sqlite3_column_text(st, 1);
+        e.drive     = d ? reinterpret_cast<const char*>(d) : "";
+        e.fps       = sqlite3_column_double(st, 2);
+        e.createdMs = sqlite3_column_int64 (st, 3);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
 // ─── JPL Horizons ephemeris cache ────────────────────────────────────────────
 
 static constexpr const char* kCreateEph = R"SQL(

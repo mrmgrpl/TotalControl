@@ -1191,6 +1191,18 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         if (JHas(req, L"f")   && !cam->SetFNumber(JFlt(req, L"f"))) armed = false;
         if (JHas(req, L"ss")  && !cam->SetShutterSpeed(JStr(req, L"ss").c_str())) armed = false;
 
+        // Optional per-call override of the DriveMode confirm budget, default
+        // unchanged (kDriveModeVerifyMs) for normal production ARM calls.
+        // Lets a calibration tool request one long-budget call (e.g. 120000ms)
+        // instead of an outer retry loop bounded by kDriveModeVerifyMs per
+        // attempt — SetPropAndVerify's own internal wait is already event-
+        // driven (wakes on OnPropertyChanged, ≤500ms poll cap), so one call
+        // with a large budget reports the real confirm latency directly,
+        // far more precisely than timing repeated short-budget attempts.
+        int verifyMs = JHas(req, L"verify_ms") ? JInt(req, L"verify_ms", kDriveModeVerifyMs)
+                                                : kDriveModeVerifyMs;
+        if (verifyMs < 100) verifyMs = 100;  // sane floor against a bad/zero override
+
         // Drive mode: bracket (ev+count) or direct drive string (single/burst)
         if (JHas(req, L"ev")) {
             std::wstring evStr = JStr(req, L"ev");
@@ -1205,14 +1217,14 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             if (br) {
                 uint32_t driveCode = single ? br->single_code : br->cont_code;
                 if (!cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
-                                           L"DriveMode(arm-bracket)", kDriveModeVerifyMs))
+                                           L"DriveMode(arm-bracket)", verifyMs))
                     armed = false;
             }
         } else if (JHas(req, L"drive")) {
             std::wstring driveStr = JStr(req, L"drive");
             long long driveRaw = 0;
             if (EncodePropValue(0x010e, driveStr, driveRaw) && driveRaw != 0 &&
-                !cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode(arm)", kDriveModeVerifyMs))
+                !cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode(arm)", verifyMs))
                 armed = false;
         }
 

@@ -123,6 +123,7 @@ private:
     void RenderWhatsNewModal();      // separate modal, opened via About menu -> What's New
     void RenderCameraSetupModal();   // separate modal, opened via About menu -> Camera Setup
     void RenderOptionsWindow();      // floating Options window (API keys, etc.)
+    void RenderWriteRateCalibWindow(); // floating write-rate calibration window (manual, 4-speed)
     void RenderCloseConfirmModal();  // "close TotalControl?" guard against accidental exit
     void RenderSequencerButtons();   // TEST RUN / STOP / RUN / STOP RUN in Col1
     void RenderLeftColumn();         // new single 270px left column
@@ -142,6 +143,10 @@ private:
     void ResyncTimelineAnchors();
     void DeleteSelectedBlock();
     void DuplicateSelectedBlock();
+    void ExtendSelectionArrow(int dir);   // dir: +1 = right, -1 = left
+    void SnapshotForUndo();               // call right before a mutating Timeline action
+    void UndoLastTimelineAction();        // Ctrl+Z
+    void DistributeSelectedBlocksEvenly(); // "Distribute Evenly" button (Block Inspector)
 
     // Multi-select bulk edit: after the Inspector writes a new value for
     // capture parameter `field` onto the primary selected block, this pushes
@@ -164,6 +169,7 @@ private:
     bool m_showWhatsNew    = false;
     bool m_showCameraSetup = false;
     bool m_showOptions     = false;
+    bool m_showWrCalibWnd  = false;
     // ── Close confirmation guard ────────────────────────────────────────────
     bool m_showCloseConfirm = false; // WM_CLOSE deferred to this modal instead of closing immediately
     bool m_closeConfirmed   = false; // set true right before re-issuing the real close
@@ -377,6 +383,19 @@ private:
     // selection (or nothing selected) -- everything single-select already did
     // keeps working unchanged; multi-select is additive on top of it.
     std::vector<std::pair<int, int>> m_multiSel;
+    // Shift+Arrow range selection: anchor is the block the mouse originally
+    // selected (stays fixed); extent is the far end, moved one block per
+    // arrow press (see ExtendSelectionArrow). Reset to -1 whenever a plain
+    // mouse click picks a new primary block (RenderTimelineBottom).
+    int                  m_shiftSelAnchorTrack  = -1;
+    int                  m_shiftSelAnchorBlock  = -1;
+    int                  m_shiftSelExtentBlock  = -1;
+    // Ctrl+Z undo: single last-known-good snapshot of ALL tracks, taken right
+    // before a mutating Timeline action (delete/duplicate/drag/drop-insert).
+    // Deliberately NOT a full history stack (explicit request to keep this
+    // simple) -- one level only, no redo.
+    std::vector<TLTrack> m_undoTracks;
+    bool                 m_undoValid  = false;
     int64_t              m_tlViewStart = -1;
     int64_t              m_tlViewEnd   = -1;
     // Last C2/C3 seen by ResyncTimelineAnchors() -- lets it tell "contacts
@@ -505,6 +524,151 @@ private:
 
     void LoadCardCalibCache();       // DB -> m_cardCalibCache
     void LoadBufferCapacityCache();  // DB -> m_bufferCapacityCache
+
+    // ── Drive-mode fps calibration ────────────────────────────────────────────
+    // camModel -> drive -> real measured fps (millisecond precision, from
+    // AnalyzeBufferCapacity's per-shot capture timestamps -- see DriveFpsEntry
+    // in Database.h for why this replaces DriveFpsEstimate()'s old hardcoded
+    // guess table). Populated via "Measure <drive> FPS" in the Write-Rate
+    // Calibration window, which runs buffer_capacity_calib for a short,
+    // non-overflowing hold and saves its returned fast_fps directly.
+    std::map<std::string, std::map<std::string, double>> m_driveFpsCalibCache;
+    void LoadDriveFpsCalibCache();   // DB -> m_driveFpsCalibCache
+    // Real fps if calibrated for (camModel, drive); else the old rough guess.
+    // Member (not static) so it can consult m_driveFpsCalibCache. Only ever
+    // feeds PRE-RUN prediction (BlockShotCount / PredictedShotOffsetsMs) --
+    // a live run always corrects with the real captures count instead.
+    float DriveFpsEstimate(const std::string& drive, std::string_view camModel) const;
+    // How many frames a block is predicted to fire (exact for Single/
+    // Bracket; fps x duration estimate for Burst/BufferCapacity, via
+    // DriveFpsEstimate) -- feeds ComputeWrMsPerBlock's occupancy walk.
+    int BlockShotCount(const TLBlock& b, std::string_view camModel) const;
+    // Predicted per-shot timestamp offsets (ms, relative to a block's own
+    // start) for the live buffer-occupancy leaky-bucket model. Bracket reuses
+    // BracketExposureSumMs's exact per-stop physics; Burst/BufferCapacity
+    // fall back to flat DriveFpsEstimate spacing (no analytic schedule
+    // possible for continuous drive) -- a real capture count still corrects
+    // the total once a block's response lands, just not the intra-block shape.
+    std::vector<int64_t> PredictedShotOffsetsMs(const TLBlock& b, std::string_view camModel) const;
+    // Advances a buffer-occupancy checkpoint (shots, atMs) through block
+    // blk's predicted per-shot schedule, applying the leaky-bucket
+    // recurrence at each shot up to uptoMs. If realShotCount >= 0, the
+    // predicted list is truncated/extended to that count first -- see
+    // App.cpp definition for full detail.
+    void AdvanceOccupancyThroughBlock(const TLBlock& blk, int64_t blockStartMs,
+                                       int realShotCount, double writeFps,
+                                       double capacityShots, int64_t uptoMs,
+                                       double& shots, int64_t& atMs,
+                                       std::string_view camModel) const;
+
+    // ── Drive-mode fps calibration UI state ───────────────────────────────────
+    // Companion measurement to write-rate: how many frames/sec each drive
+    // mode (LO/MID/HI/HI+) actually fires, BEFORE the buffer starts
+    // throttling it -- needed because DriveFpsEstimate's old hardcoded guess
+    // (whole-number 3/5/8/10) is used to predict Burst block widths on the
+    // Timeline, and a wrong fps there means the predicted block length never
+    // matches what the camera actually does, independent of the write-rate
+    // question entirely. Uses buffer_capacity_calib's own fast_fps (already
+    // millisecond-precision, from real per-shot capture timestamps) with a
+    // short (non-overflowing) hold -- one button per drive, no manual
+    // "add sample" step needed since fast_fps is already a clean, direct
+    // measurement.
+    //
+    // m_driveFpsCalibDurSec is an operator-adjustable UI field, NOT a fixed
+    // constant: a flat 10s (the original guess) overflows HI+'s buffer on
+    // real hardware (HI+ ~10fps x 10s = ~100 shots vs. a 65-shot capacity,
+    // confirmed 2026-07-26 -- the camera audibly/visibly dropped into
+    // write-limited slow mode mid-test, contaminating the very baseline this
+    // test exists to measure cleanly). FireDriveFpsSample() additionally
+    // clamps the ACTUAL duration used, per drive, against known/estimated
+    // fps and buffer_capacity_shots (with a safety margin) so a bad manual
+    // value can't overflow the buffer regardless of what's typed here.
+    int                  m_driveFpsCalibDurSec = 5;
+    std::thread          m_driveFpsCalibThread;  // separate from m_wrCalibThread -- independent operation
+    std::atomic<bool>    m_driveFpsCalibRunning{false};
+    int                  m_driveFpsCalibBusyIdx = -1;  // which of the 4 drives is currently running, -1 = none
+    std::atomic<double>  m_driveFpsCalibResult{-1.0};  // -1 = no pending result, else measured fps
+    void FireDriveFpsSample(int driveIdx);  // "Measure <drive> FPS" button
+
+    // ── Write-rate calibration (manual, 4-speed) ─────────────────────────────
+    // Companion to the Buffer Capacity preset above, added after a 2026-07-26
+    // hardware cross-check: AnalyzeBufferCapacity's inflection detector infers
+    // write throughput from the shutter-firing cadence once the buffer
+    // saturates, but firing all 4 drive speeds for a fixed duration and
+    // reading the camera's own "shots still pending write" indicator directly
+    // off the body gave a drive-independent flushed-shots-per-second figure
+    // ~2.15x SLOWER than what the inflection method had stored — believed to
+    // be the actual cause of WrEstMs's known underestimation. This tool lets
+    // the operator collect samples that way and pool them into the same
+    // card_write_calibration row the Buffer Capacity preset writes.
+    struct WrCalibSample {
+        std::string drive;       // "cont-lo" | "cont-mid" | "cont-hi" | "cont-hi-plus"
+        int         durSec   = 0;
+        int         fired    = 0;   // shots actually fired (SRV response "captures")
+        int         buffered = 0;   // operator-read: still pending write at burst end
+    };
+    std::vector<WrCalibSample> m_wrCalibSamples;
+    int                        m_wrCalibDriveIdx   = 0;  // 0=lo 1=mid 2=hi 3=hi+
+    // Default 7s, not 8s: at HI+ (~9.1 shots/s measured) an 8s hold fires
+    // ~73 shots, above ILCE-7RM4A's measured 65-shot buffer_capacity_shots
+    // ceiling (see buffer_capacity_calibration) -- once the buffer actually
+    // overflows mid-test the fired-shots rate itself drops to the write-
+    // limited speed, contaminating the very rate this test is trying to
+    // isolate. 7s keeps every drive speed's fired count under the ceiling.
+    int                        m_wrCalibDurSec      = 7;
+    int                        m_wrCalibCamIdx       = 0;  // index into m_cameras
+    int                        m_wrCalibBufferedIn   = 0;
+    std::thread                m_wrCalibThread;
+    // "Set" (arm only, no shoot) vs. "Run Test" (fire the timed burst) are
+    // separate steps/buttons: SetPropAndVerify's cache is what makes a burst
+    // start immediately, and a drive-mode CHANGE (e.g. previous test picture
+    // left the camera on "single") can take up to kDriveModeVerifyMs to
+    // confirm -- doing that confirmation as part of the first "Run Test"
+    // click ate into that click's own hold window, observed on real hardware
+    // as the first click firing only 1 frame and the second (already armed,
+    // cache-hit, no confirm delay) firing the real burst.
+    std::atomic<bool>          m_wrCalibArming{false};
+    std::atomic<int>           m_wrCalibArmResult{-2};   // -2 = no attempt yet, -1 = failed, >=0 = latency ms
+    std::atomic<bool>          m_wrCalibFiring{false};
+    std::atomic<int>           m_wrCalibLastFired{-1};   // -1 = no pending result to review
+    void ArmWriteRateSample();   // "Set" button: arm drive mode + exposure, no shoot
+    void FireWriteRateSample();  // "Run Test" button: spawns m_wrCalibThread, fires one timed burst
+
+    // ── Large-backlog calibration (auto, single long-verify ARM call) ────────
+    // Companion to the short-burst/visual-reading tool above, simplified
+    // 2026-07-26 after realizing the physical backlog doesn't depend on
+    // WHICH drive mode overflows it: fires a LONG burst on the fastest drive
+    // (cont-hi-plus, to guarantee saturation quickly regardless of exact
+    // fps) well past the point buffer_capacity_shots fills, which pegs
+    // occupancy at EXACTLY buffer_capacity_shots the instant shooting stops
+    // (once saturated, firing rate = write rate, since a new shot can't be
+    // taken until an old one is evicted -- so occupancy holds steady at the
+    // ceiling for the whole saturated phase, not just "however many were
+    // fired minus however many drained"). Then ONE "arm" call (to "single")
+    // with a large verify_ms budget (not an outer retry loop) -- CommandHandler's
+    // SetPropAndVerify already retries internally, event-driven (wakes on
+    // OnPropertyChanged, <=500ms poll cap), so a single big-budget call
+    // reports the real confirm latency directly and far more precisely than
+    // timing repeated short-budget attempts from the GUI side (each bounded
+    // by kDriveModeVerifyMs, ~6-9s of dead time per attempt on real
+    // hardware). write_rate = buffer_capacity_shots / (latency_s) -- no
+    // fired-count bookkeeping needed at all once saturation is guaranteed.
+    // Produces a WrCalibSample the same way the manual tool does (fired=
+    // buffer_capacity_shots, buffered=0, durSec=settle time), so it pools
+    // into the exact same card_write_calibration save.
+    //
+    // Replaced an earlier outer-retry-loop version (kept the same member
+    // names/shapes) after a real hardware log (2026-07-26) showed a cont-lo
+    // 22s/99-shot backlog settled in ~22.5-23s across 4 reproducible
+    // repeats, while the short-burst-calibrated write_rate (1.8929/s, from
+    // 7s samples) predicted 30.3s -- a real ~30% overestimate the
+    // short-sample tool can't see, since it never builds a backlog anywhere
+    // near that large.
+    int                m_wrCalibBacklogDurSec = 20;
+    std::atomic<bool>  m_wrCalibBacklogRunning{false};
+    std::atomic<int>   m_wrCalibBacklogFired{-1};      // -1 = no result yet; else buffer_capacity_shots used
+    std::atomic<int>   m_wrCalibBacklogSettleMs{-1};   // -1 = no result yet, -2 = never settled within the cap
+    void FireWriteRateBacklogTest();  // "Run Large-Backlog Test" button
     // WrEstMs: card-write-buffer drain time for a given virtual occupancy
     // (shots currently estimated "pending write") at this camera's
     // calibrated sustained write rate. Returns 0 when camModel isn't
@@ -661,11 +825,29 @@ private:
     int                    m_dragHorizonCamIdx = -1; // index of camera being dragged in Horizon mode
 
     // ── Live View overlay on solar simulator ──────────────────────────────────
-    // Frames arrive via named SHM (TotalControl_LV_<ci>), decoded JPEG→RGBA by
-    // m_lvThread, uploaded to D3D11 by CreateLvTextures (render thread only),
-    // rendered in RenderSolarView as alpha-blended quad matching camera FOV rect.
+    // Frames arrive via named SHM, decoded JPEG→RGBA by m_lvThread, uploaded to
+    // D3D11 by CreateLvTextures (render thread only), rendered in
+    // RenderSolarView as alpha-blended quad matching camera FOV rect.
+    // m_lvEnabled/m_lvOpacity/m_focusMagLevel/m_lvSrv/m_lvPending/m_lvNewData
+    // are all indexed by "ci" = position in m_camConfigs (persistent,
+    // GUID-keyed identity -- stable across sessions and camera-count
+    // changes). That index is NOT the same as the live SRV camera-list
+    // position (CameraController::StartLiveView's camIdx / SRV's
+    // CommandHandler::CamIndex()), which only depends on THIS session's
+    // connection order -- the two coincide only by coincidence (e.g. a
+    // single camera, or cameras always connecting in first-seen order).
+    // m_lvLiveCamIdx[ci] bridges the two: refreshed every frame by
+    // MergeCamerasIntoCamConfigs() (guid match against the live m_cameras
+    // snapshot), -1 when that config slot's camera isn't currently
+    // connected. Anything that talks to the wire protocol (the "cam" field
+    // sent to SRV, or the TotalControl_LV_<N> SHM name) must go through
+    // m_lvLiveCamIdx[ci], never send/read "ci" directly -- see the bug this
+    // fixed: with >1 camera and a discovery order different from live
+    // connection order, one camera's LV feed showed up under a different
+    // camera's slot.
     bool   m_lvEnabled[kMaxCamTracks] = {};       // derived: true when m_lvOpacity[ci] >= 0.05
     float  m_lvOpacity[kMaxCamTracks] = {};       // per-camera opacity 0–1 (persisted to DB)
+    std::atomic<int> m_lvLiveCamIdx[kMaxCamTracks]; // ci -> live SRV camIdx, -1 = offline; read by background m_lvThread
 
     // Focus Magnifier (CrDeviceProperty_Focus_Magnifier_Setting) — needed because
     // the camera only auto-triggers its live-view zoom when it senses a native
