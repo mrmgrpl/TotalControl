@@ -9388,7 +9388,7 @@ void App::RenderMenuBar() {
                 nullptr, nullptr, SW_SHOWNORMAL);
         }
         ImGui::Separator();
-        ImGui::MenuItem("v2026-07-25", nullptr, false, false);
+        ImGui::MenuItem("v2026-07-26", nullptr, false, false);
         ImGui::EndMenu();
     }
 }
