@@ -19,6 +19,56 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
 
 ---
 
+## Kolejka prac — do zrobienia (od najprostszych do najbardziej rozbudowanych)
+
+Scalone 2026-07-26 z rozproszonych wpisów niżej + z `CLAUDE.md`/pamięci
+projektu, po triage'u Andrzeja tego samego dnia. Kolejność = rosnący zakres
+pracy, nie priorytet biznesowy (WYSOKI/ŚREDNI/NISKI nadal przy każdym
+punkcie). Pełny opis + historia każdego punktu w jego własnej sekcji niżej.
+
+1. **[WYSOKI] `bracket_calibration` corruption po SS Sweep + SAVE CALIB** —
+   dodać `ss` do `SeqCalibSample`, wykluczyć/zablokować próbki spoza
+   baseline. Najmniejszy zakres: jeden bug, jeden plik (`App.cpp`).
+   → patrz "`bracket_calibration` corruption..." niżej.
+2. **[demo] Stress-test BE vs IQP przy krawędzi pasa całkowitego** — wybrać
+   lokalizację bliżej krawędzi, sprawdzić czy UI jasno komunikuje że to
+   oczekiwana różnica modeli, nie błąd. Bez zmian w kodzie z góry znanych —
+   może się z tego wyłonić drobna poprawka UI.
+   → patrz "Stress-test rozbieżności BE vs IQP..." niżej.
+3. **[NISKI] Jasny/wysokokontrastowy motyw pod silne słońce** — przegląd
+   kontrastu istniejących kolorów, ewentualnie alternatywny motyw. Bardzo
+   niski priorytet (Andrzej: "może, ale bardzo niski priorytet").
+   → patrz "Kolory symulatora słabo czytelne..." niżej.
+4. **[NISKI] Tooltips na blokach/torach/ruler samego Timeline** — wymaga
+   najpierw zaprojektowania hit-testu per element i ustalenia treści z
+   Andrzejem, dopiero potem implementacji ("dorobne poprawki" przed
+   realizacją, nie prosta kontynuacja wzorca z reszty GUI).
+   → patrz "Tooltips na blokach/torach/ruler..." niżej.
+5. **Tłumaczenie polskich komentarzy w CMake/kodzie na angielski** —
+   mechaniczne, ale globalny przegląd całego repo (CMakeLists.txt + C++);
+   zrobić jako osobny przegląd, nie przy okazji innej zmiany.
+   → patrz "CMakeLists.txt i komentarze w kodzie..." niżej.
+6. **Wykres wartości Q na osi czasu Timeline** — wymaga wyprowadzenia
+   ciągłego modelu Q(t) dla faz częściowych (magnitude/ułamek zasłonięcia z
+   elementów Besselian) + przejścia w wartość(i) Q dla totality, zweryfikowanego
+   wobec empirycznych danych NASA, zanim zacznie się rysowanie na Timeline.
+   → patrz "Wykres wartości Q na osi czasu Timeline..." niżej.
+7. **Moduł optymalizacji ekspozycji/bracketingu (Q-based, Hasinoff)** —
+   największy zakres: 6 etapów (matematyka → realny overhead z kalibracji →
+   UI → generowanie bloków → rozstrzygnięcie rozbieżności tabel Q → alert
+   Exposure Limit). Rozbić na etapy, nie robić na raz.
+   → patrz "Moduł optymalizacji ekspozycji/bracketingu..." niżej.
+
+**Anulowane 2026-07-26** (nie wchodzą do kolejki): reset stanu połączenia
+bez restartu (John Melson) — uznane za zbędne.
+
+**Zamknięte 2026-07-26 jako już zrobione inną drogą** (nie wchodzą do
+kolejki): dokończenie modelu buffer-depletion (superseded przez
+przekalibrowane `card_write_calibration`); dalsze przyspieszenie USB
+connect (obecny wynik ~0.3-1.0s/kamerę uznany za wystarczający).
+
+---
+
 ## Focus viewer
 - Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-20**
 - Typ: feature
@@ -104,7 +154,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   bezpośrednio przez Andrzeja na żywo.
 
 ## Reset stanu połączenia do "świeżo uruchomiona aplikacja" bez restartu
-- Status: proponowane
+- Status: **anulowane** (decyzja Andrzeja 2026-07-26 — niepotrzebne, zbędne)
 - Typ: feature
 - Zgłosił: John Melson
 - Opis: John próbował kilku typów połączenia zanim trafił na właściwy i chciał
@@ -193,7 +243,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   stan tej funkcji, nie zmiany w kodzie.
 
 ## Stress-test rozbieżności BE vs IQP przy krawędzi pasa całkowitego
-- Status: proponowane
+- Status: **potwierdzone do zrobienia** (Andrzej, 2026-07-26)
 - Typ: demo
 - Zgłosił: Alessandro Pessi
 - Opis: Alessandro zasugerował lokalizację bliżej krawędzi pasa całkowitego
@@ -252,7 +302,8 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   czysta korona/protuberancje, bez artefaktów tekstu).
 
 ## Kolory symulatora słabo czytelne w jasnym świetle dziennym
-- Status: proponowane
+- Status: proponowane (bardzo niski priorytet — Andrzej, 2026-07-26: "może,
+  ale bardzo niski priorytet")
 - Typ: bug (UX/accessibility)
 - Zgłosił: Alexandru Barbovschi
 - Opis: obecna paleta (ciemny motyw + subtelne odcienie korony/UI) jest słabo
@@ -264,7 +315,8 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   kontrastu istniejących elementów.
 
 ## CMakeLists.txt i komentarze w kodzie — polskie napisy zamiast angielskich
-- Status: proponowane
+- Status: **potwierdzone do zrobienia** (Andrzej, 2026-07-26: "to trzeba
+  zrobić")
 - Typ: feature (code quality / globalny przegląd)
 - Zgłosił: Alexandru Barbovschi
 - Opis: `CMakeLists.txt` zawiera polskie komunikaty/komentarze (np. `COMMENT
@@ -427,7 +479,8 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   potrzebny.
 
 ## Moduł optymalizacji ekspozycji/bracketingu (Q-based) — nowe okno/przełącznik obok Solar Simulator
-- Status: proponowane (duży zakres — do rozbicia na etapy przed startem)
+- Status: **potwierdzone do zrobienia** (Andrzej, 2026-07-26) — duży zakres,
+  do rozbicia na etapy przed startem (patrz "Proponowane etapy" niżej)
 - Typ: feature
 - Zgłosił: mgr Maciej Szupiluk (projekt)
 - Opis: nowe okno GUI albo przełącznik w Col2 obok "SKY VIEW SIMULATOR"
@@ -568,7 +621,10 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   miejsca w `RenderSolarView` (hit-test przeciągania Horizon, ramki kamer,
   Live View overlay, etykiety ramek) przełączone na lookup per-kamera
   zamiast jednej stałej dla wszystkich.
-- Status: proponowane (nie robić od razu — patrz decyzja Andrzeja niżej)
+
+## Wykres wartości Q na osi czasu Timeline (cienka linia w wierszu UTC)
+- Status: **potwierdzone do zrobienia** (Andrzej, 2026-07-26 — nadal
+  wstrzymane do osobnej sesji, patrz decyzja niżej, ale NIE anulowane)
 - Typ: feature
 - Zgłosił: mgr Maciej Szupiluk (projekt)
 - Opis: dodać do Timeline (`RenderTimelineBottom()`, App.cpp) wykres wartości Q
@@ -599,3 +655,38 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   "Moduł optymalizacji ekspozycji/bracketingu" wyżej — ten wykres to
   prawdopodobnie naturalny punkt wejścia/wizualizacja dla tamtego modułu,
   ale nie wymaga czekania na całą jego implementację.
+
+## `bracket_calibration` corruption po "Bracket SS Sweep" + "SAVE CALIB"
+- Status: proponowane (WYSOKI priorytet — bug, nie feature)
+- Typ: bug
+- Zgłosił: mgr Maciej Szupiluk (projekt, znalezione podczas kalibracji 2026-07-22)
+- Opis: `SeqCalibSample` nie śledzi, przy jakim `ss` próbka została zebrana.
+  Test "Bracket SS Sweep" (zamierzenie zmienia ss przy stałym ev, sweep
+  1/8000..8s) + kliknięcie "SAVE CALIB" po nim uśrednia próbki z drastycznie
+  różnych rzeczywistych czasów ekspozycji do jednego wiersza `(count,ev)`,
+  jakby wszystkie pochodziły z tego samego baseline ss — nadpisuje dobre
+  dane kalibracji śmieciowym uśrednieniem. Potwierdzone bezpośrednim
+  zapytaniem SQL: ILCE-7C count=3/ev=1.0ev skoczyło z ~437ms/5 powtórzeń do
+  1119ms/14 powtórzeń po jednym takim incydencie. Zdiagnozowane 2026-07-22,
+  **nie naprawione w kodzie** — obejście: nie klikać SAVE CALIB po SS Sweep.
+  Fix: dodać `ss` do `SeqCalibSample` i albo (a) wykluczać przy zapisie
+  próbki spoza baseline ss tego modelu, albo (b) całkiem zablokować SAVE
+  CALIB jako przycisk podczas/po przebiegu SS Sweep. Po fixie: użytkownik
+  musi ponownie uruchomić "Bracket ARM Calibration (3x)", żeby odtworzyć
+  czyste dane dla wszystkich śledzonych modeli.
+
+## Tooltips na blokach/torach/ruler samego Timeline (ImDrawList)
+- Status: proponowane — wymaga dodatkowych poprawek/dopracowania przed
+  realizacją (Andrzej, 2026-07-26: "tu potrzebne są dorobne poprawki")
+- Typ: feature (UI clarity)
+- Zgłosił: mgr Maciej Szupiluk (projekt)
+- Opis: pełny rollout tooltipów z 2026-07-19 (`docs/tooltips_review.md`)
+  celowo pominął sam obszar Timeline (`RenderTimelineBottom()`, App.cpp) —
+  to osobny, bardzo duży obszar rysowany ręcznie na `ImDrawList` (bloki/
+  tory/ruler/markery faz), nieujęty w tamtym dokumencie w ogóle, więc nie
+  ma gotowego hit-testu ani ustalonej treści tooltipów do wdrożenia wprost.
+  Wymaga: (1) zaprojektowania hit-testu pozycji myszy per element (bloki
+  już mają swój, tory/ruler/markery nie), (2) ustalenia z Andrzejem, które
+  konkretnie elementy i jaka treść tooltipów są potrzebne, zanim zacznie
+  się implementacja — stąd "dorobne poprawki", nie prosta kontynuacja
+  wzorca z reszty GUI.
