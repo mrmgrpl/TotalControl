@@ -310,6 +310,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **bracket_calibration restructure (model,count,ev) → (model,count) + factory-default calib DB** | **DONE 2026-07-22, see Change log** |
 | **Timeline camera GUID-sort — verified on 2+ physical cameras** | **DONE 2026-07-23** (previously verified on 1 camera only) |
 | **Release v2026-07-23** | **PUBLISHED, see Change log** — About-screen EN-only + author-credit corrections (2 follow-up republishes same day) |
+| **Release v2026-07-25** | **PUBLISHED** — ARM-during-buffer-write fix only, see Change log |
 | **ARM-during-buffer-write silent drop (ISO/f-number/etc. never retried)** | **DONE 2026-07-25, see Change log** — root cause of Dan Becker's filmed camera-desync report |
 | **Card write-speed / buffer-capacity calibration (retires `card_calib`)** | **DONE 2026-07-25/26, see Change log** |
 | **Pipe-timeout unification (`BlockSrvTimeoutMs`) — fixes cascading disconnect on long Burst/Single/Bracket** | **DONE 2026-07-26, see Change log** |
@@ -317,6 +318,9 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Buffer-occupancy model — per-shot leaky bucket + live "Buf" diagnostic column** | **DONE 2026-07-26 (architecture), WR values still underestimated — see Change log "Known open issues"** |
 | **Deferred ARM (fire at ARM-zone start, not instantly after previous shot)** | **DONE 2026-07-26, see Change log** |
 | **SS silently drifting upward on long exposures** | **LIKELY FIXED 2026-07-26 by deferred ARM — operator-confirmed on hardware after the fix, `PriorityKey` hypothesis ruled out earlier, see Change log** |
+| **Sensor size per camera model (`camera_sensor_size` table, 33 models)** | **DONE 2026-07-26, see Change log** — replaces hardcoded 35.9x24.0mm |
+| **ROADMAP triage + consolidated priority queue** | **DONE 2026-07-26** — see `ROADMAP.md` "Kolejka prac" |
+| **Release v2026-07-26** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-07-26 |
 
 ### TotalControlGUI — Phase 2b (complete)
 
