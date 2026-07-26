@@ -109,6 +109,20 @@ struct DriveFpsEntry {
     int64_t     createdMs  = 0;
 };
 
+// Sensor physical size — one row per camera model (PRIMARY KEY). Real
+// manufacturer spec in mm, not a calibration measurement — ships as factory
+// reference data in TotalControlDefaultConfig.db (same distribution
+// mechanism as bracket_calibration/arm_calibration), replacing the old
+// hardcoded 35.9x24.0mm constant used for every model's FOV/frame overlay
+// in the Solar Simulator. App::SensorSizeMmFor() falls back to that same
+// 35.9x24.0mm default for any model not present in this table.
+struct SensorSizeEntry {
+    std::string camModel;
+    double      widthMm   = 0.0;
+    double      heightMm  = 0.0;
+    int64_t     createdMs = 0;
+};
+
 // ─── Named snapshot ───────────────────────────────────────────────────────────
 
 struct SnapshotInfo {
@@ -178,6 +192,12 @@ public:
     void            CreateDriveFpsTable();
     bool            SaveDriveFps(const DriveFpsEntry& entry);  // false = sqlite3_step didn't return SQLITE_DONE
     std::vector<DriveFpsEntry> LoadDriveFpsAll() const;
+
+    // Sensor physical size (TotalControlConfig.db) — one row per model,
+    // factory reference data (ships in TotalControlDefaultConfig.db).
+    void            CreateSensorSizeTable();
+    bool            SaveSensorSize(const SensorSizeEntry& entry);  // false = sqlite3_step didn't return SQLITE_DONE
+    std::vector<SensorSizeEntry> LoadSensorSizeAll() const;
 
     // named timeline snapshots (TotalControlConfig.db)
     void                      CreateSnapshotTables();

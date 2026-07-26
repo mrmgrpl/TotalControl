@@ -514,7 +514,10 @@ DB table: `camera_config (guid TEXT PK, model TEXT, focal_mm INTEGER, apply_p IN
 
 **Solar simulator frames** — dynamic, replace hardcoded 240mm/900mm:
 - Loop over `m_camConfigs`; skip if `focalMm == 0`
-- FOV: `fovW = 2·atan2(35.9/2, f)`, `fovH = 2·atan2(24.0/2, f)` (Sony full-frame 35.9×24.0mm hardcoded for now)
+- FOV: `fovW = 2·atan2(w/2, f)`, `fovH = 2·atan2(h/2, f)`, where `(w,h) = SensorSizeMmFor(cc.model)` —
+  per-model sensor size from the `camera_sensor_size` DB table (factory data, `data/TotalControlDefaultConfig.db`,
+  33 models: full-frame/Super35/APS-C/1"-3-chip), falling back to Sony full-frame 35.9×24.0mm for any
+  unlisted model — see Change log 2026-07-26 "Sensor size per model"
 - Rotation: `applyP ? P_rad : 0.f`
 - Color palette: niebieski/zielony/czerwony/bursztyn; first camera dashed, rest solid
 - Labels: stacked top-left, format `"ILCE-7RM4A  240mm  8.6°×5.7°  (P=15°)"`
@@ -1225,6 +1228,30 @@ watching for it on future long-exposure runs.
 - SS silently drifting upward on long exposures (finding #3) — likely fixed
   by the deferred-ARM change (#6 above); not conclusively proven, keep
   watching for recurrence.
+
+### 2026-07-26 (later) — Sensor size per model (replaces hardcoded 35.9×24.0mm)
+
+`RenderSolarView` (App.cpp) computed every camera's FOV/frame overlay in the
+Solar Simulator from one hardcoded constant — Sony full-frame 35.9×24.0mm —
+duplicated in 4 separate places (Horizon-mode drag hit-test, camera frame
+overlay, Live View overlay, frame labels). Correct for full-frame bodies
+only; wrong for APS-C (ILCE-6700, ILME-FX30, ZV-E10M2) and Super35/cinema
+bodies (ILME-FX3/FX6/FR7, BURANO/MPC-2610).
+
+Added `camera_sensor_size` table (`Database.h/.cpp`, `SensorSizeEntry`) —
+one row per model, same shape/distribution mechanism as
+`bracket_calibration`/`arm_calibration`/`drive_fps_calibration`: factory
+reference data shipped in `data/TotalControlDefaultConfig.db` (not a
+per-installation calibration, since sensor dimensions are a fixed
+manufacturer spec, not something that varies per unit), copied into a fresh
+`TotalControlConfig.db` on first run same as the others. Seeded with
+precise (non-rounded) mm dimensions for 33 current Sony ILCE/ILME/ZV/DSC/
+PXW/HXR/BRC models, supplied directly by the user. `App::SensorSizeMmFor
+(camModel)` looks up `m_sensorSizeCache` (loaded by `LoadSensorSizeCache()`
+at startup, same pattern as `LoadDriveFpsCalibCache()`); falls back to the
+old 35.9×24.0mm default for any model not in the table. All 4 call sites in
+`RenderSolarView` now call this per-camera (using `cc.model`) instead of a
+single shared constant declared once outside the per-camera loop.
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 

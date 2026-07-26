@@ -1062,6 +1062,65 @@ std::vector<DriveFpsEntry> Database::LoadDriveFpsAll() const {
     return result;
 }
 
+// ─── Sensor physical size ────────────────────────────────────────────────────
+// One row per camera model -- see SensorSizeEntry comment in Database.h.
+
+static constexpr const char* kCreateSensorSize = R"SQL(
+    CREATE TABLE IF NOT EXISTS camera_sensor_size (
+        cam_model  TEXT    NOT NULL PRIMARY KEY,
+        width_mm   REAL    NOT NULL,
+        height_mm  REAL    NOT NULL,
+        created_ms INTEGER NOT NULL
+    );
+)SQL";
+
+void Database::CreateSensorSizeTable() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateSensorSize);
+}
+
+bool Database::SaveSensorSize(const SensorSizeEntry& entry) {
+    assert(m_db != nullptr);
+    assert(!entry.camModel.empty());
+    if (!m_db) return false;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+        "INSERT OR REPLACE INTO camera_sensor_size"
+        " (cam_model,width_mm,height_mm,created_ms)"
+        " VALUES (?,?,?,?);",
+        -1, &st, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text  (st, 1, entry.camModel.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_double(st, 2, entry.widthMm);
+    sqlite3_bind_double(st, 3, entry.heightMm);
+    sqlite3_bind_int64 (st, 4, entry.createdMs);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+std::vector<SensorSizeEntry> Database::LoadSensorSizeAll() const {
+    assert(m_db != nullptr);  // DB must be open to load calibration
+    std::vector<SensorSizeEntry> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT cam_model,width_mm,height_mm,created_ms FROM camera_sensor_size;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        SensorSizeEntry e;
+        const auto* p = sqlite3_column_text(st, 0);
+        e.camModel  = p ? reinterpret_cast<const char*>(p) : "";
+        e.widthMm   = sqlite3_column_double(st, 1);
+        e.heightMm  = sqlite3_column_double(st, 2);
+        e.createdMs = sqlite3_column_int64 (st, 3);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
 // ─── JPL Horizons ephemeris cache ────────────────────────────────────────────
 
 static constexpr const char* kCreateEph = R"SQL(

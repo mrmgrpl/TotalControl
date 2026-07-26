@@ -549,7 +549,25 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
      naświetlania bez rozmycia polem gwiazd/korony przy braku trackera) —
      funkcja obecna u Jubiera, u nas jeszcze nieobsłużona.
 
-## Wykres wartości Q na osi czasu Timeline (cienka linia w wierszu UTC)
+## Rozmiar sensora hardcoded na 35.9x24.0mm dla wszystkich modeli
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-26**
+- Typ: bug (dokładność)
+- Zgłosił: mgr Maciej Szupiluk (projekt)
+- Opis: `RenderSolarView` (App.cpp) liczyła FOV/ramki kamer w symulatorze
+  słonecznym z jednego zaszytego na sztywno rozmiaru sensora Sony full-frame
+  (35.9×24.0mm) w 4 miejscach, niezależnie od faktycznie podłączonego modelu
+  — błędne dla każdej kamery innej niż pełna klatka (np. APS-C: ILCE-6700,
+  ILME-FX30, ZV-E10M2; Super35: kamery kinowe ILME-FX6/FX3/FR7/BURANO).
+  Naprawione: nowa tabela `camera_sensor_size` (jeden wiersz per model,
+  ten sam wzorzec co `bracket_calibration`/`arm_calibration`/
+  `drive_fps_calibration`) — dane fabryczne (precyzyjne wymiary w mm od
+  producenta, bez zaokrągleń) w `data/TotalControlDefaultConfig.db`, 33
+  modele (pełna klatka, Super35, APS-C, 1"-3-chip). `App::SensorSizeMmFor
+  (camModel)` zwraca zmierzony rozmiar jeśli model jest w tabeli, w
+  przeciwnym razie fallback na stary domyślny 35.9×24.0mm. Wszystkie 4
+  miejsca w `RenderSolarView` (hit-test przeciągania Horizon, ramki kamer,
+  Live View overlay, etykiety ramek) przełączone na lookup per-kamera
+  zamiast jednej stałej dla wszystkich.
 - Status: proponowane (nie robić od razu — patrz decyzja Andrzeja niżej)
 - Typ: feature
 - Zgłosił: mgr Maciej Szupiluk (projekt)

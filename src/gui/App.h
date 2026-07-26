@@ -534,6 +534,18 @@ private:
     // non-overflowing hold and saves its returned fast_fps directly.
     std::map<std::string, std::map<std::string, double>> m_driveFpsCalibCache;
     void LoadDriveFpsCalibCache();   // DB -> m_driveFpsCalibCache
+
+    // ── Sensor physical size ──────────────────────────────────────────────────
+    // camModel -> {widthMm, heightMm}, factory reference data (see
+    // SensorSizeEntry in Database.h) -- replaces the old hardcoded
+    // 35.9x24.0mm constant used for every model's FOV/frame overlay in the
+    // Solar Simulator (RenderSolarView's camera-frame/Live-View/label loops).
+    std::map<std::string, std::pair<float, float>> m_sensorSizeCache;
+    void LoadSensorSizeCache();      // DB -> m_sensorSizeCache
+    // Real sensor size if known for camModel; else the Sony full-frame
+    // default (35.9 x 24.0mm) that every camera used before this table
+    // existed. Member (not static) so it can consult m_sensorSizeCache.
+    std::pair<float, float> SensorSizeMmFor(std::string_view camModel) const;
     // Real fps if calibrated for (camModel, drive); else the old rough guess.
     // Member (not static) so it can consult m_driveFpsCalibCache. Only ever
     // feeds PRE-RUN prediction (BlockShotCount / PredictedShotOffsetsMs) --

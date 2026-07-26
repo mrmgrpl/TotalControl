@@ -4560,7 +4560,6 @@ void App::RenderSolarView() {
         bool  mbDown    = ImGui::IsMouseDown(ImGuiMouseButton_Left);
         bool  mbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         bool  mbRel     = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-        static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
 
         // Start drag: check if click lands inside a Horizon-mode frame
         if (mbClicked && m_dragHorizonCamIdx < 0) {
@@ -4569,6 +4568,7 @@ void App::RenderSolarView() {
                 CamConfig& cc = m_camConfigs[ci];
                 if (cc.focalMm <= 0 || cc.trackMode != CamTrackMode::Horizon) continue;
                 if (!IsCameraOnline(cc.guid)) continue;
+                auto [kSensorW, kSensorH] = SensorSizeMmFor(cc.model);
                 float f    = static_cast<float>(cc.focalMm);
                 float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
                 float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
@@ -4604,15 +4604,16 @@ void App::RenderSolarView() {
         }
     }
 
-    // Camera frames — driven by m_camConfigs (focal length + applyP + trackMode)
-    // Sony full-frame sensor: 35.9 × 24.0 mm
+    // Camera frames — driven by m_camConfigs (focal length + applyP + trackMode);
+    // per-model sensor size from SensorSizeMmFor (Sony full-frame 35.9x24.0mm
+    // default for any model not in camera_sensor_size)
     {
-        static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
         assert(m_camConfigs.size() <= 64);
         for (int ci = 0; ci < (int)m_camConfigs.size(); ++ci) {
             const CamConfig& cc = m_camConfigs[ci];
             if (cc.focalMm <= 0) continue;
             if (!IsCameraOnline(cc.guid)) continue;
+            auto [kSensorW, kSensorH] = SensorSizeMmFor(cc.model);
             float  f    = static_cast<float>(cc.focalMm);
             float  fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
             float  fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
@@ -4662,7 +4663,6 @@ void App::RenderSolarView() {
     // Upload any newly decoded LV frames to D3D11 (render-thread only).
     if (m_lvNewFrames.load()) CreateLvTextures();
     {
-        static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
         // Build render list sorted by focal length ascending (short = first = bottom)
         struct LvRenderEntry { int focalMm; int ci; };
         LvRenderEntry lvOrder[kMaxCamTracks];
@@ -4687,6 +4687,7 @@ void App::RenderSolarView() {
             const CamConfig& cc = m_camConfigs[ci];
             const ImU32 lvCol = IM_COL32(255, 255, 255,
                 static_cast<ImU32>(m_lvOpacity[ci] * 255.f + 0.5f));
+            auto [kSensorW, kSensorH] = SensorSizeMmFor(cc.model);
             float  f    = static_cast<float>(cc.focalMm);
             float  fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
             float  fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
@@ -4903,7 +4904,6 @@ void App::RenderSolarView() {
 
     // ── Frame labels (stacked top-left, one per camera) ──────────────────────
     {
-        static constexpr float kSensorW = 35.9f, kSensorH = 24.0f;
         static constexpr ImU32 kFrameColors[4] = {
             IM_COL32( 24,  95, 165, 200),
             IM_COL32( 55, 160,  70, 200),
@@ -4917,6 +4917,7 @@ void App::RenderSolarView() {
             const CamConfig& cc = m_camConfigs[ci];
             if (cc.focalMm <= 0) continue;
             if (!IsCameraOnline(cc.guid)) continue;
+            auto [kSensorW, kSensorH] = SensorSizeMmFor(cc.model);
             float f    = static_cast<float>(cc.focalMm);
             float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
             float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
@@ -6997,6 +6998,11 @@ App::App() {
         m_configDb.CreateDriveFpsTable();
         LoadDriveFpsCalibCache();
 
+        // Sensor physical size — factory reference data (ships in
+        // TotalControlDefaultConfig.db), feeds SensorSizeMmFor()
+        m_configDb.CreateSensorSizeTable();
+        LoadSensorSizeCache();
+
         // Ephemeris cache tables (created if absent; data loaded on first fetch)
         m_configDb.CreateEphTables();
 
@@ -8690,6 +8696,26 @@ void App::LoadDriveFpsCalibCache() {
         m_driveFpsCalibCache[e.camModel][e.drive] = e.fps;
     LogLine(std::format("Drive fps calibration: {} model(s) loaded into cache",
                         m_driveFpsCalibCache.size()));
+}
+
+void App::LoadSensorSizeCache() {
+    assert(m_configDb.IsOpen());
+    m_sensorSizeCache.clear();
+    auto entries = m_configDb.LoadSensorSizeAll();
+    assert(entries.size() <= 200);  // bounded: realistic number of camera models
+    for (const auto& e : entries)
+        m_sensorSizeCache[e.camModel] = { static_cast<float>(e.widthMm),
+                                          static_cast<float>(e.heightMm) };
+    LogLine(std::format("Sensor size: {} model(s) loaded into cache",
+                        m_sensorSizeCache.size()));
+}
+
+std::pair<float, float> App::SensorSizeMmFor(std::string_view camModel) const {
+    static constexpr std::pair<float, float> kDefaultSensorMm{35.9f, 24.0f};  // Sony full-frame
+    assert(kDefaultSensorMm.first > 0.f && kDefaultSensorMm.second > 0.f);
+    assert(m_sensorSizeCache.size() <= 200);  // matches LoadSensorSizeCache's bound
+    auto it = m_sensorSizeCache.find(std::string(camModel));
+    return it != m_sensorSizeCache.end() ? it->second : kDefaultSensorMm;
 }
 
 void App::SaveArmCalibFromBuf(const std::string& camModel) {
