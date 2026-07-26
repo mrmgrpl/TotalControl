@@ -315,7 +315,8 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Pipe-timeout unification (`BlockSrvTimeoutMs`) — fixes cascading disconnect on long Burst/Single/Bracket** | **DONE 2026-07-26, see Change log** |
 | **Sentinel-hold `shoot` false `ok:false` on successful Burst** | **DONE 2026-07-26, see Change log** |
 | **Buffer-occupancy model — per-shot leaky bucket + live "Buf" diagnostic column** | **DONE 2026-07-26 (architecture), WR values still underestimated — see Change log "Known open issues"** |
-| **SS silently drifting upward on long exposures** | **OPEN — `PriorityKey` hypothesis tested and ruled out 2026-07-26, root cause unknown, see Change log** |
+| **Deferred ARM (fire at ARM-zone start, not instantly after previous shot)** | **DONE 2026-07-26, see Change log** |
+| **SS silently drifting upward on long exposures** | **LIKELY FIXED 2026-07-26 by deferred ARM — operator-confirmed on hardware after the fix, `PriorityKey` hypothesis ruled out earlier, see Change log** |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -1184,6 +1185,34 @@ operator can visually compare the predicted value against a video recording
 of the camera. **Explicitly temporary**: exists to validate/calibrate the
 occupancy model itself, not a permanent UI feature.
 
+**6. Deferred ARM — fire at the ARM zone's own start, not instantly after the
+previous shot (likely root cause of finding #3's SS drift)**
+`SeqCamThreadProc` used to call `sendArm()` the instant the previous block's
+`shoot`/`bracket` pipe call returned — i.e. at the playhead position
+matching the *start of the gray WR zone*, not the amber ARM zone drawn right
+before the next block. This happened to work most of the time only because
+`SetPropAndVerify`'s own retry-until-confirmed loop silently absorbed the
+real WR wait *inside* that one blocking call — but it means the ARM's
+settings-write was landing on the camera while it was still mid-write from
+the previous shot, on a schedule invisible to (and earlier than) what the
+Timeline visually shows. Changed to a deferred-ARM pattern: after a block
+fires, if the next block needs different params (`BlockParamsDiffer`), the
+thread records `armTargetMs = nxt.atMs − ArmEstMs(...)` and `sendArm()` is
+now only called once the playhead reaches that time on its normal 10ms poll
+— i.e. exactly when the Timeline's own amber ARM zone begins, no earlier.
+Re-tested on hardware after this change: the SS drift from finding #3 (a
+confirmed value silently reading back different a few seconds later, no
+commands sent in between) **did not reproduce** — operator-confirmed
+2026-07-26. Leading explanation: the camera's own property-priority/
+buffer-write interaction was likely reacting to ARM commands arriving too
+early (while a write was in flight) in a way that could silently corrupt or
+delay the confirmed value, independent of `PriorityKey`'s cache-vs-live
+state (which is why forcing `PriorityKey` re-verification alone, above,
+didn't help — the actual write was still mistimed). Treated as **likely
+fixed, not proven** — one hardware session's absence of the symptom is
+promising but not the same as a dedicated repro/regression test; keep
+watching for it on future long-exposure runs.
+
 **Known open issues, end of session 2026-07-26, not fixed**:
 - WR block durations are confirmed **underestimated** even with the
   per-shot leaky-bucket rewrite — the per-shot production schedule is more
@@ -1193,9 +1222,9 @@ occupancy model itself, not a permanent UI feature.
   precision cannot fix a wrong physical constant; needs the dedicated
   buffer-drain-time measurement discussed but not yet built (see prior
   entry's "Known open bug" and this session's finding #4).
-- SS silently drifting upward on long exposures (finding #3) — root cause
-  unknown, `PriorityKey` ruled out. Reproducible on real hardware,
-  safety-relevant (wrong exposure with no surfaced error).
+- SS silently drifting upward on long exposures (finding #3) — likely fixed
+  by the deferred-ARM change (#6 above); not conclusively proven, keep
+  watching for recurrence.
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
