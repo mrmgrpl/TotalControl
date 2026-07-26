@@ -2,7 +2,17 @@
 
 ---
 
-## 2026-07-25
+## 2026-07-26
+
+### mgr Maciej Szupiluk
+- Added a faint dark-gray gridline every 1 second on the Timeline for each camera track, so it's easier to judge block spacing and duration at a glance; drawn underneath the blocks so it doesn't clutter the view where a block already covers that second
+- Fixed the "One Picture Per Minute (Partial Phase)" preset generating every block with a fixed exposure (1/8000s, ISO 100, f/6.3) regardless of what was actually selected in the Action Library - it now uses the currently-selected block's shutter speed/ISO/aperture
+- Added multi-block selection on the Timeline: click a block, hold Shift, and press the Left/Right arrow keys to extend (or shrink back) the selection one block at a time in either direction
+- Added Ctrl+Z to undo the last Timeline change (move, delete, duplicate, insert) - a single-step undo, scoped to the Timeline only
+- Added a "Distribute Evenly" button: select three or more blocks and it spaces their start times evenly between the first and last selected block (which stay fixed); works per camera track when the selection spans more than one
+- Fixed Live View: with more than one camera connected, the Live View feed (and its opacity slider / Focus Magnifier buttons) could show or control a different physical camera than the one selected - traced to the Live View feature using each camera's fixed slot number instead of its actual live connection number; confirmed the two only happened to match by coincidence when cameras connect in slot order, which is why it worked with fewer cameras but broke with four
+
+
 
 ### Dan Becker
 - Found (by filming the camera and the app running side by side) that exposure settings sent right after a shot - while the camera was still writing the previous shot(s) to the memory card - could be silently dropped, leaving the next shot fired with the old ISO or aperture instead of the one just requested. Traced to a shortcut in how those particular settings were sent: unlike shutter speed and drive mode, which already retried automatically until the camera confirmed the change, ISO/aperture/exposure mode/focus mode/storage destination were only ever tried once and never checked. All of these now retry the same way shutter speed already did, waiting for the camera to confirm before giving up - closes the gap that caused the desync
