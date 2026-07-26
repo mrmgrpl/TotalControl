@@ -133,8 +133,9 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   sugerować awarię sieci. Nie wymaga już potwierdzenia logiem od Johna.
 
 ## "shoot failed" — sporadyczne błędy strzału niezdiagnozowane (log SRV nie objął zdarzenia)
-- Status: proponowane (blokowane tylko na nowy materiał od Johna — log-truncation
-  fix poniżej już wdrożony 2026-07-19)
+- Status: **nieaktualne** (uznane za zamknięte przez Andrzeja 2026-07-26 —
+  brak dalszych zgłoszeń od Johna po fixie log-truncation, temat porzucony
+  bez dalszej diagnozy)
 - Typ: bug
 - Zgłosił: John Melson
 - Opis: w logu GUI Johna 4× wystąpił "ERROR: shoot failed" (test picture) mimo
@@ -223,7 +224,8 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   (C1/C2/Max/C3/C4/Rise/Set) wyjaśniający samo zjawisko.
 
 ## Rozwijana lista (dropdown) się otwiera, ale nie da się nic wybrać
-- Status: proponowane (brak wystarczających danych do diagnozy)
+- Status: **nieaktualne** (uznane za zamknięte przez Andrzeja 2026-07-26 —
+  brak wystarczających danych do diagnozy, temat porzucony)
 - Typ: bug
 - Zgłosił: Alexandru Barbovschi
 - Opis: "Drop down opens, but I can't choose anything" — nie sprecyzował, który
@@ -274,8 +276,7 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   przegląd, nie przy okazji innej zmiany.
 
 ## Rozbieżność czasów kontaktów TotalControl vs SEM/SEW — hipoteza deltaT
-- Status: proponowane (WYSOKI priorytet — dokładność czasów kontaktów to
-  funkcja krytyczna; hipoteza źródłowa częściowo obalona, patrz niżej)
+- Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-21**
 - Typ: bug
 - Zgłosił: Alexandru Barbovschi
 - Opis: Alexandru zauważył rozbieżność ~6-7s między czasami kontaktów w
@@ -289,15 +290,17 @@ dot. prezentacji/YouTube, nie kodu — oba trzymane tu, żeby nie zgubić wątku
   (`ut_h = t0 + tau − e.dt/3600`). Wartość w bazie dla 2026-08-12 to **75.4 s**,
   nie 69.11 s. Policzony niezależnie oficjalny wzór długoterminowy Espenaka
   (NASA, ΔT = 62.92 + 0.32217t + 0.005589t², t = rok−2000, dla połowy sierpnia
-  2026) daje **≈75.46 s** — niemal idealna zgodność z wartością w bazie.
-  **Wniosek**: hipoteza "brakującego ΔT = 69.11s" wygląda na nieprawdziwą —
-  75.4s w bazie jest zgodne z kanonicznym źródłem NASA, więc realna przyczyna
-  różnicy 6-7s vs SEM/SEW leży najprawdopodobniej gdzie indziej: SEM/SEW mogą
-  używać starszej/innej wartości ΔT (te narzędzia bywają rzadziej aktualizowane
-  niż baza NASA), albo różnica jest w innym miejscu formuł/parametrach
-  Besselian. Do zrobienia: porównać wprost wartość ΔT używaną przez
-  zainstalowaną wersję SEM/SEW Alexandru z 75.4s, zamiast zakładać który
-  program ma rację.
+  2026) daje **≈75.46 s** — niemal idealna zgodność z wartością w bazie, więc
+  hipoteza "brakującego ΔT = 69.11s" była nieprawdziwa.
+  **Prawdziwa przyczyna, znaleziona i naprawiona 2026-07-21**: 75.4s to nadal
+  statyczna wartość z katalogu Espenaka — sama w sobie już nieaktualna względem
+  rzeczywistego obrotu Ziemi w dniu zaćmienia. Zastąpiona `IersDeltaTClient`
+  (`IersDeltaTClient.h/.cpp`) — pobiera `finals.all.iau2000.txt` z biuletynu
+  IERS, liczy `ΔT = 32.184 + leap_seconds − UT1UTC`, cache'uje w
+  `delta_t_cache` (Config.db), odświeża maksymalnie raz na 24h; przy błędzie
+  pobrania używa ostatniej poprawnie pobranej wartości (nigdy statycznego
+  katalogu). To dokładnie usunęło rozbieżność vs SEM/SEW — patrz
+  `CHANGELOG.md` → 2026-07-21 → Alessandro Pessi.
 
 ## Jawny wybór modelu obliczeń — IQP vs Besselian Elements
 - Status: **naprawione i przeniesione do `CHANGELOG.md` → 2026-07-19**
