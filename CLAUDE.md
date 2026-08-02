@@ -321,6 +321,9 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Sensor size per camera model (`camera_sensor_size` table, 33 models)** | **DONE 2026-07-26, see Change log** — replaces hardcoded 35.9x24.0mm |
 | **ROADMAP triage + consolidated priority queue** | **DONE 2026-07-26** — see `ROADMAP.md` "Kolejka prac" |
 | **Release v2026-07-26** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-07-26 |
+| **Burst `timeout_ms` padding fix + WR buffer-write model (concurrent+post-hold drain, validated on hardware)** | **DONE 2026-08-02** — see Change log |
+| **WB (Write-Buffer) calibration — per-(count,ev) bracket-transition timing, piggybacks on Bracket ARM Calibration** | **DONE 2026-08-02, not yet verified on hardware** |
+| **Release v2026-08-02** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-02 |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -1256,6 +1259,110 @@ at startup, same pattern as `LoadDriveFpsCalibCache()`); falls back to the
 old 35.9×24.0mm default for any model not in the table. All 4 call sites in
 `RenderSolarView` now call this per-camera (using `cc.model`) instead of a
 single shared constant declared once outside the per-camera loop.
+
+### 2026-08-02 — Burst `timeout_ms` padding fix, WR buffer-write model validated on hardware, WB calibration
+
+Continuation of the open "WR (write-buffer-wait) still underestimated" item
+from 2026-07-26. Two stacked bugs found and fixed, one architectural
+correction validated directly against the camera's own buffer readout.
+
+**1. Burst/BufferCapacity `timeout_ms` conflation (`App.cpp`)**
+`BuildBlockCmd` sent the padded `BlockSrvTimeoutMs` (`burstDurMs + 2000ms`,
+intended only as slack for the GUI's own local pipe-read timeout) as the
+literal `"timeout_ms"` field in the `shoot` pipe command. `CommandHandler`'s
+sentinel-hold path (`holdForBurst=true`, `expectedCaptures=9999` — never
+naturally reaches its target, so it always holds for the *entire*
+`timeout_ms`) treats that value as the real shutter-hold duration, not a
+wait ceiling. Every Burst block was therefore firing ~2s / ~10 shots longer
+than its configured `burstDurMs`. Fixed: the Burst branch of `BuildBlockCmd`
+now sends the real, unpadded `blk.burstDurMs`; the padding stays local to
+`SeqCamThreadProc`'s own read-timeout calculation
+(`BlockSrvTimeoutMs(blk) + 15000`), never on the wire. `BlockDurMs(Burst)`
+(already just `b.burstDurMs`) needed no change — it was only ever wrong
+because the *camera* was running long, not because of its own formula.
+
+**2. WR model: concurrent-drain restored, this time with clean data**
+`ComputeWrMsPerBlock`/`AdvanceOccupancyThroughBlock` briefly modeled ZERO
+drain while a block's shutter is held (reasoning: a single earlier data
+point — a 76-shot burst leaving "~all unwritten" — suggested the card's
+write bandwidth goes entirely to keeping up with new captures during
+shooting). That data point turned out to be corrupted by bug #1 above (the
+burst was firing longer than configured, altering the real backlog).
+Direct observation of the camera's own buffer counter on hardware
+(15s cont-lo hold, ~74 shots fired, only 31 pending in the buffer at
+release) confirmed concurrent draining is real: ~43 shots (≈2.9/s) already
+written *during* the hold. Restored: occupancy drains at the concurrent
+rate (`m_concurrentWriteCalibCache`/`ConcurrentWriteFpsFor`) for the
+duration a block's own shutter is held, then at the faster post-hold rate
+(`m_cardCalibCache`) through any genuinely idle gap. Operator-confirmed on
+hardware after this fix ("Chyba mamy to już idealnie") for the Burst case.
+
+**3. `m_liveOccupancy` reset on `StartSeqThread`**
+Restarting a test shortly after a large Burst block showed a nonsensical
+spike (e.g. "Buf=70") on the very first subsequent block — the live
+occupancy checkpoint from the previous run wasn't cleared. `StartSeqThread`
+now resets `m_liveOccupancy` for every camera slot at the start of each run.
+
+**4. Bracket-boundary WR tail — separate, smaller regime mismatch**
+The concurrent-drain formula (validated above for a 15s sustained hold) does
+not fit a short, fast bracket (often well under a second): applying a
+steady-state throughput number to a window that brief overstates how much
+can drain before the write pipeline has even ramped up, predicting a gray
+tail visibly shorter than needed (~0.5s predicted vs. ~2s+ observed for a
+3-shot bracket). Two direct-fire probe designs were tried and both broke
+real camera behavior before being abandoned:
+- v1 fired a separate `arm` probe (`drive:"single"`) between brackets to
+  force a non-cached round-trip — this broke the *next* bracket's
+  multi-shot firing down to 1/N captures, even though the property itself
+  read back confirmed (the camera's bracket sequencer needs more than a
+  single↔bracket toggle to behave correctly).
+- v2 removed the "single" toggle (arm directly to the next variant's own
+  bracket code instead) but fired the shoot immediately (~3ms) after arm
+  confirmed, with zero settle gap — every bracket whose arm needed real
+  busy-retry recovery (0x8402 → eventually 0x0000) then also only fired
+  1/N, while the one bracket whose arm hit an instant no-retry path fired
+  cleanly. Property-readback confirming doesn't guarantee the camera's
+  internal sequencer is actually ready.
+
+Final design (v3): no separate test/thread at all. `SeqCamThreadProc`'s
+existing `sendArm` lambda already measures real ARM latency for every
+bracket during a normal Timeline run and logs it into `m_armCalibBuf` (for
+`arm_calibration`, count-only) — it now *also* logs into `m_wbCalibBuf`,
+additionally keyed by `ev` (new `WbCalibSample`/`WbCalibEntry`, since unlike
+ARM latency this plausibly does depend on per-stop exposure time). New
+`wb_calibration` table (`Database.h/.cpp`), same shape as `arm_calibration`
+plus an `ev` column. `SaveWbCalibFromBuf` mirrors `SaveArmCalibFromBuf`
+exactly and is chained right after it in `SaveCalibFromBuf` — the existing
+per-model "SAVE CALIB" button now populates both tables from one
+"1. Bracket ARM Calibration" run, no new UI. `ComputeWrMsPerBlock`'s
+Bracket-boundary branch prefers a `wb_calibration` lookup
+(`WbReadyMsFor(camModel, count, ev)`) over the leaky-bucket formula when a
+measured value exists. **Not yet verified on hardware.**
+
+**5. `SetPropAndVerify` attempt-cap scaling (`CameraController.cpp`)**
+The retry loop's attempt ceiling was a fixed `64` regardless of the
+requested `maxWaitMs` — at the loop's 500ms worst-case fallback step, that's
+a hard ~32s ceiling even when a caller explicitly requests a much longer
+budget (e.g. a calibration probe with `verify_ms=60000`), silently
+truncating the wait before the real deadline. Now scales with the budget
+(`min(4000, maxWaitMs/400 + 8)`). Independently useful regardless of the
+WB-calibration probe designs above being abandoned — protects any future
+long `verify_ms` call.
+
+**6. TotalControlCLI version string**
+Added `kVersion` + `--version`/`-v` flag, shown in `Usage()`'s banner line —
+previously the only one of the three executables with no version indicator.
+
+### 2026-08-02 — Release v2026-08-02
+
+Sixth public release. Version bump 2026.07.26→2026.08.02 across all three
+executables (SRV banner, GUI About menu, CLI `--version`). Build clean
+(`/W4 /WX`). Staging copied from v2026-07-26 as template; updated: 3 exes,
+`CHANGELOG.md`, `START_HERE.md` (build number + highlights). Verified
+package size before zipping (38MB unpacked, no stray runtime artifacts) →
+ZIP 21.35MB. Tag `v2026-08-02` on commit `a1d42c6`, `gh release create` with
+the ZIP as asset + `release_notes_2026-08-02.md`:
+https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-02
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
