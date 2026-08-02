@@ -1254,13 +1254,31 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
     // not a timing issue) — this command doesn't need it at all: the whole
     // measurement comes from CrNotify_Captured_Event arrival timing, which
     // this session has confirmed is delivered reliably.
-    // {"cmd":"buffer_capacity_calib","duration_ms":10000,"drive":"cont-hi-plus","ss":"1/1000","iso":100,"f":8.0}
+    //
+    // Stops as soon as a live inflection is detected (see
+    // CameraController::ShootUntilBufferSlowdown) rather than always
+    // holding for the full duration_ms -- that instant is physically the
+    // exact moment the buffer just filled, so firing any further only
+    // wastes shutter actuations. duration_ms is a ceiling: if the buffer
+    // never fills within it, that's a real, valid "no write bottleneck"
+    // result (2026-08-01, operator-confirmed on ILCE-7M4 + CFexpress).
+    //
+    // stop_on_slowdown=false (added 2026-08-02): holds for the FULL
+    // duration_ms regardless of when the inflection lands, deliberately
+    // staying saturated well past it. Used by the GUI's "Concurrent
+    // Write-Rate Calibration" test, which needs many post-inflection
+    // samples (AnalyzeBufferCapacity's slow_fps) for a statistically
+    // stable sustained-rate measurement -- the default stop-on-first-
+    // detection behavior above only ever yields a handful of
+    // post-inflection samples, too noisy to calibrate from.
+    // {"cmd":"buffer_capacity_calib","duration_ms":30000,"drive":"cont-hi-plus","ss":"1/1000","iso":100,"f":8.0,"stop_on_slowdown":false}
     if (cmd == L"buffer_capacity_calib") {
         if (!cam->IsConnected()) { resp = Err(L"not_connected"); return true; }
 
         int durationMs = JHas(req, L"duration_ms") ? JInt(req, L"duration_ms", 10000) : 10000;
         if (durationMs < 2000) durationMs = 2000;
         std::wstring driveStr = JHas(req, L"drive") ? JStr(req, L"drive") : L"cont-hi-plus";
+        bool stopOnSlowdown = JBool(req, L"stop_on_slowdown", true);
 
         bool armed = true;
         if (!cam->SetPCRemotePriority()) armed = false;
@@ -1285,9 +1303,13 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         }
 
         int latency = 0, actualCount = 0;
-        int shootTimeoutMs = durationMs + 2000;
-        (void)cam->Shoot(&latency, shootTimeoutMs, /*expectedCaptures=*/9999,
-                          /*holdForBurst=*/true, &actualCount);
+        int maxTimeoutMs = durationMs + 2000;
+        if (stopOnSlowdown) {
+            (void)cam->ShootUntilBufferSlowdown(&latency, maxTimeoutMs, &actualCount);
+        } else {
+            (void)cam->Shoot(&latency, maxTimeoutMs, /*expectedCaptures=*/9999,
+                              /*holdForBurst=*/true, &actualCount);
+        }
         if (actualCount < 1) {
             resp = Err(L"timeout", L"no captures during held burst");
             return true;

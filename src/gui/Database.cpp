@@ -929,6 +929,70 @@ std::vector<CardCalibEntry> Database::LoadCardCalibAll() const {
     return result;
 }
 
+// ─── Concurrent write-speed calibration ──────────────────────────────────────
+// One row per model (PK) — see ConcurrentWriteCalibEntry comment in
+// Database.h for why this is a separate number from card_write_calibration.
+
+static constexpr const char* kCreateConcurrentWriteCalib = R"SQL(
+    CREATE TABLE IF NOT EXISTS concurrent_write_calibration (
+        cam_model      TEXT    NOT NULL PRIMARY KEY,
+        shots_per_sec  REAL    NOT NULL,
+        sample_shots   INTEGER NOT NULL,
+        measured_ms    INTEGER NOT NULL,
+        created_ms     INTEGER NOT NULL
+    );
+)SQL";
+
+void Database::CreateConcurrentWriteCalibTable() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateConcurrentWriteCalib);
+}
+
+bool Database::SaveConcurrentWriteCalib(const ConcurrentWriteCalibEntry& entry) {
+    assert(m_db != nullptr);
+    assert(!entry.camModel.empty());
+    if (!m_db) return false;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db,
+        "INSERT OR REPLACE INTO concurrent_write_calibration"
+        " (cam_model,shots_per_sec,sample_shots,measured_ms,created_ms)"
+        " VALUES (?,?,?,?,?);",
+        -1, &st, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text  (st, 1, entry.camModel.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_double(st, 2, entry.shotsPerSec);
+    sqlite3_bind_int   (st, 3, entry.sampleShots);
+    sqlite3_bind_int64 (st, 4, entry.measuredMs);
+    sqlite3_bind_int64 (st, 5, entry.createdMs);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+std::vector<Database::ConcurrentWriteCalibEntry> Database::LoadConcurrentWriteCalibAll() const {
+    assert(m_db != nullptr);  // DB must be open to load calibration
+    std::vector<ConcurrentWriteCalibEntry> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT cam_model,shots_per_sec,sample_shots,measured_ms,created_ms"
+        " FROM concurrent_write_calibration;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        ConcurrentWriteCalibEntry e;
+        const auto* p = sqlite3_column_text(st, 0);
+        e.camModel     = p ? reinterpret_cast<const char*>(p) : "";
+        e.shotsPerSec  = sqlite3_column_double(st, 1);
+        e.sampleShots  = sqlite3_column_int   (st, 2);
+        e.measuredMs   = sqlite3_column_int64 (st, 3);
+        e.createdMs    = sqlite3_column_int64 (st, 4);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
 // ─── Buffer capacity calibration ─────────────────────────────────────────────
 // One row per model (PK) — complementary to card_write_calibration above.
 
@@ -1439,6 +1503,18 @@ std::vector<CamConfig> Database::LoadCamConfigs() const {
     return result;
 }
 
+void Database::DeleteCamConfig(const std::string& guid) {
+    assert(m_db != nullptr);
+    assert(!guid.empty());
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(m_db, "DELETE FROM camera_config WHERE guid = ?;",
+                            -1, &st, nullptr) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(st, 1, guid.c_str(), -1, SQLITE_STATIC);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
 void Database::CreateDeltaTTable() {
     assert(m_db != nullptr);
     Exec(R"SQL(
@@ -1511,6 +1587,105 @@ std::vector<std::string> Database::LoadArmCalibModels() const {
     sqlite3_stmt* st = nullptr;
     int rc = sqlite3_prepare_v2(m_db,
         "SELECT DISTINCT cam_model FROM arm_calibration ORDER BY cam_model;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const auto* p = sqlite3_column_text(st, 0);
+        if (p) result.push_back(reinterpret_cast<const char*>(p));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
+// ─── Write-buffer-ready calibration ──────────────────────────────────────────
+// Keyed by (cam_model, count, ev) -- unlike arm_calibration this is NOT
+// assumed ev-independent, since a bigger ev step means longer real per-stop
+// exposure time within the bracket's own shooting window, which plausibly
+// changes how much the buffer has already drained by the last shot. See
+// WbCalibEntry comment in Database.h.
+
+static constexpr const char* kCreateWbCalib = R"SQL(
+    CREATE TABLE IF NOT EXISTS wb_calibration (
+        cam_model     TEXT    NOT NULL,
+        count         INTEGER NOT NULL,
+        ev            TEXT    NOT NULL,
+        ready_max_ms  INTEGER NOT NULL,
+        ready_avg_ms  INTEGER NOT NULL,
+        ready_min_ms  INTEGER NOT NULL,
+        reps          INTEGER NOT NULL DEFAULT 0,
+        created_ms    INTEGER NOT NULL,
+        PRIMARY KEY (cam_model, count, ev)
+    );
+)SQL";
+
+void Database::CreateWbCalibTable() {
+    assert(m_db != nullptr);  // DB must be open before creating tables
+    Exec(kCreateWbCalib);
+}
+
+void Database::SaveWbCalibData(const std::vector<WbCalibEntry>& entries) {
+    assert(m_db != nullptr);
+    assert(entries.size() <= 64);  // bounded: at most a handful of (count,ev) variants per model
+    if (!m_db || entries.empty()) return;
+    sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
+    for (const auto& e : entries) {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(m_db,
+            "INSERT OR REPLACE INTO wb_calibration"
+            " (cam_model,count,ev,ready_max_ms,ready_avg_ms,ready_min_ms,reps,created_ms)"
+            " VALUES (?,?,?,?,?,?,?,?);",
+            -1, &st, nullptr);
+        sqlite3_bind_text (st, 1, e.camModel.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int  (st, 2, e.count);
+        sqlite3_bind_text (st, 3, e.ev.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int  (st, 4, e.readyMaxMs);
+        sqlite3_bind_int  (st, 5, e.readyAvgMs);
+        sqlite3_bind_int  (st, 6, e.readyMinMs);
+        sqlite3_bind_int  (st, 7, e.reps);
+        sqlite3_bind_int64(st, 8, e.createdMs);
+        sqlite3_step(st); sqlite3_finalize(st);
+    }
+    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+}
+
+std::vector<WbCalibEntry> Database::LoadWbCalibData(const std::string& camModel) const {
+    assert(m_db != nullptr);  // DB must be open to load calibration
+    assert(!camModel.empty());
+    std::vector<WbCalibEntry> result;
+    if (!m_db) return result;
+
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT count,ev,ready_max_ms,ready_avg_ms,ready_min_ms,reps,created_ms"
+        " FROM wb_calibration WHERE cam_model=?"
+        " ORDER BY count, ev;",
+        -1, &st, nullptr);
+    if (rc != SQLITE_OK) return result;
+    sqlite3_bind_text(st, 1, camModel.c_str(), -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        WbCalibEntry e;
+        e.camModel = camModel;
+        e.count    = sqlite3_column_int  (st, 0);
+        const auto* evp = sqlite3_column_text(st, 1);
+        e.ev         = evp ? reinterpret_cast<const char*>(evp) : "";
+        e.readyMaxMs = sqlite3_column_int  (st, 2);
+        e.readyAvgMs = sqlite3_column_int  (st, 3);
+        e.readyMinMs = sqlite3_column_int  (st, 4);
+        e.reps       = sqlite3_column_int  (st, 5);
+        e.createdMs  = sqlite3_column_int64(st, 6);
+        result.push_back(std::move(e));
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
+std::vector<std::string> Database::LoadWbCalibModels() const {
+    assert(m_db != nullptr);  // DB must be open to list models
+    std::vector<std::string> result;
+    if (!m_db) return result;
+    sqlite3_stmt* st = nullptr;
+    int rc = sqlite3_prepare_v2(m_db,
+        "SELECT DISTINCT cam_model FROM wb_calibration ORDER BY cam_model;",
         -1, &st, nullptr);
     if (rc != SQLITE_OK) return result;
     while (sqlite3_step(st) == SQLITE_ROW) {

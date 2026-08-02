@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+static constexpr char kVersion[] = "2026.08.02";
+
 // ─── Log ──────────────────────────────────────────────────────────────────────
 
 static std::ofstream g_log;
@@ -291,8 +293,8 @@ static bool LaunchDaemon() {
 // ─── Usage ────────────────────────────────────────────────────────────────────
 
 static void Usage() {
+    fprintf(stderr, "TotalControlCLI v%s — Sony Camera Remote Controller\n", kVersion);
     fputs(
-        "TotalControlCLI — Sony Camera Remote Controller\n"
         "\n"
         "Usage:\n"
         "  TotalControlCLI status\n"
@@ -330,6 +332,7 @@ static void Usage() {
         "Global flags:\n"
         "  --nolog      disable logging to TotalControlCLI.log\n"
         "  --nomonitor  (seq_start) skip live countdown; return immediately\n"
+        "  --version    print version and exit\n"
         "\n"
         "gPhoto2-compatible aliases:\n"
         "  TotalControlCLI --trigger-capture            (= shoot)\n"
@@ -375,6 +378,7 @@ int wmain(int argc, wchar_t* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string a = WtoU8(argv[i]);
         if (a == "--nolog") { logging = false; continue; }
+        if (a == "--version" || a == "-v") { printf("%s\n", kVersion); return 0; }
         args.push_back(std::move(a));
     }
 

@@ -112,7 +112,7 @@ static std::wstring ExeDir() {
 }
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-static constexpr wchar_t kVersion[] = L"2026.07.26";
+static constexpr wchar_t kVersion[] = L"2026.08.02";
 
 // ─── Startup progress bar ─────────────────────────────────────────────────────
 // Search phase only — measured on real hardware 2026-07-22 (4 cameras):

@@ -123,7 +123,7 @@ private:
     void RenderWhatsNewModal();      // separate modal, opened via About menu -> What's New
     void RenderCameraSetupModal();   // separate modal, opened via About menu -> Camera Setup
     void RenderOptionsWindow();      // floating Options window (API keys, etc.)
-    void RenderWriteRateCalibWindow(); // floating write-rate calibration window (manual, 4-speed)
+    void RenderDriveFpsCalibWindow();  // floating drive-fps calibration window
     void RenderCloseConfirmModal();  // "close TotalControl?" guard against accidental exit
     void RenderSequencerButtons();   // TEST RUN / STOP / RUN / STOP RUN in Col1
     void RenderLeftColumn();         // new single 270px left column
@@ -136,6 +136,9 @@ private:
     // Camera configuration
     void MergeCamerasIntoCamConfigs();
     void RenderCamConfigWindows();
+    void RenderAddSimCameraModal();  // "Add Simulated Camera" popup (Options menu)
+    void AddSimulatedCamera(const std::string& model);
+    void RemoveCamConfig(int ci);    // removes an offline camera_config entry + its window flag
     void NewTimeline();
     // Keeps C2/C3-anchored blocks correct as the observer location (and
     // therefore contact times) changes -- see TLAnchor in Timeline.h. Called
@@ -169,7 +172,7 @@ private:
     bool m_showWhatsNew    = false;
     bool m_showCameraSetup = false;
     bool m_showOptions     = false;
-    bool m_showWrCalibWnd  = false;
+    bool m_showDriveFpsCalibWnd = false;
     // ── Close confirmation guard ────────────────────────────────────────────
     bool m_showCloseConfirm = false; // WM_CLOSE deferred to this modal instead of closing immediately
     bool m_closeConfirmed   = false; // set true right before re-issuing the real close
@@ -502,7 +505,38 @@ private:
     // RenderSequencerButtons' auto-save block) rather than measured directly
     // — a standalone measurement existed earlier but was retired, see
     // CommandHandler.cpp's buffer_capacity_calib handler for why.
+    //
+    // This is the POST-HOLD drain rate (precise ARM-confirm-latency timing,
+    // measured after the shutter has fully stopped). See
+    // m_concurrentWriteCalibCache immediately below for the physically
+    // different, generally SLOWER concurrent-write rate, which applies
+    // instead while a block's own shutter is still held.
     std::map<std::string, double> m_cardCalibCache;  // camModel -> shots/sec
+
+    // ── Concurrent write-speed calibration ───────────────────────────────────
+    // Card write throughput WHILE the shutter is still actively firing (the
+    // capture pipeline and the background write both competing for the same
+    // I/O) -- see ConcurrentWriteCalibEntry in Database.h for the full
+    // rationale and how it's measured. Confirmed for real on hardware
+    // 2026-08-02 via the camera's own buffer readout: a 15s cont-lo hold
+    // that fired ~74 shots left only 31 pending in the buffer at release --
+    // i.e. concurrent draining is real and non-negligible (~43 shots over
+    // 15s, ≈2.9/s), not zero (an earlier same-day "~76 shots, ~all
+    // unwritten" reading turned out to be from a burst silently running
+    // 2s/~10 shots longer than configured -- see BuildBlockCmd's Burst-
+    // branch fix -- so it wasn't representative). Used for the "drain
+    // during this block's own hold" step in ComputeWrMsPerBlock/
+    // AdvanceOccupancyThroughBlock; m_cardCalibCache (post-hold) remains
+    // correct for the trailing wait-after-shooting-stops step and for
+    // genuinely idle gaps between blocks. Falls back to m_cardCalibCache
+    // when not yet calibrated for a model, so WR predictions degrade
+    // gracefully rather than going to zero.
+    std::map<std::string, double> m_concurrentWriteCalibCache;  // camModel -> shots/sec
+    void LoadConcurrentWriteCalibCache();
+    // Returns the concurrent rate if calibrated, else falls back to the
+    // post-hold rate (m_cardCalibCache), else 0 -- single lookup point so
+    // every WR caller degrades the same way.
+    double ConcurrentWriteFpsFor(std::string_view camModel) const;
 
     // ── Buffer capacity calibration ──────────────────────────────────────────
     // How many shots fit before the camera's rate slows (buffer full). Also
@@ -515,8 +549,139 @@ private:
         double      fastFps             = 0.0;
         double      slowFps             = 0.0;
         bool        slowdownObserved    = false;
+        // Precise post-burst ARM-drain measurement (ms), piggybacked onto
+        // the SAME burst that produced the fields above -- see
+        // FireBufferCapacityWriteSpeedTest(). -1 = not attempted (no
+        // slowdown observed, so nothing to drain-time) or the ARM call
+        // failed; the auto-save block falls back to slowFps in that case
+        // (matches pre-2026-08-01 behavior, e.g. for a BufferCapacity block
+        // fired from an old saved Timeline via SeqCamThreadProc, which
+        // never sets this field).
+        int         preciseDrainMs      = -1;
     };
     std::vector<BufferCapacitySample> m_bufferCapacityBuf;
+
+    // ── Buffer Capacity + Write-Speed Calibration (combined, direct-fire) ───
+    // Merged 2026-08-01: the held burst that determines buffer capacity
+    // already leaves the buffer pegged at that capacity when it stops (if a
+    // slowdown was observed), so the precise post-burst ARM-drain
+    // measurement -- previously a separate "Write-Rate Calibration" step
+    // that required capacity to already be known from a prior run --
+    // piggybacks directly on THIS SAME burst instead of needing a second
+    // one. One click, one burst, both numbers auto-saved. If no slowdown is
+    // observed within the hold (some camera/card combos -- e.g. ILCE-7M4 +
+    // CFexpress, confirmed by operator -- never fill their buffer even at
+    // HI+), that's a valid, useful result on its own: the card keeps up
+    // with the camera, no write bottleneck exists, and there is nothing to
+    // time a drain for -- reported as such, not as a failure.
+    int                m_bufCapCalibCamIdx  = 0;   // index into m_cameras
+    std::thread        m_bufCapCalibThread;
+    std::atomic<bool>  m_bufCapCalibRunning{false};
+    void FireBufferCapacityWriteSpeedTest();  // "Run Test" button
+    // "Set" (arm only, no shoot) -- sends a plain "arm" command (drive
+    // cont-hi-plus + ss/iso/f) so the drive-mode change and its buffer-clear
+    // wait (up to kDriveModeVerifyMs) happen and get cached BEFORE "Run
+    // Test" starts the timed hold. Without this, the FIRST "Run Test" click
+    // after the camera was on a different drive mode pays that confirm
+    // delay out of its own hold window, shortening the actual burst and
+    // corrupting the buffer-capacity inflection measurement (same failure
+    // mode the old manual write-rate tool's "Set" button existed to avoid --
+    // see Change log 2026-07-26).
+    std::atomic<bool> m_bufCapCalibArming{false};
+    std::atomic<int>  m_bufCapCalibArmResult{-2};  // -2 = no attempt yet, -1 = failed, >=0 = latency ms
+    void FireBufferCapacityArm();  // "Set" button
+    bool               m_showBufCapCalibWnd = false;
+    void RenderBufferCapacityCalibWindow();
+    // Structured result for RenderBufferCapacityCalibWindow's own display --
+    // m_lastResult stays the shared, single-line, log-style status string
+    // used app-wide, but the operator looking at THIS window wants the
+    // numbers laid out as separate readable fields, not one dense sentence.
+    // Populated by the auto-save block (RenderSequencerButtons) right
+    // alongside m_lastResult.
+    struct BufCapCalibResultDisplay {
+        bool        valid                 = false;
+        std::string camModel;
+        int         bufferCapacityShots   = 0;
+        int         totalShots            = 0;
+        double      fastFps               = 0.0;
+        bool        slowdownObserved      = false;
+        bool        precise               = false;  // true = piggybacked ARM drain, false = rough slowFps fallback
+        double      writeSpeedShotsPerSec = 0.0;
+        bool        dbSaved               = false;
+    };
+    BufCapCalibResultDisplay m_bufCapCalibResult;
+
+    // ── Concurrent Write-Rate Calibration (advanced, long-hold) ──────────────
+    // See m_concurrentWriteCalibCache comment above for the physical
+    // rationale. Deliberately a MUCH longer hold than the combined test
+    // above (default 45s vs that test's 30s ceiling that stops on first
+    // detection) -- this one must stay saturated well past the inflection
+    // point to accumulate enough post-inflection samples for a stable
+    // average (a short hold's handful of samples varied 3.3-4.9 shots/s
+    // run to run on real hardware, unusable as a calibration input).
+    // Shares m_bufCapCalibCamIdx (same camera picker) but needs its own
+    // running/result state since it's a separate, much longer operation.
+    int                m_concurWriteCalibHoldSec = 45;
+    std::atomic<bool>  m_concurWriteCalibRunning{false};
+    void FireConcurrentWriteRateTest();  // "Run Test" button (advanced section)
+    struct ConcurWriteResultDisplay {
+        bool        valid            = false;
+        std::string camModel;
+        int         totalShots       = 0;
+        int         bufferCapacityShots = 0;
+        double      fastFps          = 0.0;
+        double      concurrentFps    = 0.0;  // AnalyzeBufferCapacity's slow_fps, long-hold-averaged
+        bool        slowdownObserved = false;
+        bool        dbSaved          = false;
+    };
+    ConcurWriteResultDisplay m_concurWriteCalibResult;
+    // Pending result handoff from the background thread -- drained and
+    // saved directly inside RenderBufferCapacityCalibWindow() each frame
+    // it's open (self-contained, unlike m_bufferCapacityBuf's shared
+    // RenderSequencerButtons auto-save path, which this test must NOT go
+    // through -- it saves to a different table and must not overwrite
+    // buffer_capacity_calibration/card_write_calibration with its own,
+    // deliberately-long-hold numbers).
+    struct ConcurWritePending {
+        bool        haveResult          = false;
+        std::string camModel;
+        int         totalShots          = 0;
+        int         bufferCapacityShots = 0;
+        double      fastFps             = 0.0;
+        double      concurrentFps       = 0.0;
+        bool        slowdownObserved    = false;
+    };
+    ConcurWritePending m_concurWritePending;  // guarded by m_seqCalibMtx
+
+    // ── WB (Write-Buffer) Calibration ────────────────────────────────────────
+    // No dedicated test/thread/UI -- collected as a side effect of running
+    // "1. Bracket ARM Calibration" via the normal TEST RUN/RUN buttons, same
+    // as m_armCalibBuf. An earlier direct-fire probe design (own thread,
+    // arm-then-shoot loop firing immediately with no settle gap) broke the
+    // camera's bracket sequencing on real hardware 2026-08-02 -- only 1/N
+    // shots fired whenever the arm needed real busy-retry recovery, even
+    // though the property itself read back confirmed. Reusing the proven,
+    // already-paced sequencer path (SeqCamThreadProc's sendArm lambda)
+    // avoids that regime entirely. See ArmCalibSample above -- same
+    // measurement, additionally keyed by ev (arm_calibration is count-only).
+    struct WbCalibSample { int count = 0; std::string ev; int latMs = 0; std::string camModel; };
+    std::vector<WbCalibSample> m_wbCalibBuf;  // guarded by m_seqCalibMtx, same as m_armCalibBuf
+    // Aggregates m_wbCalibBuf (min/avg/max per (count,ev)) and saves to
+    // wb_calibration -- called alongside SaveArmCalibFromBuf from the same
+    // per-model "SAVE CALIB" action, no separate button.
+    void SaveWbCalibFromBuf(const std::string& camModel);
+
+    // camModel -> (count,ev) -> ready_avg_ms. Loaded from DB at startup;
+    // reloaded after SaveWbCalibFromBuf(). Empty (or missing key) means
+    // "not yet calibrated for this variant" -- ComputeWrMsPerBlock falls
+    // back to the leaky-bucket formula in that case, same graceful-
+    // degradation pattern as every other calibration cache.
+    std::map<std::string, std::map<std::pair<int, std::string>, int>> m_wbCalibCache;
+    void LoadWbCalibCache();  // DB -> m_wbCalibCache
+    // Returns the measured ready time if calibrated for (camModel,count,ev),
+    // else -1 -- single lookup point so ComputeWrMsPerBlock's fallback logic
+    // stays in one place.
+    int WbReadyMsFor(std::string_view camModel, int count, const std::string& ev) const;
 
     // camModel -> buffer_capacity_shots (most recent one-off measurement).
     // Used only as ComputeWrMsPerBlock's occupancy ceiling clamp.
@@ -564,9 +729,12 @@ private:
     std::vector<int64_t> PredictedShotOffsetsMs(const TLBlock& b, std::string_view camModel) const;
     // Advances a buffer-occupancy checkpoint (shots, atMs) through block
     // blk's predicted per-shot schedule, applying the leaky-bucket
-    // recurrence at each shot up to uptoMs. If realShotCount >= 0, the
-    // predicted list is truncated/extended to that count first -- see
-    // App.cpp definition for full detail.
+    // recurrence at each shot up to uptoMs. writeFps should be the
+    // CONCURRENT (while-shooting) rate -- see m_concurrentWriteCalibCache
+    // comment -- since every caller walks a span that's still inside or
+    // immediately after this block's own active shooting. If realShotCount
+    // >= 0, the predicted list is truncated/extended to that count first --
+    // see App.cpp definition for full detail.
     void AdvanceOccupancyThroughBlock(const TLBlock& blk, int64_t blockStartMs,
                                        int realShotCount, double writeFps,
                                        double capacityShots, int64_t uptoMs,
@@ -596,91 +764,37 @@ private:
     // fps and buffer_capacity_shots (with a safety margin) so a bad manual
     // value can't overflow the buffer regardless of what's typed here.
     int                  m_driveFpsCalibDurSec = 5;
-    std::thread          m_driveFpsCalibThread;  // separate from m_wrCalibThread -- independent operation
+    std::thread          m_driveFpsCalibThread;  // separate from m_bufCapCalibThread -- independent operation
     std::atomic<bool>    m_driveFpsCalibRunning{false};
     int                  m_driveFpsCalibBusyIdx = -1;  // which of the 4 drives is currently running, -1 = none
     std::atomic<double>  m_driveFpsCalibResult{-1.0};  // -1 = no pending result, else measured fps
     void FireDriveFpsSample(int driveIdx);  // "Measure <drive> FPS" button
+    // "Set" per drive (arm only, no shoot) -- same reasoning as
+    // FireBufferCapacityArm: buffer_capacity_calib's own drive-mode change
+    // (if the camera was on a different drive) pays its confirm delay out
+    // of the SAME timed hold FireDriveFpsSample uses to measure fast_fps,
+    // silently shortening that hold and corrupting the very first
+    // measurement for each drive (operator-reported 2026-08-01: "pierwszy
+    // raz jest jałowy" -- the first run for a drive is wasted/void). One
+    // arm state shared across all 4 drives (only one calibration op can be
+    // in flight at a time on this camera/pipe anyway); m_driveFpsArmBusyIdx
+    // says which drive is currently arming.
+    std::atomic<bool>    m_driveFpsArming{false};
+    int                  m_driveFpsArmBusyIdx = -1;
+    std::atomic<int>     m_driveFpsArmResult{-2};  // -2 = no attempt yet, -1 = failed, >=0 = latency ms
+    void FireDriveFpsArm(int driveIdx);  // "Set" button, per drive
 
-    // ── Write-rate calibration (manual, 4-speed) ─────────────────────────────
-    // Companion to the Buffer Capacity preset above, added after a 2026-07-26
-    // hardware cross-check: AnalyzeBufferCapacity's inflection detector infers
-    // write throughput from the shutter-firing cadence once the buffer
-    // saturates, but firing all 4 drive speeds for a fixed duration and
-    // reading the camera's own "shots still pending write" indicator directly
-    // off the body gave a drive-independent flushed-shots-per-second figure
-    // ~2.15x SLOWER than what the inflection method had stored — believed to
-    // be the actual cause of WrEstMs's known underestimation. This tool lets
-    // the operator collect samples that way and pool them into the same
-    // card_write_calibration row the Buffer Capacity preset writes.
-    struct WrCalibSample {
-        std::string drive;       // "cont-lo" | "cont-mid" | "cont-hi" | "cont-hi-plus"
-        int         durSec   = 0;
-        int         fired    = 0;   // shots actually fired (SRV response "captures")
-        int         buffered = 0;   // operator-read: still pending write at burst end
-    };
-    std::vector<WrCalibSample> m_wrCalibSamples;
-    int                        m_wrCalibDriveIdx   = 0;  // 0=lo 1=mid 2=hi 3=hi+
-    // Default 7s, not 8s: at HI+ (~9.1 shots/s measured) an 8s hold fires
-    // ~73 shots, above ILCE-7RM4A's measured 65-shot buffer_capacity_shots
-    // ceiling (see buffer_capacity_calibration) -- once the buffer actually
-    // overflows mid-test the fired-shots rate itself drops to the write-
-    // limited speed, contaminating the very rate this test is trying to
-    // isolate. 7s keeps every drive speed's fired count under the ceiling.
-    int                        m_wrCalibDurSec      = 7;
-    int                        m_wrCalibCamIdx       = 0;  // index into m_cameras
-    int                        m_wrCalibBufferedIn   = 0;
-    std::thread                m_wrCalibThread;
-    // "Set" (arm only, no shoot) vs. "Run Test" (fire the timed burst) are
-    // separate steps/buttons: SetPropAndVerify's cache is what makes a burst
-    // start immediately, and a drive-mode CHANGE (e.g. previous test picture
-    // left the camera on "single") can take up to kDriveModeVerifyMs to
-    // confirm -- doing that confirmation as part of the first "Run Test"
-    // click ate into that click's own hold window, observed on real hardware
-    // as the first click firing only 1 frame and the second (already armed,
-    // cache-hit, no confirm delay) firing the real burst.
-    std::atomic<bool>          m_wrCalibArming{false};
-    std::atomic<int>           m_wrCalibArmResult{-2};   // -2 = no attempt yet, -1 = failed, >=0 = latency ms
-    std::atomic<bool>          m_wrCalibFiring{false};
-    std::atomic<int>           m_wrCalibLastFired{-1};   // -1 = no pending result to review
-    void ArmWriteRateSample();   // "Set" button: arm drive mode + exposure, no shoot
-    void FireWriteRateSample();  // "Run Test" button: spawns m_wrCalibThread, fires one timed burst
-
-    // ── Large-backlog calibration (auto, single long-verify ARM call) ────────
-    // Companion to the short-burst/visual-reading tool above, simplified
-    // 2026-07-26 after realizing the physical backlog doesn't depend on
-    // WHICH drive mode overflows it: fires a LONG burst on the fastest drive
-    // (cont-hi-plus, to guarantee saturation quickly regardless of exact
-    // fps) well past the point buffer_capacity_shots fills, which pegs
-    // occupancy at EXACTLY buffer_capacity_shots the instant shooting stops
-    // (once saturated, firing rate = write rate, since a new shot can't be
-    // taken until an old one is evicted -- so occupancy holds steady at the
-    // ceiling for the whole saturated phase, not just "however many were
-    // fired minus however many drained"). Then ONE "arm" call (to "single")
-    // with a large verify_ms budget (not an outer retry loop) -- CommandHandler's
-    // SetPropAndVerify already retries internally, event-driven (wakes on
-    // OnPropertyChanged, <=500ms poll cap), so a single big-budget call
-    // reports the real confirm latency directly and far more precisely than
-    // timing repeated short-budget attempts from the GUI side (each bounded
-    // by kDriveModeVerifyMs, ~6-9s of dead time per attempt on real
-    // hardware). write_rate = buffer_capacity_shots / (latency_s) -- no
-    // fired-count bookkeeping needed at all once saturation is guaranteed.
-    // Produces a WrCalibSample the same way the manual tool does (fired=
-    // buffer_capacity_shots, buffered=0, durSec=settle time), so it pools
-    // into the exact same card_write_calibration save.
-    //
-    // Replaced an earlier outer-retry-loop version (kept the same member
-    // names/shapes) after a real hardware log (2026-07-26) showed a cont-lo
-    // 22s/99-shot backlog settled in ~22.5-23s across 4 reproducible
-    // repeats, while the short-burst-calibrated write_rate (1.8929/s, from
-    // 7s samples) predicted 30.3s -- a real ~30% overestimate the
-    // short-sample tool can't see, since it never builds a backlog anywhere
-    // near that large.
-    int                m_wrCalibBacklogDurSec = 20;
-    std::atomic<bool>  m_wrCalibBacklogRunning{false};
-    std::atomic<int>   m_wrCalibBacklogFired{-1};      // -1 = no result yet; else buffer_capacity_shots used
-    std::atomic<int>   m_wrCalibBacklogSettleMs{-1};   // -1 = no result yet, -2 = never settled within the cap
-    void FireWriteRateBacklogTest();  // "Run Large-Backlog Test" button
+    // ── Card write-speed calibration ─────────────────────────────────────────
+    // Historical note: this used to be a standalone "Write-Rate Calibration"
+    // window/mechanism (manual 4-speed burst-and-visually-read-the-camera
+    // tool 2026-07-26 to 2026-08-01, then an automatic "Large-Backlog Test"
+    // needing a known buffer_capacity_shots as input). Both were removed
+    // 2026-08-01, merged into the combined "Buffer Capacity + Write-Speed
+    // Calibration" (m_bufCapCalibCamIdx and friends, below) -- see that
+    // comment for why the merge is physically sound and what happened to
+    // the manual path. card_write_calibration itself is still just one
+    // scalar per model (no per-count keying) -- see CardCalibEntry in
+    // Database.h.
     // WrEstMs: card-write-buffer drain time for a given virtual occupancy
     // (shots currently estimated "pending write") at this camera's
     // calibrated sustained write rate. Returns 0 when camModel isn't
@@ -688,9 +802,13 @@ private:
     int64_t WrEstMs(std::string_view camModel, double occupancyShots) const;
     // Walks `tr`'s blocks left-to-right maintaining a continuous virtual
     // card-write-buffer occupancy (shots pending write): each block adds its
-    // own shot count and drains at the camera's calibrated sustained write
-    // rate for its own real duration, clamped to the calibrated buffer
-    // capacity ceiling. The occupancy is carried across EVERY block
+    // own shot count and drains at the camera's calibrated CONCURRENT write
+    // rate for the duration its own shutter is held (see
+    // m_concurrentWriteCalibCache comment -- real and non-negligible,
+    // confirmed via the camera's own buffer readout), then at the POST-HOLD
+    // sustained write rate through any real idle gap to the next block,
+    // clamped to the calibrated buffer capacity ceiling. The occupancy is
+    // carried across EVERY block
     // (including same-param runs where no ARM happens) rather than being
     // reset at group boundaries — a WR wait (long enough to drain occupancy
     // to 0) is only surfaced right before a block that needs an ARM
@@ -722,9 +840,11 @@ private:
     // still being validated -- see Change log 2026-07-26.
     //
     // Modeled as a leaky-bucket queue (+1 per shot, continuous drain at the
-    // camera's calibrated write rate) walked through each block's
-    // PREDICTED PER-SHOT schedule (App.cpp's PredictedShotOffsetsMs /
-    // AdvanceOccupancyThroughBlock) rather than a flat per-block average --
+    // camera's calibrated CONCURRENT write rate while shooting -- see
+    // m_concurrentWriteCalibCache comment -- or the post-hold rate once
+    // idle) walked through each block's PREDICTED PER-SHOT schedule
+    // (App.cpp's PredictedShotOffsetsMs / AdvanceOccupancyThroughBlock)
+    // rather than a flat per-block average --
     // a flat average loses the real, often wildly uneven intra-block shape
     // (e.g. a slow symmetric bracket's per-stop exposure times: 3.2s, 1.6s,
     // 0.8s, 0.4s, 0.2s, ...) and the resulting error compounds over time.
@@ -836,6 +956,14 @@ private:
     std::vector<bool>      m_showCamCfgWnd;    // one flag per m_camConfigs entry
     int                    m_dragHorizonCamIdx = -1; // index of camera being dragged in Horizon mode
 
+    // "Add Simulated Camera" (Options menu) -- lets the operator register a
+    // camera_config row (model + focal length, drives the Solar Simulator FOV
+    // frame + a Timeline track) without ever physically connecting hardware,
+    // e.g. for pre-trip planning. Guid is synthesized ("SIM-<model>-<n>") so
+    // it never collides with a real CrSDK GUID.
+    bool        m_showAddSimCam = false;
+    char        m_simCamModelBuf[64] = {};
+
     // ── Live View overlay on solar simulator ──────────────────────────────────
     // Frames arrive via named SHM, decoded JPEG→RGBA by m_lvThread, uploaded to
     // D3D11 by CreateLvTextures (render thread only), rendered in
@@ -888,13 +1016,38 @@ private:
     void CreateLvTextures();   // render thread only
 
     // ── Photo preset ─────────────────────────────────────────────────────────
-    void AddPhotoPreset();
-    void AddTotalityBracketPreset();
-    void AddAllBracketVariantsPreset();
     void AddBracketArmCalibrationPreset();
     void AddShutterSpeedSweepPreset();
-    void AddBufferCapacityPreset();
-    int  m_presetTargetTrack = 0;  // camera track index that receives AddPhotoPreset blocks
+    int  m_presetTargetTrack = 0;  // camera track index that receives generated preset blocks
+
+    // "Single Picture Preset Generator..." / "Bracket Set Generator..."
+    // (Photo Sequence menu) -- configurable batch block generators, replace
+    // the old fixed "One Picture Per Minute" / "Add Brackets Photo Series"
+    // presets. Each repeats at intervalSec within ONE contact window at a
+    // time, picked by which of the 3 range buttons (C1-C2/C2-C3/C3-C4) the
+    // operator clicks -- not a checkbox multi-select, so the window it
+    // generated into is unambiguous. Two separate small windows rather than
+    // one combined dialog -- less crowded, and Single/Bracket are
+    // independent choices anyway. No Burst generator: a repeating
+    // held-shutter block has no practical use (explicit product decision,
+    // 2026-08-01).
+    enum class GenPresetRange { C1C2, C2C3, C3C4 };
+    struct GenPresetRangeCfg {
+        int         intervalSec = 60;
+        std::string ss          = "1/100";
+        int         iso         = 100;
+        std::string fstop       = "8.0";
+    };
+    bool               m_showSinglePresetWnd   = false;
+    bool               m_showBracketPresetWnd  = false;
+    GenPresetRangeCfg  m_genPresetSingle;
+    GenPresetRangeCfg  m_genPresetBracket;
+    std::string        m_genPresetBracketEv    = "1.0ev";
+    int                m_genPresetBracketCount = 5;
+    void RenderSinglePresetModal();
+    void RenderBracketPresetModal();
+    void GenerateRangePresetBlocks(GenPresetRangeCfg& cfg, BlockType type, GenPresetRange range);
+    void ClearRangePresetBlocks(GenPresetRange range);
 };
 
 } // namespace TotalControl

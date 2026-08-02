@@ -480,13 +480,20 @@ bool CameraController::SetPropAndVerify(uint32_t code, uint32_t dataType, long l
     }
     assert(maxWaitMs > 0);
     assert(code != 0);
-    static constexpr int kMaxAttempts = 64; // bounded loop — real bound is the deadline below
+    // Real bound is the deadline (maxWaitMs) below; this attempt cap only
+    // guards against a runaway loop if the wait-step math is ever wrong.
+    // Must scale with maxWaitMs -- worst case every iteration hits the
+    // 500ms fallback below (no real OnPropertyChanged wake), so a fixed
+    // small cap could silently truncate a legitimate long wait (e.g. a
+    // calibration probe requesting verify_ms=60000) well before the real
+    // deadline. 400ms/attempt keeps headroom over the 500ms fallback step.
+    const int maxAttempts = std::min(4000, static_cast<int>(maxWaitMs / 400) + 8);
     const auto start    = std::chrono::steady_clock::now();
     const auto deadline = start + std::chrono::milliseconds(maxWaitMs);
 
     SetPropRaw(code, dataType, value, desc);
 
-    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
         uint64_t cur = 0;
         if (GetPropRaw(code, cur) &&
             static_cast<long long>(static_cast<uint32_t>(cur)) == value) {
@@ -851,6 +858,55 @@ bool CameraController::Shoot(int* latencyMs, int timeoutMs, int expectedCaptures
     Logf(L"Shoot: %s  captures=%d/%d  %d ms",
          ok ? L"OK" : L"TIMEOUT", m_capturedCount.load(), m_capturedTarget, ms);
     return ok;
+}
+
+bool CameraController::ShootUntilBufferSlowdown(int* latencyMs, int maxTimeoutMs,
+                                                  int* actualCaptures) {
+    assert(maxTimeoutMs > 0);
+    assert(latencyMs != nullptr && actualCaptures != nullptr);  // both out-params required by this caller
+    if (!m_connected)        { Log(L"ShootUntilBufferSlowdown: not connected");    return false; }
+    if (m_deviceHandle == 0) { Log(L"ShootUntilBufferSlowdown: no device handle"); return false; }
+
+    auto h = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    m_capturedCount  = 0;
+    m_capturedTarget = 9999;  // sentinel -- real stop condition is the live-inflection predicate below
+
+    auto t0 = std::chrono::steady_clock::now();
+    SDK::SendCommand(h, SDK::CrCommandId_Release, SDK::CrCommandParam_Down);
+
+    // Mirrors AnalyzeBufferCapacity's baseline+threshold exactly, but checked
+    // incrementally as each new capture lands rather than once at the end --
+    // only the newest interval needs checking each time, since every earlier
+    // interval was already checked (and found non-slow) on a prior wakeup.
+    static constexpr int    kBaselineSamples = 4;
+    static constexpr double kSlowdownFactor  = 1.6;
+
+    std::unique_lock<std::mutex> lk(m_waitMutex);
+    m_waitCv.wait_for(lk, std::chrono::milliseconds(maxTimeoutMs),
+        [this] {
+            int n = m_capturedCount.load();
+            if (n >= m_capturedTarget || m_shutdownReq.load()) return true;
+            if (n < kBaselineSamples + 2) return false;  // baseline window + one post-baseline sample
+            int64_t baselineSumMs = 0;
+            for (int i = 0; i < kBaselineSamples; ++i)
+                baselineSumMs += m_captureTimestampsMs[i + 1] - m_captureTimestampsMs[i];
+            double baselineMs = static_cast<double>(baselineSumMs) / kBaselineSamples;
+            if (baselineMs <= 0.0) return false;
+            double lastIntervalMs = static_cast<double>(
+                m_captureTimestampsMs[n - 1] - m_captureTimestampsMs[n - 2]);
+            return lastIntervalMs > baselineMs * kSlowdownFactor;
+        });
+    lk.unlock();
+    SDK::SendCommand(h, SDK::CrCommandId_Release, SDK::CrCommandParam_Up);
+
+    int ms = static_cast<int>(
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count());
+    *latencyMs      = ms;
+    *actualCaptures = m_capturedCount.load();
+    Logf(L"ShootUntilBufferSlowdown: captures=%d  %d ms (ceiling %d ms)",
+         m_capturedCount.load(), ms, maxTimeoutMs);
+    return true;
 }
 
 CameraController::BufferCapacityResult

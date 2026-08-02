@@ -167,6 +167,23 @@ public:
                int expectedCaptures = 1, bool holdForBurst = false,
                int* actualCaptures = nullptr);
 
+    // ── ShootUntilBufferSlowdown ─────────────────────────────────────────────
+    // Dedicated to buffer-capacity calibration -- holds the shutter (same
+    // Cont_Bracket Release-Down/Up pattern as Shoot(holdForBurst=true)) and
+    // releases the INSTANT a live inflection is detected in the capture
+    // cadence (one shot landing kSlowdownFactor x slower than the baseline
+    // rate established from the first few shots) -- physically, that is the
+    // exact moment the buffer just filled and occupancy first reached
+    // capacity, so there is no benefit to firing further past it, only
+    // wasted shutter actuations/wear. maxTimeoutMs is a ceiling, not a fixed
+    // hold: if no slowdown is ever detected within it, that's a real, valid
+    // result too (buffer capacity is at least actualCaptures shots -- some
+    // camera/card combos never fill their buffer). A separate method rather
+    // than a Shoot() parameter, to avoid touching Shoot()'s wait predicate
+    // used by every other caller (shoot/bracket/burst/arm).
+    bool ShootUntilBufferSlowdown(int* latencyMs, int maxTimeoutMs,
+                                   int* actualCaptures);
+
     // ── Buffer capacity ───────────────────────────────────────────────────────
     struct BufferCapacityResult {
         int    totalShots         = 0;      // actual captures during the whole hold

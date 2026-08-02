@@ -61,6 +61,27 @@ struct ArmCalibEntry {
     int64_t     createdMs = 0;
 };
 
+// Write-buffer-ready calibration — how long after a bracket variant finishes
+// firing until the camera genuinely accepts the next DriveMode change,
+// measured DIRECTLY (not modeled): one long-budget "arm" probe targeting a
+// value different from cache (forcing a real round-trip past the cached
+// fast-path) right after the bracket completes, its returned latency_ms IS
+// the sample. Keyed by (camModel, count, ev) — unlike ArmCalibEntry/
+// BktCalibEntry this is NOT assumed ev-independent: a bigger ev step means
+// longer real per-stop exposure times within the bracket's own shooting
+// window, which plausibly changes how much the buffer has already drained
+// by the time the last shot lands. Same shape as ArmCalibEntry otherwise.
+struct WbCalibEntry {
+    std::string camModel;
+    int         count      = 0;
+    std::string ev;           // e.g. "0.5ev" -- matches TLBlock::ev / bracket variant key
+    int         readyMaxMs = 0;
+    int         readyAvgMs = 0;
+    int         readyMinMs = 0;
+    int         reps       = 0;
+    int64_t     createdMs  = 0;
+};
+
 // Card write-speed calibration — one row per camera model (PRIMARY KEY),
 // unlike bracket/ARM calibration which are also keyed by count. This is a
 // property of the camera+card combo's sustained write throughput, not of any
@@ -176,11 +197,53 @@ public:
     std::vector<ArmCalibEntry> LoadArmCalibData(const std::string& camModel) const;
     std::vector<std::string>   LoadArmCalibModels() const;
 
+    // Write-buffer-ready calibration (TotalControlConfig.db) — per-model,
+    // per-count, per-ev; feeds App::ComputeWrMsPerBlock()'s Bracket-boundary
+    // case directly as a measured lookup, instead of the leaky-bucket
+    // occupancy/drain-rate formula used for Burst/BufferCapacity. See
+    // WbCalibEntry comment above.
+    void                      CreateWbCalibTable();
+    void                      SaveWbCalibData(const std::vector<WbCalibEntry>& entries);
+    std::vector<WbCalibEntry> LoadWbCalibData(const std::string& camModel) const;
+    std::vector<std::string>  LoadWbCalibModels() const;
+
     // Card write-speed calibration (TotalControlConfig.db) — one row per
     // model, feeds App::WrEstMs() the way LoadArmCalibData feeds ArmEstMs().
+    // This is the POST-HOLD drain rate (precise ARM-confirm-latency timing,
+    // after the shutter has stopped) -- see ConcurrentWriteCalibEntry below
+    // for why that's a physically different, generally SLOWER number than
+    // the concurrent-write rate.
     void            CreateCardCalibTable();
     bool            SaveCardCalib(const CardCalibEntry& entry);  // false = sqlite3_step didn't return SQLITE_DONE
     std::vector<CardCalibEntry> LoadCardCalibAll() const;
+
+    // Concurrent write-speed calibration (TotalControlConfig.db) — one row
+    // per model. Added 2026-08-02 after hardware evidence (operator-run
+    // rehearsal) showed the card's write throughput WHILE the shutter is
+    // still actively firing (capture pipeline and background write sharing
+    // I/O) is measurably SLOWER than the throughput measured by draining an
+    // already-full buffer AFTER shooting stops (CardCalibEntry above) --
+    // using the post-hold rate for the "does this block's own hold overflow
+    // the buffer" calculation under-predicted real backlog by several
+    // seconds. Measured via a long (default 45s) held burst that
+    // deliberately stays saturated well past the inflection point
+    // (buffer_capacity_calib with stop_on_slowdown=false), averaging many
+    // post-inflection intervals for a statistically stable sustained rate
+    // -- same AnalyzeBufferCapacity slow_fps mechanism as
+    // BufferCapacityEntry, just run long enough to be trustworthy (the
+    // short buffer-capacity/drive-fps tests only see a handful of
+    // post-inflection samples, too noisy to use as a calibration input on
+    // their own -- confirmed varying 3.3-4.9 shots/s run to run).
+    struct ConcurrentWriteCalibEntry {
+        std::string camModel;
+        double      shotsPerSec   = 0.0;
+        int         sampleShots   = 0;   // post-inflection shots averaged
+        int64_t     measuredMs    = 0;
+        int64_t     createdMs     = 0;
+    };
+    void            CreateConcurrentWriteCalibTable();
+    bool            SaveConcurrentWriteCalib(const ConcurrentWriteCalibEntry& entry);
+    std::vector<ConcurrentWriteCalibEntry> LoadConcurrentWriteCalibAll() const;
 
     // Buffer capacity calibration (TotalControlConfig.db) — one row per model.
     void            CreateBufferCapacityTable();
@@ -226,6 +289,7 @@ public:
                                          double horizonAltDeg = 0.0,
                                          double horizonAzDeg  = 180.0);
     std::vector<CamConfig> LoadCamConfigs() const;
+    void                   DeleteCamConfig(const std::string& guid);
 
     // Delta T (IERS Earth-orientation bulletin) cache (TotalControlConfig.db)
     // Keyed by eclipseDate "YYYY-MM-DD". Refreshed at most once per 24h by

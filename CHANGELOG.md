@@ -2,6 +2,15 @@
 
 ---
 
+## 2026-08-02
+
+### mgr Maciej Szupiluk
+- Fixed continuous-drive (Burst) blocks firing about 2 seconds longer than configured - a safety margin meant only for the app's own internal wait was accidentally being sent to the camera as the real shutter-hold duration, so every Burst block shot slightly more frames than intended
+- Reworked the prediction for how long the camera needs to finish writing to the memory card after a Burst block, based on directly watching the camera's own on-screen buffer counter: the card does keep writing while the shutter is still held (not after it's released, as an earlier version of this session's fix assumed), so the wait now correctly accounts for photos that already finished writing during the shot itself, not just afterward - confirmed closely matching real camera behavior on hardware
+- Fixed the live "Buf" diagnostic column (next to each camera's status) showing an implausible number immediately after restarting a test shortly following a large Burst block - a leftover value from the previous run wasn't being cleared when a new run starts
+- The existing "Bracket ARM Calibration" tool now also measures, per exact bracket setting (shot count and EV step, not just shot count), how long the camera takes to accept the next settings change after that specific type of bracket finishes - feeds a more accurate prediction of the gray wait bar specifically for bracket-to-bracket transitions, which a more general formula (validated for long continuous holds) was undershooting for short, fast brackets. Saved automatically alongside the existing calibration data, no separate step needed - not yet verified on hardware
+- Added a version number to TotalControlCLI (`--version` / `-v`, and shown in its usage help) - previously the only one of the three programs without one
+
 ## 2026-07-26
 
 ### mgr Maciej Szupiluk
