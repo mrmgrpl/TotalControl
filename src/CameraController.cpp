@@ -740,12 +740,16 @@ uint32_t CameraController::NearestShutterSpeed(uint32_t targetRaw) {
 static constexpr int kExposurePropVerifyMs = 6000;
 
 bool CameraController::SetPCRemotePriority() {
-    // forceRecheck=true: PC Remote priority is the one property that, if it
-    // silently lapses, lets the physical dial move OTHER properties (e.g.
-    // ShutterSpeed) out from under us with no error anywhere -- a permanent
-    // "Skip (cached)" here would mean we'd never notice. Every other
-    // SetPropAndVerify caller keeps the default cache-forever behavior; this
-    // is deliberately the one exception.
+    // forceRecheck=true: PC Remote priority can silently lapse, letting the
+    // physical dial move OTHER properties (e.g. ShutterSpeed) out from under
+    // us with no error anywhere -- a permanent "Skip (cached)" here would
+    // mean we'd never notice. DriveMode (CommandHandler.cpp, all 7 call
+    // sites) got the same treatment 2026-08-05 after a real battery-pull test
+    // on hardware confirmed the exact same failure shape: the camera resets to
+    // "single" drive on power-cycle, but the cache still said "bracket" from
+    // before the pull, so the next bracket shoot silently fired in single
+    // mode instead (1/N captures, timeout) -- the app never re-verified
+    // because DriveMode wasn't yet in this forceRecheck set.
     return SetPropAndVerify(SDK::CrDeviceProperty_PriorityKeySettings,
                             SDK::CrDataType_UInt16, SDK::CrPriorityKey_PCRemote,
                             L"PriorityKey", kExposurePropVerifyMs, /*forceRecheck=*/true);

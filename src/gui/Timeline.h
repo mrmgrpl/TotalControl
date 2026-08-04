@@ -66,6 +66,17 @@ struct TLTrack {
     int                  focalMm  = 0;  // lens focal length in mm (0 = unset)
     std::vector<TLBlock> blocks;
 
+    // Transient, in-memory only -- NOT persisted by SaveTimeline/LoadTimeline
+    // (always defaults false on load/save round-trip). Set by
+    // AddBracketArmCalibrationPreset() so SeqCamThreadProc sends ARM
+    // immediately after each block fires instead of deferring it, so the
+    // ARM/WB calibration sample reflects the FULL real wait, not whatever's
+    // left after the schedule's own kGapMs safety margin already elapsed
+    // (see 2026-08-04 investigation: deferred ARM was silently absorbing
+    // most of the real write-buffer wait, making calibrated WB times read
+    // ~200ms instead of the real 2-3s observed on hardware).
+    bool                  calibImmediateArm = false;
+
     bool IsCamera() const { return type == "camera"; }
     bool IsAudio()  const { return type == "audio";  }
 };

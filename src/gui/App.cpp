@@ -1554,21 +1554,36 @@ int App::BlockShotCount(const TLBlock& b, std::string_view camModel) const {
 // project's cameras have a 7-shot bracket mode.
 int64_t App::ArmEstMs(const TLBlock& b, std::string_view camModel) const {
     assert(b.type != BlockType::Audio);
-    if (b.type != BlockType::Bracket) return 2000LL;
+    // Single blocks are also real ARM-DriveMode-change events (2026-08-04,
+    // explicit request: the ss-swept 1/8000-4s Single frames in
+    // AddBracketArmCalibrationPreset are a genuine measurement, not
+    // throwaway warm-up) -- treated as count=1 so they share the same
+    // arm_calibration lookup/fallback shape as a Bracket. Burst/
+    // BufferCapacity still use the flat 2000ms guess, unchanged.
+    if (b.type != BlockType::Bracket && b.type != BlockType::Single) return 2000LL;
+    const int effCount = (b.type == BlockType::Bracket) ? b.count : 1;
 
     if (!camModel.empty()) {
         auto it = m_armCalibCache.find(std::string(camModel));
         if (it != m_armCalibCache.end()) {
-            auto jt = it->second.find(b.count);
+            auto jt = it->second.find(effCount);
             if (jt != it->second.end()) return jt->second;
         }
     }
 
     static constexpr int64_t kSettingsChangeMs = 300; // factor (a)
     int64_t bufferClearMs;                            // factor (b)
-    if      (b.count <= 3) bufferClearMs = 4100;
-    else if (b.count <= 5) bufferClearMs = 4350;
-    else                   bufferClearMs = 5500; // 9-count and above
+    // Bumped 2026-08-04 (was 4100/4350/5500): these are the SAFE STARTING
+    // POINT for a camera with no arm_calibration rows yet -- exactly what a
+    // calibration run itself uses before it has real data to replace them
+    // with. The old values already exceeded what ILCE-7RM4A needed for its
+    // own busy-retry recovery (~1.9s observed), but per explicit request the
+    // pre-calibration default should err generously safe rather than just
+    // barely sufficient, since undershooting here is what causes 1/N
+    // captures (see LoadArmCalibCache's comment for the confirmed mechanism).
+    if      (effCount <= 3) bufferClearMs = 5000;
+    else if (effCount <= 5) bufferClearMs = 6500;
+    else                    bufferClearMs = 8000; // 9-count and above
     return std::max(kSettingsChangeMs, bufferClearMs);
 }
 
@@ -1664,19 +1679,24 @@ std::vector<int64_t> App::ComputeWrMsPerBlock(const TLTrack& tr,
 
         if (!needsArm) continue;
 
-        // Bracket blocks: prefer a DIRECTLY MEASURED wb_calibration lookup
-        // over the leaky-bucket occupancy/drain-rate formula when one exists
-        // for this exact (camModel, count, ev). The formula above is a flat-
-        // rate approximation validated for LONG, sustained holds (Burst/
+        // Bracket AND Single blocks: prefer a DIRECTLY MEASURED wb_calibration
+        // lookup over the leaky-bucket occupancy/drain-rate formula when one
+        // exists for this exact (camModel, count, ev). The formula above is a
+        // flat-rate approximation validated for LONG, sustained holds (Burst/
         // BufferCapacity) -- for a short, fast bracket (often under a
         // second) it overstates how much can drain in that brief a window,
         // since the write pipeline doesn't reach steady-state throughput
         // that fast (confirmed on hardware 2026-08-02: predicted ~0.5s tail
         // for a 3-shot bracket, visibly too short). wb_calibration measures
         // the real end-to-end ready time directly instead, per variant, so
-        // it isn't subject to that regime mismatch.
-        int wbMs = (blk.type == BlockType::Bracket)
-                 ? WbReadyMsFor(camModel, blk.count, blk.ev) : -1;
+        // it isn't subject to that regime mismatch. Single uses count=1/ev=""
+        // (2026-08-05: was Bracket-only, leaving Single blocks with no WR
+        // zone at all whenever card_write_calibration was also empty --
+        // matches the same count=1/ev convention sendArm's sample collection
+        // and AddBracketArmCalibrationPreset's wrTimeFor already use).
+        int wbMs = -1;
+        if (blk.type == BlockType::Bracket)     wbMs = WbReadyMsFor(camModel, blk.count, blk.ev);
+        else if (blk.type == BlockType::Single) wbMs = WbReadyMsFor(camModel, 1, blk.ev);
         wrMsAt[bi] = wbMs >= 0 ? wbMs : WrEstMs(camModel, occupancy);
         // WR is defined as "wait long enough for occupancy to drain to 0" --
         // once it elapses (by this model) the buffer is empty. This final
@@ -2329,6 +2349,23 @@ void App::SeqCamThreadProc(int        camIdx,
     int64_t armTargetMs = 0;
     int     niArmNext    = -1;
 
+    // ── Stall/reconnect recovery ──────────────────────────────────────────────
+    // simMs in Running mode tracks real wall-clock time and does not pause
+    // for a camera disconnect (e.g. a mid-run battery swap). Without a
+    // staleness check, every block scheduled during the outage becomes
+    // simultaneously "due" the instant the camera comes back, and the due-
+    // block loop below fires the entire backlog back-to-back -- confirmed on
+    // hardware, see 2026-08-04 log analysis (Dan Becker report: "the camera
+    // wants to catch up to the ticker"). kMaxCatchupMs mirrors
+    // SequencerEngine's own >30s late-skip threshold (SequencerEngine.cpp)
+    // so the two independently-implemented sequencers behave consistently.
+    // needsResumeArm marks that at least one stale block was skipped since
+    // the last real ARM, so the first still-relevant block gets a fresh,
+    // synchronous re-arm instead of trusting whatever ARM scheduling would
+    // have applied to the blocks that were just skipped.
+    static constexpr int64_t kMaxCatchupMs = 30000;
+    bool needsResumeArm = false;
+
     // ── Pre-arm deduplication ─────────────────────────────────────────────────
     // ARM is sent after a block fires only when the NEXT block has different
     // params (BlockParamsDiffer). Identical consecutive blocks skip the ARM —
@@ -2368,7 +2405,13 @@ void App::SeqCamThreadProc(int        camIdx,
         // the bracket-shoot samples further below, tagged with this thread's
         // own camera model since different camera threads can be different
         // models running at once (see docs/arm_latency_bionz_whitepaper.md).
-        if (ok && blk.type == BlockType::Bracket && lat >= 0) {
+        // Single blocks are included too (2026-08-04, explicit request): the
+        // ss-swept 1/8000-4s Single frames in AddBracketArmCalibrationPreset
+        // are a real ARM/WB measurement, not throwaway warm-up shots -- keyed
+        // as count=1 (mirrors ArmEstMs's own Single->count=1 treatment); ev
+        // stays blk.ev (empty for Single, a real bucket meaning "single
+        // shot" in wb_calibration, distinct from any bracket ev step).
+        if (ok && (blk.type == BlockType::Bracket || blk.type == BlockType::Single) && lat >= 0) {
             std::string thisCamModel;
             {
                 std::lock_guard lk(m_camerasMutex);
@@ -2376,8 +2419,9 @@ void App::SeqCamThreadProc(int        camIdx,
                     thisCamModel = m_cameras[camIdx].model;
             }
             if (!thisCamModel.empty()) {
+                const int effCount = (blk.type == BlockType::Bracket) ? blk.count : 1;
                 std::lock_guard lk(m_seqCalibMtx);
-                m_armCalibBuf.push_back({blk.count, lat, thisCamModel});
+                m_armCalibBuf.push_back({effCount, lat, thisCamModel});
                 // Same measurement, additionally keyed by ev (not just
                 // count) -- feeds wb_calibration / ComputeWrMsPerBlock's
                 // Bracket-boundary WR lookup. Reuses this call's own real
@@ -2387,7 +2431,7 @@ void App::SeqCamThreadProc(int        camIdx,
                 // bracket sequencing on real hardware 2026-08-02 (only 1/N
                 // shots fired after a busy-retry recovery) -- this reuses
                 // the same proven, already-paced sequencer path instead.
-                m_wbCalibBuf.push_back({blk.count, blk.ev, lat, thisCamModel});
+                m_wbCalibBuf.push_back({effCount, blk.ev, lat, thisCamModel});
             }
         }
     };
@@ -2410,11 +2454,45 @@ void App::SeqCamThreadProc(int        camIdx,
         // 1–3s per bracket/burst, and the stale pre-call simMs would cause all
         // subsequent blocks that became due during that wait to fire instantly.
         while (ni < static_cast<int>(track->blocks.size())) {
+            // STOP must take effect between blocks even while the loop below
+            // is fast-forwarding through a stale backlog (no blocking pipe
+            // calls happen in that path, so without this check STOP would
+            // only be checked once the whole backlog was skipped).
+            if (!m_seqRun.load()) break;
+
             int64_t nowInner = UtcNowMs();
             int64_t simMs = (mode == GuiSeqMode::TestRunning)
                           ? (playheadStartMs + (nowInner - realStartMs))
                           : nowInner;
             m_tlPlayheadMs.store(simMs);
+
+            const TLBlock& blkPeek = track->blocks[ni];
+            if (blkPeek.atMs < 0) { ++ni; continue; }  // invalid block
+
+            // See "Stall/reconnect recovery" comment above this function's
+            // deferred-ARM state: skip anything more than kMaxCatchupMs
+            // behind schedule instead of firing it for real.
+            if (simMs - blkPeek.atMs > kMaxCatchupMs) {
+                LogLine(std::format(
+                    "SEQ cam={} SKIP late={}ms type={} lbl={}",
+                    camIdx, simMs - blkPeek.atMs, BlockTypeName(blkPeek.type),
+                    blkPeek.label.empty() ? "-" : blkPeek.label));
+                armPending    = false;  // stale target no longer applies
+                needsResumeArm = true;
+                ++ni;
+                m_seqNextBlock[camIdx] = ni;
+                continue;
+            }
+
+            // Landed on the first still-relevant block after skipping a
+            // stale backlog -- re-arm it directly (mirrors the initial-arm
+            // step before this loop) rather than trusting ARM scheduling
+            // that targeted a block we just skipped.
+            if (needsResumeArm) {
+                sendArm(blkPeek);
+                needsResumeArm = false;
+                continue;  // re-read simMs/playhead before the due-block check
+            }
 
             // Deferred ARM becomes due when the playhead reaches its own
             // start (see comment above sendArm's declaration) -- checked
@@ -2427,7 +2505,6 @@ void App::SeqCamThreadProc(int        camIdx,
             }
 
             const TLBlock& blk = track->blocks[ni];
-            if (blk.atMs < 0)    { ++ni; continue; }  // invalid block
             if (blk.atMs > simMs) break;               // not yet
 
             std::string cmd = BuildBlockCmd(blk, camIdx);
@@ -2683,16 +2760,26 @@ void App::SeqCamThreadProc(int        camIdx,
                 if (niNext < static_cast<int>(blks.size()) &&
                     blk.type != BlockType::Audio &&
                     BlockParamsDiffer(blk, blks[niNext])) {
-                    int64_t staticArmTarget = blks[niNext].atMs - ArmEstMs(blk, camModel);
-                    int64_t liveWrRemainMs = 0;
-                    {
-                        std::lock_guard lk(m_liveOccupancyMtx);
-                        liveWrRemainMs = WrEstMs(camModel, m_liveOccupancy[camIdx].shots);
+                    if (track->calibImmediateArm) {
+                        // Calibration wants the FULL real ARM/WB wait: send
+                        // ARM right now instead of deferring it, so sendArm's
+                        // own measured latency reflects the true elapsed time
+                        // from block-end to camera-ready, not whatever's left
+                        // after this preset's own kGapMs scheduling margin
+                        // already elapsed (see TLTrack::calibImmediateArm).
+                        sendArm(blks[niNext]);
+                    } else {
+                        int64_t staticArmTarget = blks[niNext].atMs - ArmEstMs(blk, camModel);
+                        int64_t liveWrRemainMs = 0;
+                        {
+                            std::lock_guard lk(m_liveOccupancyMtx);
+                            liveWrRemainMs = WrEstMs(camModel, m_liveOccupancy[camIdx].shots);
+                        }
+                        int64_t liveArmTarget = UtcNowMs() + liveWrRemainMs;
+                        armTargetMs = std::max(staticArmTarget, liveArmTarget);
+                        niArmNext   = niNext;
+                        armPending  = true;
                     }
-                    int64_t liveArmTarget = UtcNowMs() + liveWrRemainMs;
-                    armTargetMs = std::max(staticArmTarget, liveArmTarget);
-                    niArmNext   = niNext;
-                    armPending  = true;
                 }
             }
         }
@@ -3112,28 +3199,61 @@ void App::LoadAudioPreset(std::string_view lang) {
 
 // ─── Photo preset ─────────────────────────────────────────────────────────────
 
-// "Bracket ARM calibration" — dedicated repeated-measures calibration run:
-// the same 16 ev/count variants matching CrSDK (`kBrk` in
-// RenderInspectorColumn), each shot kReps times, for kReps*16 blocks total.
-// A 1-rep "smoke test" version of this preset existed 2026-07-12 to
-// 2026-08-01 but was removed: it wrote to the exact same bracket_calibration/
-// arm_calibration tables via the same "SAVE CALIB" button, and a 1-sample
-// mean is too weak to be a real calibration input — this 3-rep version is
-// the only one that should ever feed those tables, so keeping the 1-rep
-// variant around was pure redundancy risk (accidentally saving over good
-// data with a single noisy sample). Reps are INTERLEAVED (variant 1..16
-// once, then variant 1..16 again, ...) rather than grouped back-to-back per
-// variant — grouping would let time-of-run drift (thermal, battery, buffer
-// state) bias one variant's measurements more than another's; interleaving
-// spreads that drift evenly across all 16 variants instead (see
-// feedback_hw_testing_rigor memory / CLAUDE.md calibration methodology).
-// kReps=3, not 5/10 — full-resolution bracket bursts wear the shutter; 3
-// reps is enough for a stable mean+max per (count,ev) without unnecessary
-// shots (confirmed 2026-07-22: a repeat 5x run made zero difference to the
-// already-clean 5x results, so 3 has margin to spare).
-void App::AddBracketArmCalibrationPreset() {
+// "Bracket ARM calibration" — dedicated repeated-measures calibration run.
+// Purpose (2026-08-04): measure real hardware ARM (DriveMode-change,
+// including any busy-retry recovery) and WB (write-buffer-ready) timing —
+// for BOTH the 12 bracket variants below AND the 10 leading Single-shot
+// frames (see below): a Single shot is just as real an ARM/WB event as a
+// bracket is, not a throwaway warm-up. Both are logged by
+// SeqCamThreadProc's existing sendArm lambda into m_armCalibBuf/
+// m_wbCalibBuf (that lambda, not this function, was extended 2026-08-04 to
+// also collect from Single blocks, keyed as count=1 — see its comment) —
+// this function only builds the Timeline blocks that drive the measurement.
+//
+// Bracket variants (was 16: 0.3/0.5/0.7/1.0/2.0/3.0ev x 3/5/9, narrowed once
+// already today to 1.0ev-only) — now 0.3/0.5/0.7/1.0ev x {3,5,9} = 12, per
+// explicit request: covers every ev step actually used operationally
+// without the 2.0ev/3.0ev variants whose total exposure time makes each rep
+// expensive. Reps are INTERLEAVED (variant 1..12 once, then variant 1..12
+// again, ...) rather than grouped back-to-back per variant — grouping would
+// let time-of-run drift (thermal, battery, buffer state) bias one variant's
+// measurements more than another's; interleaving spreads that drift evenly
+// across all variants instead (see feedback_hw_testing_rigor memory /
+// CLAUDE.md calibration methodology).
+//
+// Two menu entries share this function via `reps`: "Initial ARM Calibration
+// (x1)" (reps=1) — quick single-pass check; "Final ARM Calibration (x3)"
+// (reps=3) — the one that should actually feed "SAVE CALIB", since a single
+// rep gives a real but noisy max, not a stable mean+max. The leading Single
+// sweep below is NOT repeated by `reps` -- it always runs once per preset
+// generation, since it's its own (count=1) measurement, independent of how
+// many times the 12 bracket variants repeat.
+//
+// Leading Single-shot ARM/WB sweep, ss 1/8000 -> 4s (10 standard full-stop
+// values, 2026-08-04, explicit request): originally added as a throwaway
+// same-params warm-up purely to give the very first block in the run some
+// ARM cushion (blockCount == 0 used to skip the atMs advance entirely,
+// unlike every later block — a true cold start landing on the position with
+// the *least* margin in the whole schedule). Reclassified the same day: the
+// 10 shots now sweep real, differing ss values, so BlockParamsDiffer is true
+// between every consecutive pair and each transition is a genuine ARM/WB
+// measurement in its own right (count=1 in arm_calibration/wb_calibration),
+// not just cold-start insurance for the brackets that follow. The first
+// REAL bracket variant lands right after the last (4s) Single shot and goes
+// through the same atMs-advance path as every other block: EVERY transition
+// in this function (Single-to-Single, Single->first-bracket, and
+// bracket-to-bracket) uses the identical BlockDurMs+ArmEstMs+kGapMs formula.
+// A separate, smaller ad-hoc gap was tried for the Single-sweep transitions
+// first (2026-08-04) but caused visible block overlap on generation: the
+// Timeline's own rendering draws each block's occupied span using
+// ArmEstMs(blk) too (see RenderTimelineBottom's blkEnd computation), and
+// ArmEstMs's fallback for an uncalibrated count=1 (Single) can be as high as
+// 5000-8000ms — using one shared formula for both scheduling and rendering
+// is what guarantees they can never disagree.
+void App::AddBracketArmCalibrationPreset(int reps) {
     assert(m_presetTargetTrack >= 0);
     assert(m_presetTargetTrack < static_cast<int>(m_tracks.size()));  // rule 5: target track must exist
+    assert(reps >= 1 && reps <= 10);  // rule 2: bounded -- sane repeat count
 
     int ti = m_presetTargetTrack;
     if (ti < 0 || ti >= static_cast<int>(m_tracks.size()) || m_tracks[ti].IsAudio()) {
@@ -3144,33 +3264,96 @@ void App::AddBracketArmCalibrationPreset() {
         m_presetTargetTrack = ti;
     }
 
-    // Mirrors kBrk in RenderInspectorColumn — 16 valid modes matching CrSDK.
+    // 0.3/0.5/0.7/1.0ev x count={3,5,9} — see function comment for why
+    // 2.0ev/3.0ev were dropped 2026-08-04.
     struct BrkVariant { const char* ev; int count; };
     static constexpr BrkVariant kVariants[] = {
         {"0.3ev", 3}, {"0.3ev", 5}, {"0.3ev", 9},
         {"0.5ev", 3}, {"0.5ev", 5}, {"0.5ev", 9},
         {"0.7ev", 3}, {"0.7ev", 5}, {"0.7ev", 9},
         {"1.0ev", 3}, {"1.0ev", 5}, {"1.0ev", 9},
-        {"2.0ev", 3}, {"2.0ev", 5},
-        {"3.0ev", 3}, {"3.0ev", 5},
     };
     static constexpr int kNumVariants = static_cast<int>(std::size(kVariants));
-    static_assert(kNumVariants == 16, "must mirror the Inspector's bracket-mode dropdown");
-    static constexpr int kReps  = 3;
-    static constexpr int64_t kGapMs = 2000; // ARM-end -> next block start
+    static_assert(kNumVariants == 12, "0.3/0.5/0.7/1.0ev x {3,5,9} only, see function comment");
+    static constexpr int kNumSingleSweep = 10;  // leading Single ARM/WB sweep, see function comment
+    // Fallback WR estimate for a (count,ev) with no wb_calibration row yet —
+    // used only until a preliminary run (Initial x1) has measured and saved
+    // real data. Once real data exists, wrTimeFor() below prefers it over
+    // this flat guess.
+    static constexpr int64_t kGapMs = 5000;
+    // Fixed safety gap between the end of a block's WR (write-buffer-ready)
+    // zone and the start of its ARM zone (2026-08-05, explicit request) --
+    // replaces the old flat kGapMs-as-the-whole-gap approach. Needed because
+    // a "Final ARM Calibration (x3)" run generated AFTER an "Initial (x1)"
+    // run (which just saved real, now-accurate wb_calibration data via the
+    // immediate-arm fix) could schedule transitions using the old flat
+    // kGapMs=5000 even when the just-measured real WR time exceeded it,
+    // undershooting what RenderTimelineBottom draws (BlockDurMs + wrMsAt +
+    // ArmEstMs) and causing visible block overlap on generation. Bumped
+    // 1000 -> 2000 (2026-08-05, explicit request): extra calibration-process
+    // safety margin -- transitions scheduled too close together risk
+    // interfering with each other (e.g. an ARM landing while the previous
+    // WR wait hasn't genuinely finished settling).
+    static constexpr int64_t kWrToArmGapMs = 2000;
 
     TLTrack& trk = m_tracks[ti];
     trk.blocks.clear();
+    // Calibration wants the FULL real ARM/WB wait, not whatever's left after
+    // deferred-ARM's own scheduling margin already elapsed -- see
+    // TLTrack::calibImmediateArm's comment.
+    trk.calibImmediateArm = true;
     m_multiSel.clear();  // preset rebuilds this track's blocks from scratch — old indices are meaningless
     std::string camModel = CamModelForTrackIndex(ti);
+
+    // Real, measured WR (write-buffer-ready) time for block `p`, from
+    // wb_calibration via WbReadyMsFor (populated by a prior calibration run
+    // + SAVE CALIB) -- falls back to kGapMs when nothing's been measured
+    // yet. Single blocks use count=1/ev="" the same way sendArm's sample
+    // collection tags them (see that lambda's comment).
+    auto wrTimeFor = [&](const TLBlock& p) -> int64_t {
+        if (p.type != BlockType::Bracket && p.type != BlockType::Single) return kGapMs;
+        int effCount = (p.type == BlockType::Bracket) ? p.count : 1;
+        int wb = WbReadyMsFor(camModel, effCount, p.ev);
+        return (wb >= 0) ? static_cast<int64_t>(wb) : kGapMs;
+    };
+    // Total gap after block `p`: its own WR wait, then the fixed safety
+    // margin, then its own ARM time -- matches the WR-then-ARM order
+    // RenderTimelineBottom draws, so the schedule can never undershoot it.
+    auto gapAfter = [&](const TLBlock& p) -> int64_t {
+        return wrTimeFor(p) + kWrToArmGapMs + ArmEstMs(p, camModel);
+    };
 
     int64_t startMs = m_tlPlayheadMs.load();
     if (startMs < 0) startMs = UtcNowMs();
 
+    // 10 leading Single shots, ss swept 1/8000 -> 4s (standard full-stop
+    // values) — each own real ARM/WB measurement, see function comment.
+    static constexpr const char* kSingleSweepSs[] = {
+        "1/8000", "1/2000", "1/500", "1/125", "1/30",
+        "1/8", "1/2", "1s", "2s", "4s",
+    };
+    static_assert(std::size(kSingleSweepSs) == kNumSingleSweep, "must match kNumSingleSweep");
+
     TLBlock prev;
     int64_t atMs = startMs;
     int blockCount = 0;
-    for (int rep = 0; rep < kReps; ++rep) {
+
+    for (int s = 0; s < kNumSingleSweep; ++s) {
+        TLBlock single;
+        single.type  = BlockType::Single;
+        single.ss    = kSingleSweepSs[s];
+        single.iso   = 100;
+        single.fstop = "8.0";
+        single.atMs  = (blockCount == 0)
+                     ? startMs
+                     : atMs + BlockDurMs(prev, camModel) + gapAfter(prev);
+        atMs = single.atMs;
+        trk.blocks.push_back(single);
+        prev = single;
+        ++blockCount;
+    }
+
+    for (int rep = 0; rep < reps; ++rep) {
         for (int i = 0; i < kNumVariants; ++i) {
             TLBlock b;
             b.type  = BlockType::Bracket;
@@ -3180,8 +3363,7 @@ void App::AddBracketArmCalibrationPreset() {
             b.ev    = kVariants[i].ev;
             b.count = kVariants[i].count;
 
-            if (blockCount > 0)
-                atMs = atMs + BlockDurMs(prev, camModel) + ArmEstMs(prev, camModel) + kGapMs;
+            atMs = atMs + BlockDurMs(prev, camModel) + gapAfter(prev);
             b.atMs = atMs;
 
             trk.blocks.push_back(b);
@@ -3189,11 +3371,11 @@ void App::AddBracketArmCalibrationPreset() {
             ++blockCount;
         }
     }
-    assert(blockCount == kReps * kNumVariants);
+    assert(blockCount == kNumSingleSweep + reps * kNumVariants);
 
     m_tlDirty    = true;
-    m_lastResult = std::format("Bracket ARM calibration: {} blocks ({} reps x {} variants) on track \"{}\"",
-                                blockCount, kReps, kNumVariants, trk.label);
+    m_lastResult = std::format("Bracket ARM calibration: {} blocks ({} Single sweep + {} reps x {} variants) on track \"{}\"",
+                                blockCount, kNumSingleSweep, reps, kNumVariants, trk.label);
     LogLine(m_lastResult);
 }
 
@@ -3386,7 +3568,7 @@ void App::FireConcurrentWriteRateTest() {
 // hardware 2026-08-02, firing only 1/N shots whenever the arm needed real
 // busy-retry recovery, even though the property itself read back
 // confirmed). Reuses the proven Timeline sequencer path instead: run
-// "1. Bracket ARM Calibration" via the normal TEST RUN/RUN buttons exactly
+// "Final ARM Calibration (x3)" via the normal TEST RUN/RUN buttons exactly
 // as always -- sendArm's own measured latency (SeqCamThreadProc, already
 // collected into m_armCalibBuf for arm_calibration) is ALSO collected here
 // into m_wbCalibBuf, keyed by ev too (arm_calibration is count-only). No
@@ -4236,6 +4418,7 @@ void App::AddShutterSpeedSweepPreset() {
 
     TLTrack& trk = m_tracks[ti];
     trk.blocks.clear();
+    trk.calibImmediateArm = false;  // not the ARM/WB-measurement preset, see its field comment
     m_multiSel.clear();  // preset rebuilds this track's blocks from scratch — old indices are meaningless
     std::string camModel = CamModelForTrackIndex(ti);
 
@@ -9109,7 +9292,16 @@ void App::LoadArmCalibCache() {
         assert(entries.size() <= 64);
         auto& cm = m_armCalibCache[model];
         for (const auto& e : entries)
-            cm[e.count] = e.latAvgMs + 50;  // same avg+50 margin convention as bracket calib
+            // ARM busy-retry recovery (err=0x8402) has far higher variance
+            // than bracket shot latency -- confirmed 2026-08-04 on
+            // ILCE-7RM4A count=5: avg=494ms but max=1953ms (~4x). The old
+            // avg+50 convention (matching bracket_calibration's) let the
+            // deferred-ARM's real completion land AFTER the next block's
+            // scheduled atMs, firing it with zero settle time -> camera's
+            // bracket sequencer wasn't ready -> only 1/N captures. Use the
+            // worst observed rep + margin instead (same as the
+            // pre-2026-07-12 bracket-calib convention).
+            cm[e.count] = e.latMaxMs + 200;
     }
     LogLine(std::format("ARM calibration: {} model(s) loaded into cache",
                         m_armCalibCache.size()));
@@ -9933,28 +10125,36 @@ void App::RenderMenuBar() {
     // the hold (operator-confirmed on ILCE-7M4 + CFexpress), that's
     // reported as "no write bottleneck", not a failure.
     if (ImGui::BeginMenu("Calibration")) {
-        // 1. Repeated-measures calibration: 16 variants x 3 reps, interleaved
-        // — feeds the per-model "SAVE CALIB" buttons with a stable mean+max.
-        // This is the real bracket_calibration/arm_calibration/wb_calibration
-        // data source -- the same run's ARM latencies also feed wb_calibration
-        // (keyed by ev too), no separate test needed (see SaveWbCalibFromBuf).
-        if (ImGui::MenuItem("1. Bracket ARM Calibration (3x, interleaved)"))
-            AddBracketArmCalibrationPreset();
-        // 2. Validates BlockDurMs()'s exposure-time scaling: full 1/8000-8s
+        // 1. Quick single-pass check -- e.g. to re-verify the ArmEstMs/
+        // kGapMs safety-margin fix itself (see LoadArmCalibCache's comment)
+        // without burning a full 3-rep run on every retry. A 1-rep result
+        // is real but noisy (no stable mean+max) -- don't feed SAVE CALIB
+        // from this one, run #2 for that.
+        if (ImGui::MenuItem("1. Initial ARM Calibration (1x, interleaved)"))
+            AddBracketArmCalibrationPreset(1);
+        // 2. The real repeated-measures calibration: 16 variants x 3 reps,
+        // interleaved -- feeds the per-model "SAVE CALIB" buttons with a
+        // stable mean+max. This is the real bracket_calibration/
+        // arm_calibration/wb_calibration data source -- the same run's ARM
+        // latencies also feed wb_calibration (keyed by ev too), no separate
+        // test needed (see SaveWbCalibFromBuf).
+        if (ImGui::MenuItem("2. Final ARM Calibration (3x, interleaved)"))
+            AddBracketArmCalibrationPreset(3);
+        // 3. Validates BlockDurMs()'s exposure-time scaling: full 1/8000-8s
         // sweep at count=3, 4-point spot check at count=5/9. 25 blocks,
-        // 107 shots/cam. Run after #1 so the sweep's own scheduling uses
+        // 107 shots/cam. Run after #2 so the sweep's own scheduling uses
         // real per-model overhead instead of the uncalibrated fallback.
-        if (ImGui::MenuItem("2. Bracket SS Sweep (1/8000-8s, x3 full + x5/x9 spot)"))
+        if (ImGui::MenuItem("3. Bracket SS Sweep (1/8000-8s, x3 full + x5/x9 spot)"))
             AddShutterSpeedSweepPreset();
-        // 3. Combined: how many shots fit before the buffer fills, AND the
+        // 4. Combined: how many shots fit before the buffer fills, AND the
         // precise card write-speed from timing the drain of that same
         // burst -- one click, one test, both numbers auto-saved.
-        if (ImGui::MenuItem("3. Buffer Capacity + Write-Speed Calibration..."))
+        if (ImGui::MenuItem("4. Buffer Capacity + Write-Speed Calibration..."))
             m_showBufCapCalibWnd = true;
-        // 4. Independent of the #1-3 chain -- measures each drive's real raw
+        // 5. Independent of the #1-4 chain -- measures each drive's real raw
         // shots/sec (before the buffer throttles it), feeding the Timeline's
         // pre-run Burst block width prediction. Can be run any time.
-        if (ImGui::MenuItem("4. Drive FPS Calibration..."))
+        if (ImGui::MenuItem("5. Drive FPS Calibration..."))
             m_showDriveFpsCalibWnd = true;
         ImGui::EndMenu();
     }
@@ -9963,7 +10163,7 @@ void App::RenderMenuBar() {
     if (ImGui::BeginMenu("Photo Sequence")) {
         // Reset Photo Sequence — clears all blocks from every camera track.
         if (ImGui::MenuItem("Reset Photo Sequence")) {
-            for (auto& tr : m_tracks) if (tr.IsCamera()) tr.blocks.clear();
+            for (auto& tr : m_tracks) if (tr.IsCamera()) { tr.blocks.clear(); tr.calibImmediateArm = false; }
             m_tlDirty  = true;
             m_selTrack = m_selBlock = -1;
             m_multiSel.clear();
@@ -10079,7 +10279,7 @@ void App::RenderMenuBar() {
                 nullptr, nullptr, SW_SHOWNORMAL);
         }
         ImGui::Separator();
-        ImGui::MenuItem("v2026-08-02", nullptr, false, false);
+        ImGui::MenuItem("v2026-08-05", nullptr, false, false);
         ImGui::EndMenu();
     }
 }

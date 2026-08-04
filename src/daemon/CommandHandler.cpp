@@ -791,7 +791,7 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             else if (driveStr == L"cont-mid-live") driveCode = 0x00010008; // CrDrive_Continuous_Mid_Live
             else if (driveStr == L"cont-lo-live")  driveCode = 0x00010009; // CrDrive_Continuous_Lo_Live
             if (!cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
-                                       L"DriveMode(burst)", kDriveModeVerifyMs))
+                                       L"DriveMode(burst)", kDriveModeVerifyMs, /*forceRecheck=*/true))
                 armed = false;
             if (!armed) {
                 resp = Err(L"arm_failed", L"shutter speed / drive mode not confirmed by camera");
@@ -801,7 +801,8 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
         } else {
             // Single shot: if "drive":"single" specified, switch drive mode back from bracket
             if (driveStr == L"single" &&
-                !cam->SetPropAndVerify(0x010e, 0x0003, 0x00000001LL, L"DriveMode(single)", kDriveModeVerifyMs))
+                !cam->SetPropAndVerify(0x010e, 0x0003, 0x00000001LL, L"DriveMode(single)", kDriveModeVerifyMs,
+                                       /*forceRecheck=*/true))
                 armed = false;
             if (!armed) {
                 resp = Err(L"arm_failed", L"shutter speed / drive mode not confirmed by camera");
@@ -891,7 +892,8 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             resp = Err(L"not_supported", L"DriveMode not supported by this camera");
             return true;
         }
-        if (!cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode, L"DriveMode", kDriveModeVerifyMs))
+        if (!cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode, L"DriveMode", kDriveModeVerifyMs,
+                                    /*forceRecheck=*/true))
             armed = false;
         if (!armed) {
             resp = Err(L"arm_failed", L"shutter speed / drive mode not confirmed by camera");
@@ -1077,7 +1079,8 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             if (!EncodePropValue(0x010e, val, driveRaw)) {
                 resp = Err(L"invalid_value", (prop + L"=" + val).c_str()); return true;
             }
-            resp = cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode", kDriveModeVerifyMs)
+            resp = cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode", kDriveModeVerifyMs,
+                                          /*forceRecheck=*/true)
                        ? Ok() : Err(L"set_failed");
             return true;
         }
@@ -1217,14 +1220,15 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             if (br) {
                 uint32_t driveCode = single ? br->single_code : br->cont_code;
                 if (!cam->SetPropAndVerify(0x010e, 0x0003, (long long)driveCode,
-                                           L"DriveMode(arm-bracket)", verifyMs))
+                                           L"DriveMode(arm-bracket)", verifyMs, /*forceRecheck=*/true))
                     armed = false;
             }
         } else if (JHas(req, L"drive")) {
             std::wstring driveStr = JStr(req, L"drive");
             long long driveRaw = 0;
             if (EncodePropValue(0x010e, driveStr, driveRaw) && driveRaw != 0 &&
-                !cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode(arm)", verifyMs))
+                !cam->SetPropAndVerify(0x010e, 0x0003, driveRaw, L"DriveMode(arm)", verifyMs,
+                                       /*forceRecheck=*/true))
                 armed = false;
         }
 
@@ -1297,7 +1301,8 @@ bool CommandHandler::Handle(const std::wstring& req, std::wstring& resp) {
             return true;
         }
         if (!cam->SetPropAndVerify(0x010e, 0x0003, driveRaw,
-                                    L"DriveMode(buffer_capacity_calib)", kDriveModeVerifyMs)) {
+                                    L"DriveMode(buffer_capacity_calib)", kDriveModeVerifyMs,
+                                    /*forceRecheck=*/true)) {
             resp = Err(L"arm_failed", L"drive mode not confirmed by camera");
             return true;
         }

@@ -2,6 +2,18 @@
 
 ---
 
+## 2026-08-05
+
+### mgr Maciej Szupiluk
+- Fixed the GUI sequencer firing a burst of accumulated shots in rapid succession ("wanting to catch up") after the camera came back from a disconnect or battery swap mid-sequence - a block that falls too far behind schedule during an outage is now skipped instead of fired late, and Stop now takes effect immediately even while the sequencer would otherwise be catching up, instead of only after the whole backlog drained
+- Fixed the camera silently reverting to single-shot mode after a battery removal and reinsertion without the app noticing: the next scheduled bracket would then fire only one shot before timing out, because the app's own cache still believed the drive mode from before the power loss was still active. Drive mode is now always re-verified against the camera's live state before being trusted - the same protection already in place for another setting that could silently drift on its own
+- Confirmed on hardware: a mid-sequence battery swap needs at least 30 seconds of gap between scheduled blocks to complete safely. Turn the camera fully off before removing the battery, and make sure beyond doubt that it isn't still writing to the memory card first - pulling the battery mid-write can corrupt photos already on the card or the card's file table, putting the camera into a mode that requires reformatting or replacing the card
+- Reworked the ARM (settings-change) and WR (write-buffer-ready) calibration tools: the safety margin used to schedule gaps between shots was found to be roughly 4x too optimistic (based on an average instead of the worst observed case), which could make the camera drop shots in a bracket whenever the real wait ran longer than predicted - now uses the worst observed time plus a fixed margin instead
+- Split the bracket calibration tool into a quick single-pass check and a slower three-pass version that produces the stable average actually used for saved calibration data
+- The calibration tool now also measures single-shot exposures across a full range of shutter speeds (1/8000s to 4 seconds), not only bracket sequences, and correctly displays/schedules around the measured wait time for those too
+- Fixed the calibration Timeline visually overlapping itself when regenerated after an earlier run had already saved more accurate data
+- Narrowed the full bracket calibration sweep to the EV steps and shot counts actually used operationally, dropping two rarely-used, slower variants to keep test runs shorter
+
 ## 2026-08-02
 
 ### mgr Maciej Szupiluk

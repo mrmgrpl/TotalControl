@@ -1016,7 +1016,7 @@ private:
     void CreateLvTextures();   // render thread only
 
     // ── Photo preset ─────────────────────────────────────────────────────────
-    void AddBracketArmCalibrationPreset();
+    void AddBracketArmCalibrationPreset(int reps);
     void AddShutterSpeedSweepPreset();
     int  m_presetTargetTrack = 0;  // camera track index that receives generated preset blocks
 
