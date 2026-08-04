@@ -324,6 +324,10 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Burst `timeout_ms` padding fix + WR buffer-write model (concurrent+post-hold drain, validated on hardware)** | **DONE 2026-08-02** — see Change log |
 | **WB (Write-Buffer) calibration — per-(count,ev) bracket-transition timing, piggybacks on Bracket ARM Calibration** | **DONE 2026-08-02, not yet verified on hardware** |
 | **Release v2026-08-02** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-02 |
+| **Sequencer catch-up-storm fix (skip stale blocks, immediate STOP)** | **DONE 2026-08-05, partially verified on hardware (no backlog case tested; overdue-block case still pending)** — see Change log |
+| **DriveMode power-cycle desync fix (forceRecheck=true, 7 call sites)** | **DONE 2026-08-05, not yet re-verified on hardware** — see Change log |
+| **ARM/WB calibration overhaul (max-based margin, Initial/Final split, Single-shot sweep, immediate-arm calibration mode, unified gap formula)** | **DONE 2026-08-05** — see Change log |
+| **Release v2026-08-05** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-05 |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -1363,6 +1367,80 @@ package size before zipping (38MB unpacked, no stray runtime artifacts) →
 ZIP 21.35MB. Tag `v2026-08-02` on commit `a1d42c6`, `gh release create` with
 the ZIP as asset + `release_notes_2026-08-02.md`:
 https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-02
+
+### 2026-08-05 — Sequencer catch-up storm, DriveMode power-cycle desync, calibration overhaul
+
+Hardware battery-swap testing (mid-run pull + reinsert on ILCE-7RM4A) root-
+caused and fixed two real bugs, plus a broader ARM/WB calibration rework
+prompted by the same session's findings.
+
+**1. GUI sequencer catch-up storm (`SeqCamThreadProc`, App.cpp)** — the
+original report (Dan Becker, video only, not reproduced in logs): replacing
+the battery mid-sequence made the camera "want to catch up to the ticker"
+(non-stop bracket shooting), and STOP had no effect until it was unplugged.
+Root cause: `simMs` tracks real wall-clock time and never pauses during a
+stall; the inner due-block loop fired every block whose `atMs <= simMs`
+back-to-back with no upper bound, and never checked `m_seqRun` (only the
+outer loop did). Fixed: blocks more than `kMaxCatchupMs=30000` (mirrors
+`SequencerEngine`'s own late-skip threshold) behind schedule are skipped
+instead of fired, with a fresh synchronous re-arm on resume
+(`needsResumeArm`); `m_seqRun` is now also checked inside the inner loop.
+Partially verified on hardware 2026-08-05: a real battery pull+reconnect
+produced no catch-up burst — the sequencer just waited and fired the next
+already-scheduled block at normal cadence. That specific test had no
+backlog at the moment of the pull, though; the harder case (a block actually
+due *during* the outage) is still to be tested.
+
+**2. DriveMode silently reverts after a real power cycle (CommandHandler.cpp,
+7 call sites)** — a second battery-pull test pinned this down: after
+reconnect, the camera's live `drive` status read back as `"single"`, but
+the next `bracket` command logged `Skip DriveMode = ... (cached)` — SRV's
+`m_propSetCache` still believed bracket mode was active from before the
+pull, so the shoot fired in single mode (1 capture, then timeout waiting for
+the rest). Exact same failure shape as the 2026-07-26 `PriorityKey` fix
+(a property that can silently lapse outside the app's control, with the
+cache never finding out). Fixed: all 7 `SetPropAndVerify(0x010e, ...)`
+(DriveMode) call sites now pass `forceRecheck=true`, same as `PriorityKey`.
+Not yet re-tested on hardware after this specific fix.
+
+**3. ARM/WB calibration overhaul (App.cpp)** — `LoadArmCalibCache()` cached
+`latAvgMs + 50`; real hardware data showed max can run ~4x the average
+(ILCE-7RM4A count=5: avg=494ms, max=1953ms), so the deferred-ARM schedule
+could undershoot the real wait, causing 1/N captures under load. Now caches
+`latMaxMs + 200`. `ArmEstMs()`'s uncalibrated fallback bumped from
+4100/4350/5500 to 5000/6500/8000ms. "Bracket ARM Calibration" split into two
+menu entries sharing one function via a `reps` parameter: "Initial ARM
+Calibration (1x)" and "Final ARM Calibration (3x)" (the one that should
+feed SAVE CALIB). Added a leading 10-shot Single-exposure ARM/WB sweep
+(1/8000s→4s, standard full-stop values) — Single blocks are now included in
+ARM/WB sample collection (`SeqCamThreadProc`'s `sendArm`) and in
+`ComputeWrMsPerBlock`'s direct wb_calibration lookup (both were previously
+Bracket-only), keyed as count=1. Added `TLTrack::calibImmediateArm`
+(transient, not persisted): calibration presets send ARM immediately after
+each block instead of deferring it, so the measured WB time reflects the
+real wait instead of whatever's left after the schedule's own margin already
+elapsed (deferred ARM was silently absorbing most of it, making measured WB
+read ~200ms against an observed 2-3s on camera). Preset scheduling unified
+to one `gapAfter()` formula (real wb_calibration lookup when available,
+else a flat fallback, plus a fixed 2000ms WR-to-ARM safety gap) for every
+transition, fixing a block-overlap bug from an earlier ad-hoc smaller
+constant. Bracket variant sweep narrowed from 16 to 12 (0.3/0.5/0.7/1.0ev x
+{3,5,9}), dropping 2.0ev/3.0ev.
+
+**4. Battery-swap safety procedure confirmed operationally**: a mid-sequence
+swap needs ≥30s gap between scheduled blocks; camera must be fully off, and
+confirmed not writing to card, before the battery is pulled — a corrupted
+card can force a reformat or replacement, catastrophic mid-eclipse.
+
+### 2026-08-05 — Release v2026-08-05
+
+Seventh public release. Version bump 2026.08.02→2026.08.05 across all three
+executables. Build clean (`/W4 /WX`). Staging copied from v2026-08-02 as
+template; updated: 3 exes, `CHANGELOG.md`, `START_HERE.md`. Verified package
+size before zipping (38MB unpacked, no stray runtime artifacts) → ZIP
+21.36MB. Tag `v2026-08-05` on commit `e4999e9`, `gh release create` with the
+ZIP as asset + `release_notes_2026-08-05.md`:
+https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-05
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
