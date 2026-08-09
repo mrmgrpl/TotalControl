@@ -217,6 +217,7 @@ private:
     void Logf(const wchar_t* fmt, ...);
 
     bool     SetPropRaw(unsigned code, unsigned type, long long value, const wchar_t* desc);
+    bool     IsPropSettable(unsigned propCode);
     uint32_t NearestFromList16(unsigned propCode, uint32_t target);
     uint32_t NearestFromList32log(unsigned propCode, uint32_t target);
     uint32_t ParseShutterSpeedToRaw(const wchar_t* value);

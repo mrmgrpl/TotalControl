@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-static constexpr char kVersion[] = "2026.08.05";
+static constexpr char kVersion[] = "2026.08.09";
 
 // ─── Log ──────────────────────────────────────────────────────────────────────
 

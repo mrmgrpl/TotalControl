@@ -1048,6 +1048,7 @@ private:
     void RenderBracketPresetModal();
     void GenerateRangePresetBlocks(GenPresetRangeCfg& cfg, BlockType type, GenPresetRange range);
     void ClearRangePresetBlocks(GenPresetRange range);
+    void RenderPresetTargetTrackCombo(std::vector<TLTrack>& tracks, int& presetTargetTrack);
 };
 
 } // namespace TotalControl

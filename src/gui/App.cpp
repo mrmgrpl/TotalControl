@@ -3809,16 +3809,33 @@ void GenPresetFsCombo(const char* id, std::string& fs) {
 }
 } // namespace
 
-// Target-track combo, shared by both preset generator windows below.
-static void RenderPresetTargetTrackCombo(std::vector<TLTrack>& tracks, int& presetTargetTrack) {
+// Target-track combo, shared by both preset generator windows below. Labels
+// come from CamModelForTrackIndex() (live camera model), not tracks[i].label
+// directly -- that field is only ever set once, at track auto-creation time
+// (see the "Cam{N}" placeholder in the auto-grow block, RenderTimelineBottom),
+// and can end up stale or even duplicated across tracks (confirmed via a
+// corrupted TotalControlConfig.db on 2026-08-09: two tracks both stored as
+// "Cam3"). Duplicate/empty Selectable() labels there also collide on ImGui's
+// implicit ID-from-label, which is what actually triggered the "2 visible
+// items with conflicting ID" programmer-error overlay the operator hit --
+// PushID(i) below makes the ID unique regardless of label content, and the
+// live-resolved text fixes the "non-existent camera" display bug itself.
+void App::RenderPresetTargetTrackCombo(std::vector<TLTrack>& tracks, int& presetTargetTrack) {
+    auto labelFor = [&](int i) -> std::string {
+        std::string model = CamModelForTrackIndex(i);
+        if (!model.empty()) return model;
+        return tracks[i].label.empty() ? std::format("Track {}", i) : tracks[i].label;
+    };
     std::string preview = (presetTargetTrack >= 0 &&
                             presetTargetTrack < static_cast<int>(tracks.size()))
-        ? tracks[presetTargetTrack].label : "(no track)";
+        ? labelFor(presetTargetTrack) : "(no track)";
     if (ImGui::BeginCombo("Target track", preview.c_str())) {
         for (int i = 0; i < static_cast<int>(tracks.size()); ++i) {
             if (tracks[i].IsAudio()) continue;
-            if (ImGui::Selectable(tracks[i].label.c_str(), i == presetTargetTrack))
+            ImGui::PushID(i);
+            if (ImGui::Selectable(labelFor(i).c_str(), i == presetTargetTrack))
                 presetTargetTrack = i;
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -10279,7 +10296,7 @@ void App::RenderMenuBar() {
                 nullptr, nullptr, SW_SHOWNORMAL);
         }
         ImGui::Separator();
-        ImGui::MenuItem("v2026-08-05", nullptr, false, false);
+        ImGui::MenuItem("v2026-08-09", nullptr, false, false);
         ImGui::EndMenu();
     }
 }

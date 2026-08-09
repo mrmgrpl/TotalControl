@@ -630,6 +630,25 @@ bool CameraController::SendCmd(int cmdId, int param) {
 
 // ─── Nearest helpers ──────────────────────────────────────────────────────────
 
+// A passive/manual lens (no electronic aperture coupling) reports FNumber as
+// present but not settable -- the camera body has no control over it at all,
+// so SetDeviceProperty rejects every attempt (err=0x8402) forever. Checking
+// this up front avoids burning the full SetPropAndVerify retry budget (up to
+// kExposurePropVerifyMs) on a write that can never succeed.
+bool CameraController::IsPropSettable(unsigned propCode) {
+    if (!m_connected || m_deviceHandle == 0) return true;
+    auto h     = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
+    CrInt32u codeU = propCode;
+    SDK::CrDeviceProperty* props = nullptr; CrInt32 num = 0;
+    if (SDK::GetSelectDeviceProperties(h, 1, &codeU, &props, &num) != 0 || !props || num == 0) {
+        if (props) SDK::ReleaseDeviceProperties(h, props);
+        return true; // inconclusive -- don't block a legitimate write on a failed query
+    }
+    bool settable = props[0].IsSetEnableCurrentValue();
+    SDK::ReleaseDeviceProperties(h, props);
+    return settable;
+}
+
 uint32_t CameraController::NearestFromList16(unsigned propCode, uint32_t target) {
     if (!m_connected || m_deviceHandle == 0) return target;
     auto h     = static_cast<SDK::CrDeviceHandle>(m_deviceHandle);
@@ -795,6 +814,10 @@ bool CameraController::SetISO(int iso) {
 }
 
 bool CameraController::SetFNumber(float f) {
+    if (!IsPropSettable(SDK::CrDeviceProperty_FNumber)) {
+        Log(L"FNumber not controllable (passive/manual lens — no aperture coupling) — skipping set");
+        return true; // nothing to do; not a failure -- the camera genuinely has no authority here
+    }
     uint32_t target = static_cast<uint32_t>(f * 100.0f + 0.5f);
     uint32_t actual = NearestFromList16(SDK::CrDeviceProperty_FNumber, target);
     Logf(L"FNumber: F/%.1f → F/%.2f", f, actual / 100.0);
