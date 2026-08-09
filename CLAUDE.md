@@ -1533,6 +1533,16 @@ size before zipping (38MB unpacked, no stray runtime artifacts) → ZIP
 ZIP as asset + `release_notes_2026-08-09.md`:
 https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-09
 
+**Same-day re-spin**: a follow-up operator report (tooltip line count
+differing between camera tracks) turned out to be a second bug in the
+tooltip-clamp fix above (position was forced, but not size — see commit
+`a9445bf`, "force exact size on Timeline block hover tooltip"). Re-spun
+the release in place using the same `gh release delete <tag> --yes
+--cleanup-tag` + retag + `gh release create` procedure documented under
+2026-07-23 — tag `v2026-08-09` now points at commit `a9445bf`, ZIP
+re-verified (38MB unpacked / 21.36MB zipped, GUI.exe refreshed, no other
+changes needed).
+
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
 IqpClient previously scraped `maps.besselianelements.com`. This has been REPLACED by a dedicated
