@@ -328,6 +328,9 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **DriveMode power-cycle desync fix (forceRecheck=true, 7 call sites)** | **DONE 2026-08-05, not yet re-verified on hardware** — see Change log |
 | **ARM/WB calibration overhaul (max-based margin, Initial/Final split, Single-shot sweep, immediate-arm calibration mode, unified gap formula)** | **DONE 2026-08-05** — see Change log |
 | **Release v2026-08-05** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-05 |
+| **FNumber-on-passive-lens fix (skip-not-retry, `IsPropSettable`)** | **DONE 2026-08-09, confirmed on hardware** — see Change log |
+| **Preset-generator "Target track" combo — ImGui ID collision + stale/duplicated CamN labels** | **DONE 2026-08-09** — see Change log |
+| **Release v2026-08-09** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-09 |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -1441,6 +1444,67 @@ size before zipping (38MB unpacked, no stray runtime artifacts) → ZIP
 21.36MB. Tag `v2026-08-05` on commit `e4999e9`, `gh release create` with the
 ZIP as asset + `release_notes_2026-08-05.md`:
 https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-05
+
+### 2026-08-09 — FNumber-on-passive-lens fix; preset-generator Target-track combo fix
+
+Two bugs found and fixed in the same session, both surfaced during live
+operator testing (2 real cameras connected, one on a passive/manual lens).
+
+**1. FNumber write attempted (and retried for the full budget) even when the
+camera has no control over aperture at all (`CameraController.h/.cpp`)**
+`TotalControlSRV.log` showed every single `shoot`/`bracket`/`arm` command
+retrying `Set FNumber` for the full `kExposurePropVerifyMs` (6000ms) with
+`err=0x8402`, then falling through with `armed=false` →
+`{"ok":false,"err":"arm_failed"}` — shooting was fully blocked, not just
+slow. Status responses showed `"f":655.34` (raw `0xFFFF` sentinel), the
+tell — a lens with no electronic aperture coupling (passive/manual lens or
+an adapter without CPU contacts) genuinely has no authority over aperture
+in that state, so every write attempt was rejected forever, not just slow
+to confirm. Added `CameraController::IsPropSettable(propCode)` — queries
+`GetSelectDeviceProperties` and checks
+`CrDeviceProperty::IsSetEnableCurrentValue()` before attempting a write.
+`SetFNumber()` now checks this first; if not settable, logs once and
+returns `true` immediately (a no-op success, not a failure — the camera
+correctly has nothing to do here) instead of entering the 6s retry loop
+and poisoning `armed` in `CommandHandler`'s shoot/bracket/arm handlers.
+Scope deliberately limited to FNumber (the property actually hit) — the
+same `IsPropSettable` helper is generic over `propCode` and can be reused
+for another property if the same symptom shows up there.
+**Confirmed on hardware same session**: `TotalControlSRV.log` after the fix
+shows a single `FNumber not controllable (passive/manual lens — no
+aperture coupling) — skipping set` line per shoot/arm call, no `err=0x8402`
+retry storm, no `arm_failed` — `shoot`/`arm` return `{"ok":true,...}`
+consistently across multiple cycles.
+
+**2. "Single Picture Preset Generator" / "Bracket Set Generator" — Target
+track combo showed duplicated placeholder labels and could throw an ImGui
+"programmer error" popup (`App.h/.cpp`)**
+Reported live via screenshot: the "Target track" combo listed two entries
+both literally labeled "Cam3", and ImGui's own "2 visible items with
+conflicting ID" warning fired (Selectable's implicit ID is derived from its
+label text, so two identical labels collide). Root cause confirmed by
+querying the live `TotalControlConfig.db` directly: `tl_tracks` had two
+camera-track rows both stored with `label='Cam3'`. `TLTrack::label` is only
+ever written once, as a positional "Cam{N}" placeholder, at track
+auto-creation time (`RenderTimelineBottom`'s auto-grow block) — some
+earlier session's growth/removal sequence left two tracks with the same
+stale placeholder text; the main Timeline itself was unaffected because its
+own track-header rendering already resolves the live camera model
+dynamically instead of trusting the stored field. `RenderPresetTargetTrackCombo`
+was the one consumer still reading `tracks[i].label` raw. Converted it from
+a free function to a private `App` method so it can call the existing
+`CamModelForTrackIndex(i)` resolver (same live-model resolution the
+Timeline header already uses) for its display text, and wrapped each
+`Selectable` in `ImGui::PushID(i)` so the ID is always unique by loop
+index regardless of label content — fixes the crash-adjacent warning
+unconditionally, independent of whatever caused the stale duplicate data.
+Did not migrate the already-corrupted `tl_tracks.label` rows in the DB —
+harmless now that display no longer trusts them.
+
+### 2026-08-09 — Release v2026-08-09
+
+Eighth public release. Version bump 2026.08.05→2026.08.09 across all three
+executables. Build clean (`/W4 /WX`).
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
