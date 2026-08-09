@@ -330,6 +330,7 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Release v2026-08-05** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-05 |
 | **FNumber-on-passive-lens fix (skip-not-retry, `IsPropSettable`)** | **DONE 2026-08-09, confirmed on hardware** — see Change log |
 | **Preset-generator "Target track" combo — ImGui ID collision + stale/duplicated CamN labels** | **DONE 2026-08-09** — see Change log |
+| **Timeline block hover tooltip running off-screen on lower camera tracks** | **DONE 2026-08-09** — see Change log |
 | **Release v2026-08-09** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-09 |
 
 ### TotalControlGUI — Phase 2b (complete)
@@ -1500,6 +1501,27 @@ index regardless of label content — fixes the crash-adjacent warning
 unconditionally, independent of whatever caused the stale duplicate data.
 Did not migrate the already-corrupted `tl_tracks.label` rows in the DB —
 harmless now that display no longer trusts them.
+
+**3. Timeline block hover tooltip running off-screen on lower camera tracks
+(`RenderTimelineBottom`, `App.cpp`)**
+Reported live via screenshot: hovering a Bracket block on the second (lower)
+camera track cut off the tooltip's last line (the per-shot SS list) below
+the bottom of the screen. Root cause: the hover tooltip used plain
+`ImGui::BeginTooltip()`, which reuses the same internal window ID
+(`"##Tooltip_00"`) across every block hover — when a taller tooltip (e.g.
+a 9-shot bracket's SS list) appears right after a shorter one (e.g. a
+Single block, or a shorter bracket), ImGui's own edge-avoidance logic
+(`FindBestWindowPosForPopup`) can position it from the *previous* frame's
+smaller cached window size before the new, taller content has been laid
+out, so the extra line(s) land past the viewport edge. Fixed by building
+the tooltip's lines (text + color) into a small vector up front, measuring
+their exact size via `ImGui::CalcTextSize`/`GetTextLineHeightWithSpacing`
+with the mono font, and explicitly calling `ImGui::SetNextWindowPos()`
+with a position clamped against `ImGui::GetMainViewport()`'s work rect
+(flips above the cursor if it would overflow the bottom, clamps
+horizontally against the right edge) before `BeginTooltip()` — bypasses
+ImGui's own stale-size inference entirely, using the exact size of what's
+about to be drawn this frame instead of a guess.
 
 ### 2026-08-09 — Release v2026-08-09
 
