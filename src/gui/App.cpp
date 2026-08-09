@@ -7264,6 +7264,17 @@ void App::RenderTimelineBottom() {
                     if (pos.y < vpPos.y) pos.y = vpPos.y;
                     if (pos.x < vpPos.x) pos.x = vpPos.x;
                     ImGui::SetNextWindowPos(pos);
+                    // BeginTooltip()'s window carries ImGuiWindowFlags_AlwaysAutoResize
+                    // and reuses one window ID across every hover -- without an
+                    // explicit size, its FIRST frame after a shorter tooltip (e.g.
+                    // this block's neighbor, not necessarily anything to do with
+                    // which camera track it's on) still renders at last frame's
+                    // smaller cached size, silently clipping the newly-added last
+                    // line even though its position is already correctly on-screen.
+                    // SetNextWindowSize(..., ImGuiCond_Always) overrides
+                    // AlwaysAutoResize (see imgui.cpp Begin(), "so it can be used on
+                    // tooltips/popups, etc.") -- forces the exact size every frame.
+                    ImGui::SetNextWindowSize(tipSize, ImGuiCond_Always);
 
                     ImGui::BeginTooltip();
                     ImGui::PushFont(m_fontMono);
