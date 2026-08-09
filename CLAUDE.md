@@ -1526,7 +1526,12 @@ about to be drawn this frame instead of a guess.
 ### 2026-08-09 — Release v2026-08-09
 
 Eighth public release. Version bump 2026.08.05→2026.08.09 across all three
-executables. Build clean (`/W4 /WX`).
+executables. Build clean (`/W4 /WX`). Staging copied from v2026-08-05 as
+template; updated: 3 exes, `CHANGELOG.md`, `START_HERE.md`. Verified package
+size before zipping (38MB unpacked, no stray runtime artifacts) → ZIP
+21.36MB. Tag `v2026-08-09` on commit `8ae8d3c`, `gh release create` with the
+ZIP as asset + `release_notes_2026-08-09.md`:
+https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-09
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
