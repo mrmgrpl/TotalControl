@@ -7188,27 +7188,34 @@ void App::RenderTimelineBottom() {
                 dl->AddText({dx+4.f, ty+6.f}, IM_COL32(240,240,240,215), blk.label.c_str());
 
             // Hover tooltip — mini Block Inspector summary, no need to select
-            // the block first to see what it's set to.
+            // the block first to see what it's set to. Lines (and their
+            // color) are built up front so the tooltip's exact size is known
+            // before positioning it -- BeginTooltip()'s own auto-placement
+            // reuses this same window ID across hovers, so it can infer a
+            // position from a shorter PREVIOUS block's tooltip size and clip
+            // the last line off-screen for taller content (e.g. a bracket's
+            // per-shot SS list) hovered near the bottom of the screen (the
+            // second camera track's row) -- reported on hardware 2026-08-09.
             if (!m_tlDragging) {
                 ImVec2 mp = ImGui::GetMousePos();
                 if (mp.x >= dx && mp.x <= dx2 && mp.y >= ty + 2.f && mp.y < tyFill) {
-                    ImGui::BeginTooltip();
-                    ImGui::PushFont(m_fontMono);
-                    ImGui::TextUnformatted(BlockTypeName(blk.type));
+                    const ImVec4 kNormal = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                    std::vector<std::pair<std::string, ImVec4>> lines;
+                    lines.emplace_back(BlockTypeName(blk.type), kNormal);
                     if (blk.atMs > 0) {
                         int64_t s = blk.atMs / 1000;
-                        ImGui::Text("UTC %02d:%02d:%02d.%03d",
-                            static_cast<int>((s / 3600) % 24), static_cast<int>((s / 60) % 60),
-                            static_cast<int>(s % 60), static_cast<int>(blk.atMs % 1000));
+                        lines.emplace_back(std::format("UTC {:02}:{:02}:{:02}.{:03}",
+                            (s / 3600) % 24, (s / 60) % 60, s % 60, blk.atMs % 1000), kNormal);
                     }
                     if (blk.type == BlockType::Audio) {
-                        ImGui::Text("File: %s", blk.audioFile.empty() ? "(none)" : blk.audioFile.c_str());
-                        ImGui::Text("Duration: %.1fs", blk.audioDurMs / 1000.f);
+                        lines.emplace_back(std::format("File: {}",
+                            blk.audioFile.empty() ? "(none)" : blk.audioFile), kNormal);
+                        lines.emplace_back(std::format("Duration: {:.1f}s", blk.audioDurMs / 1000.f), kNormal);
                     } else {
-                        ImGui::Text("SS %s   ISO %d   f/%s",
-                                     blk.ss.c_str(), blk.iso, blk.fstop.c_str());
+                        lines.emplace_back(std::format("SS {}   ISO {}   f/{}",
+                                                        blk.ss, blk.iso, blk.fstop), kNormal);
                         if (blk.type == BlockType::Bracket) {
-                            ImGui::Text("Bracket %s / %d shots", blk.ev.c_str(), blk.count);
+                            lines.emplace_back(std::format("Bracket {} / {} shots", blk.ev, blk.count), kNormal);
                             // Per-shot SS list — the real, camera-snapped values
                             // each frame of the bracket fires at, for cross-
                             // checking against captured EXIF (same math as
@@ -7227,16 +7234,40 @@ void App::RenderTimelineBottom() {
                                     if (k != -half) list += "  ";
                                     list += FormatSsLabel(snappedSec);
                                 }
-                                ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.7f, 1.f), "%s", list.c_str());
+                                lines.emplace_back(list, ImVec4(0.65f, 0.65f, 0.7f, 1.f));
                             }
                         }
                         else if (blk.type == BlockType::Burst)
-                            ImGui::Text("Burst %s / %.1fs",
-                                         blk.burstDrive.c_str(), blk.burstDurMs / 1000.f);
+                            lines.emplace_back(std::format("Burst {} / {:.1f}s",
+                                                            blk.burstDrive, blk.burstDurMs / 1000.f), kNormal);
                     }
-                    if (!blk.label.empty()) ImGui::Text("\"%s\"", blk.label.c_str());
-                    if (overlap) ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f),
-                                                     "Overlaps next block!");
+                    if (!blk.label.empty()) lines.emplace_back(std::format("\"{}\"", blk.label), kNormal);
+                    if (overlap) lines.emplace_back("Overlaps next block!", ImVec4(1.f, 0.4f, 0.4f, 1.f));
+
+                    ImGui::PushFont(m_fontMono);
+                    float maxW = 0.f;
+                    for (const auto& ln : lines) maxW = std::max(maxW, ImGui::CalcTextSize(ln.first.c_str()).x);
+                    const float lineH = ImGui::GetTextLineHeightWithSpacing();
+                    const ImVec2 pad = ImGui::GetStyle().WindowPadding;
+                    const ImVec2 tipSize(maxW + pad.x * 2.f,
+                                          lineH * static_cast<float>(lines.size()) + pad.y * 2.f);
+                    ImGui::PopFont();
+
+                    // Clamp so no edge can land outside the main viewport's work
+                    // area -- flip above the cursor instead of overflowing the
+                    // bottom, clamp horizontally against the right edge too.
+                    const ImVec2 vpPos  = ImGui::GetMainViewport()->WorkPos;
+                    const ImVec2 vpSize = ImGui::GetMainViewport()->WorkSize;
+                    ImVec2 pos(mp.x + 16.f, mp.y + 8.f);
+                    if (pos.y + tipSize.y > vpPos.y + vpSize.y) pos.y = mp.y - tipSize.y - 8.f;
+                    if (pos.x + tipSize.x > vpPos.x + vpSize.x) pos.x = vpPos.x + vpSize.x - tipSize.x;
+                    if (pos.y < vpPos.y) pos.y = vpPos.y;
+                    if (pos.x < vpPos.x) pos.x = vpPos.x;
+                    ImGui::SetNextWindowPos(pos);
+
+                    ImGui::BeginTooltip();
+                    ImGui::PushFont(m_fontMono);
+                    for (const auto& ln : lines) ImGui::TextColored(ln.second, "%s", ln.first.c_str());
                     ImGui::PopFont();
                     ImGui::EndTooltip();
                 }

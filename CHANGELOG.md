@@ -7,6 +7,7 @@
 ### mgr Maciej Szupiluk
 - Fixed shooting being completely blocked when a camera has a passive/manual lens attached (no electronic aperture coupling, as with some adapted or older lenses): the app used to spend the full 6-second settings-change budget retrying an aperture command the camera can never accept, then reported the whole shot as failed even though shutter speed and ISO were set correctly. It now recognizes up front that the camera has no control over aperture in that state and skips straight to the settings it *can* control - confirmed on hardware
 - Fixed the "Single Picture Preset Generator" and "Bracket Set Generator" windows sometimes showing a "programmer error" popup and a "Target track" list with confusing, duplicated camera entries - the list now always shows the real, currently-connected camera name for each track instead of a placeholder label that could end up duplicated
+- Fixed the Timeline's block hover tooltip (shutter speed/ISO/aperture, bracket shot list) running off the bottom or right edge of the screen when hovering a block on a lower camera track - it now always repositions itself to stay fully on screen, flipping above the cursor when needed
 
 ## 2026-08-05
 
