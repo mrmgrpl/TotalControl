@@ -1616,6 +1616,18 @@ contained `suvi_cache/`, logs and live `*.db-wal` files — exactly the
 pitfall noted under 2026-07-23), with the 3 exes, `CHANGELOG.md` and
 `START_HERE.md` replaced.
 
+**Same-day re-spin**: operator decision — the app is general-purpose, not
+tied to TSE 2026. Window title "TotalControl — TSE 2026 Mission Control" →
+"TotalControl"; About header's "TSE 2026-08-12 Burgos / Lerma" line removed;
+`README.md` intro made event-neutral (TSE 2026 kept only as a field-proven
+note) and the expired "Community testing — help needed before August 1,
+2026" section replaced by a general "Feedback & testing" section;
+`START_HERE.md` intro likewise. Re-spun with the documented
+`gh release delete <tag> --yes --cleanup-tag` + retag + `gh release create`
+procedure. Note: plain `git push` has no stored credentials on this machine —
+push with `git -c credential.helper= -c 'credential.helper=!gh auth
+git-credential' push ...` (one-shot, leaves git config untouched).
+
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
 IqpClient previously scraped `maps.besselianelements.com`. This has been REPLACED by a dedicated

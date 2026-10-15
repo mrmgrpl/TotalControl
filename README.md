@@ -7,10 +7,12 @@ sequence, in both space and time.
 **Watch the intro video:** [https://youtu.be/rhCX8FMtpQg](https://youtu.be/rhCX8FMtpQg)
 **What's new:** see [CHANGELOG.md](CHANGELOG.md)
 
-![TotalControl — Mission Control GUI: Sky View Simulator with timeline, contact times, and multi-camera panel](docs/images/mission_control.png)
+![TotalControl GUI: Sky View Simulator with timeline, contact times, and multi-camera panel](docs/images/mission_control.png)
 
-Built for the total solar eclipse of **August 12, 2026** (Burgos/Lerma, Spain —
-totality 103.9s), but usable for any total eclipse.
+Works for any solar eclipse in the built-in database of 11,898 eclipses —
+pick the eclipse, set the observation site, plan the sequence. Field-proven
+at the total solar eclipse of August 12, 2026 (Burgos/Lerma, Spain), where
+the planned sequence ran successfully on several independent setups.
 
 ## What it does
 
@@ -57,22 +59,17 @@ Development is supported entirely through voluntary donations on Patronite.
 If the project is useful to you, that's the only way to support it, and it's
 entirely optional.
 
-## Community testing — help needed before August 1, 2026
+## Feedback & testing
 
 TotalControl is built on Sony's Camera Remote SDK, so in theory every Sony
 Alpha camera it supports should work — but every camera body behaves
 slightly differently, and the only way to catch compatibility issues and
-edge cases is real people with real Alpha bodies actually running this
-software before eclipse day.
+edge cases is real people running it on real cameras.
 
-**If you own a Sony Alpha camera and are even remotely considering
-TotalControl for Spain or any future eclipse — please get involved now.**
-Try it, break it, tell us what doesn't work.
-
-**Hard deadline: feedback needs to arrive by August 1, 2026.** After that
-date development is fully absorbed into final eclipse preparations, and no
-further fixes will land before Spain. If you find something, don't sit on
-it — the earlier it's reported, the more likely it gets fixed in time.
+If you own a Sony Alpha camera and plan to use TotalControl for an upcoming
+eclipse, try it well in advance and report anything that doesn't work via
+[GitHub Issues](../../issues). The earlier it's reported, the more likely
+it gets fixed before your eclipse.
 
 ## Supported camera models
 

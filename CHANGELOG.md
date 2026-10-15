@@ -12,6 +12,7 @@
 - Fixed the Timeline briefly showing the previous eclipse's contact times right after switching eclipses, until the new online (IQP) result arrived
 - Added a pulsing red "!" MERIDIAN FLIP WARNING on the Timeline when the Sun crosses the observer's meridian between C1 and C4 - a German equatorial mount set to auto-flip would flip in the middle of the sequence. Hover it for the exact transit time. For 2 August 2027 at Luxor the transit is 11 minutes before C2
 - The app now starts with the nearest upcoming total, annular or hybrid eclipse selected, skipping partial eclipses
+- Removed the TSE 2026-specific text from the window title and the About screen - TotalControl is a general-purpose eclipse controller, not tied to one event
 
 ## 2026-08-09
 
