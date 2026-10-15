@@ -332,6 +332,12 @@ Adapted from Gerard J. Holzmann (JPL/NASA) for this C++23 codebase. All ten rule
 | **Preset-generator "Target track" combo — ImGui ID collision + stale/duplicated CamN labels** | **DONE 2026-08-09** — see Change log |
 | **Timeline block hover tooltip running off-screen on lower camera tracks** | **DONE 2026-08-09** — see Change log |
 | **Release v2026-08-09** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-08-09 |
+| **TSE 2026-08-12 production run** | **SUCCESS** — sequence ran as planned; Dan Becker and other testers also reported success |
+| **Sky View — gnomonic (rectilinear) projection, curved alt/az grid** | **DONE 2026-10-15, verified against PeakFinder** — see Change log |
+| **Playhead recovery: "Set PH -60 s before C2" button, auto C2−60 s on eclipse select, stale-playhead reset (GitHub #2)** | **DONE 2026-10-15** — see Change log |
+| **MERIDIAN FLIP WARNING icon on Timeline** | **DONE 2026-10-15** — see Change log |
+| **Default eclipse = nearest future T/A/H (partials skipped)** | **DONE 2026-10-15** |
+| **Release v2026-10-15** | **PUBLISHED** — https://github.com/mrmgrpl/TotalControl/releases/tag/v2026-10-15 |
 
 ### TotalControlGUI — Phase 2b (complete)
 
@@ -1542,6 +1548,73 @@ the release in place using the same `gh release delete <tag> --yes
 2026-07-23 — tag `v2026-08-09` now points at commit `a9445bf`, ZIP
 re-verified (38MB unpacked / 21.36MB zipped, GUI.exe refreshed, no other
 changes needed).
+
+### 2026-10-15 — Sky View projection, playhead recovery, meridian-flip warning
+
+Preparation for a DDD Belgium conference demo built around TSE 2027-08-02
+(Luxor, Sun 82° up at C2). Four GUI-only changes, all in `App.cpp`.
+
+**1. Sky View drew the sky as a flat Az/Alt rectangle (`RenderSolarView`)**
+Operator compared it side-by-side with PeakFinder: azimuth/altitude correct,
+curvature wrong. Every position was `cx + dAz·cos(altSun)·scale`,
+`cy − dAlt·scale` — a local equirectangular approximation, harmless near the
+horizon (TSE 2026, Burgos) and badly wrong near the zenith. Replaced with a
+gnomonic (rectilinear) projection centred on the Sun: ENU unit vectors,
+basis `vC` (centre), `vR` (right, increasing az), `vU` (towards zenith), so
+screen-up at the centre is still the zenith direction and `P₀ − q` stays
+the correct frame rotation. `projectAbs(az, alt, out) -> bool` (false when
+> ~84° from centre), exact inverse `unprojectAbs` (Horizon-mode drag),
+`halfFovPx(fov) = k·tan(fov/2)` for camera frames/LV quads (sensor is
+rectilinear too). Grid rewritten as projected polylines: altitude circles
+curve, azimuth lines converge on the zenith; azimuth step coarsens
+automatically (≤ 24 lines) when the zenith is in view; zenith shown as a
+"Z" circle when on screen. Moon, planets, Sun/Moon 24 h tracks and the
+C2/C3 direction vector all go through the same projection. Confirmed
+against PeakFinder by the operator.
+
+**2. "Lost" playhead (GitHub issue #2) — three parts**
+- New `App::SetPlayheadMs()` (shared with ruler-drag; re-syncs
+  `m_seqNextBlock`/`m_audioNextBlock` when TestPaused).
+- "Set PH -60 s before C2" button in the UTC-ruler label column (below
+  "Fit timeline"; falls back to "PH: C2 -60 s" if the full label doesn't
+  fit 140 px); pans the view to the playhead, keeping zoom. Disabled
+  while RUN/TEST RUN is active.
+- `SnapPlayheadToSelectedEclipse()`: picking an eclipse in the combo sets
+  playhead = C2 − 60 s (Max − 60 s for partials) from the synchronous
+  Besselian calc on DB elements, and sets the view to C1−5 min … C4+5 min.
+- Root cause of the "wrong orbital lines" seen during testing: the
+  playhead was still on the previous eclipse's date, outside the ephemeris
+  day, so `interpSnap` clamped to the 00:00 UTC sample (Sun at −36.8°,
+  night sky). Now: Idle playhead > 12 h from C2 is reset to C2 − 45 s
+  automatically, and Sky View shows a red "PLAYHEAD OUTSIDE EPHEMERIS DAY"
+  banner whenever sim time is outside the ephemeris range.
+- `TriggerIqpFetch()` now clears `m_contacts` before starting the async
+  fetch — otherwise `PrimaryContacts()` kept returning the *previous*
+  eclipse's IQP contacts until the new response arrived (which would also
+  immediately undo the new playhead via the stale-reset above).
+
+**3. MERIDIAN FLIP WARNING (`SunMeridianTransitMs()`, Timeline)**
+Sun upper transit = hour angle − → + (`GmstDeg()` extracted from
+`ComputeQ`), found in the loaded Sun ephemeris for `m_obsLon`. If it falls
+in [C1, C4], a pulsing red "!" is drawn on the Contacts strip at the
+transit time; hover → "MERIDIAN FLIP WARNING!" + transit UTC + advice.
+TSE 2027 Luxor: transit 09:52:05 UTC, C2 at HA +2.9°, C3 at HA +4.4°.
+Field-rotation note from the same session: at Luxor q swings ~117° between
+09:00 and 11:00 UTC (≈ 9° during totality) — real alt-az field rotation,
+not a bug.
+
+**4. Default eclipse at startup** — nearest future eclipse of type T/A/H;
+partials skipped; falls back to nearest future of any type, then the last.
+
+### 2026-10-15 — Release v2026-10-15
+
+Ninth public release. Version bump 2026.08.09→2026.10.15 across all three
+executables. Release build (`out/build/x64-Release`, Ninja,
+`CMAKE_BUILD_TYPE=Release`). Staging built from the clean v2026-08-09 ZIP
+contents (the 2026-08-09 staging folder had since been run from and
+contained `suvi_cache/`, logs and live `*.db-wal` files — exactly the
+pitfall noted under 2026-07-23), with the 3 exes, `CHANGELOG.md` and
+`START_HERE.md` replaced.
 
 ## Known pitfalls in IqpClient (BE REST API / besselianelements.com)
 
