@@ -2,6 +2,17 @@
 
 ---
 
+## 2026-10-15
+
+### mgr Maciej Szupiluk
+- Fixed the Sky View Simulator drawing the sky grid as a flat rectangle (straight, perpendicular altitude/azimuth lines) - very wrong for an eclipse high in the sky, such as 2 August 2027 at Luxor with the Sun 82 degrees up. The sky is now drawn with the same geometry as a real camera lens (and as PeakFinder): azimuth lines converge on the zenith, altitude lines curve around it. The Moon, planets, Sun/Moon daily paths, camera frames and Live View overlay all use the same projection
+- Added a "Set PH -60 s before C2" button below "Fit timeline" that moves the Timeline playhead to 60 seconds before C2 and scrolls the view to it, so a playhead dragged or scrolled out of sight can always be found again (GitHub issue #2)
+- Choosing an eclipse from the list now automatically moves the playhead to 60 seconds before C2 (Max for partial eclipses) and scrolls the Timeline to that eclipse's C1-C4
+- Fixed the playhead staying on the previously selected eclipse's date after switching eclipses, which made the Sky View Simulator show a frozen night sky; a stale playhead is now reset automatically, and the simulator shows a red warning if its time is ever outside the downloaded ephemeris day
+- Fixed the Timeline briefly showing the previous eclipse's contact times right after switching eclipses, until the new online (IQP) result arrived
+- Added a pulsing red "!" MERIDIAN FLIP WARNING on the Timeline when the Sun crosses the observer's meridian between C1 and C4 - a German equatorial mount set to auto-flip would flip in the middle of the sequence. Hover it for the exact transit time. For 2 August 2027 at Luxor the transit is 11 minutes before C2
+- The app now starts with the nearest upcoming total, annular or hybrid eclipse selected, skipping partial eclipses
+
 ## 2026-08-09
 
 ### mgr Maciej Szupiluk

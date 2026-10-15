@@ -118,6 +118,8 @@ private:
     void RenderStatusColumn();
     void RenderInspectorColumn();
     void RenderTimelineBottom();
+    void SetPlayheadMs(int64_t newPh);
+    void SnapPlayheadToSelectedEclipse();
     void RenderMenuBar();
     void RenderAboutModal();
     void RenderWhatsNewModal();      // separate modal, opened via About menu -> What's New
@@ -348,6 +350,7 @@ private:
     void EphThreadProc(std::string eclDate, std::string locKey,
                        std::wstring configPath,
                        double lat, double lon, double altM);
+    int64_t SunMeridianTransitMs() const;
     EphRow InterpEphAt(EphBody body, int64_t utcMs) const;
     static double ComputeP0(double raSun_deg,  double decSun_deg);
     static double ComputeQ (double raSun_deg,  double decSun_deg,

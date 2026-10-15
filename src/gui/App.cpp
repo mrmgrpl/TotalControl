@@ -522,7 +522,11 @@ void App::TriggerIqpFetch() {
     m_geResult = CalcBesselian(bel, static_cast<double>(e.latGe),
                                     static_cast<double>(e.lonGe), 0.0);
 
-    // IQP: asynchronous, no BE fallback (results shown side-by-side)
+    // IQP: asynchronous, no BE fallback (results shown side-by-side).
+    // Drop the previous result first — until the new one lands, consumers
+    // (PrimaryContacts → Timeline, stale-playhead check) must see BE for the
+    // *new* eclipse/location, not the old eclipse's IQP contacts.
+    { std::lock_guard lk(m_iqpMutex); m_contacts = ContactTimes{}; }
     m_iqpState.store(1);
     if (m_iqpThread.joinable()) m_iqpThread.detach();
 
@@ -575,25 +579,52 @@ double App::ComputeMoonV(double raMoon_deg, double decMoon_deg) {
            * 180.0 / kPi;
 }
 
+// GMST in degrees (IAU 1982) from Unix ms.
+static double GmstDeg(int64_t utcMs) {
+    const double jd = static_cast<double>(utcMs) / 86400000.0 + 2440587.5;
+    const double T  = (jd - 2451545.0) / 36525.0;
+    return std::fmod(280.46061837
+                     + 360.98564736629 * (jd - 2451545.0)
+                     + 0.000387933 * T * T, 360.0);
+}
+
 // q: parallactic angle of the Sun (angle from celestial N to zenith, measured E).
 // H (hour angle) = GMST + lon_deg − RA_sun_deg.
 double App::ComputeQ(double raSun_deg, double decSun_deg,
                      double lat_deg, double lon_deg, int64_t utcMs)
 {
     static constexpr double kPi = 3.14159265358979323846;
-    // Julian Day Number from Unix ms
-    double jd = static_cast<double>(utcMs) / 86400000.0 + 2440587.5;
-    double T  = (jd - 2451545.0) / 36525.0;
-    // GMST in degrees (IAU 1982)
-    double gmst = std::fmod(280.46061837
-                 + 360.98564736629 * (jd - 2451545.0)
-                 + 0.000387933 * T * T, 360.0);
+    double gmst = GmstDeg(utcMs);
     double H   = (gmst + lon_deg - raSun_deg) * kPi / 180.0;
     double dec = decSun_deg * kPi / 180.0;
     double lat = lat_deg    * kPi / 180.0;
     return std::atan2(std::sin(H),
                       std::tan(lat) * std::cos(dec) - std::sin(dec) * std::cos(H))
            * 180.0 / kPi;
+}
+
+// UTC ms of the Sun's upper meridian transit (hour angle − → +) for the
+// observer longitude, found in the loaded ephemeris day; -1 if not loaded or
+// no transit in range. Drives the Timeline's MERIDIAN FLIP warning icon.
+int64_t App::SunMeridianTransitMs() const {
+    std::lock_guard lk(m_ephMutex);
+    const auto& rows = m_ephSamples[static_cast<size_t>(EphBody::Sun)];
+    assert(rows.size() < 100000);   // loop bound (24 h at 5-min cadence = 289)
+    auto haDeg = [&](const EphRow& r) {   // wrapped to (−180, 180]
+        double h = std::fmod(GmstDeg(r.utc_ms) + m_obsLon - r.ra_deg + 540.0, 360.0) - 180.0;
+        return h;
+    };
+    for (size_t i = 1; i < rows.size(); ++i) {
+        const double h0 = haDeg(rows[i - 1]), h1 = haDeg(rows[i]);
+        if (h0 < 0.0 && h1 >= 0.0 && h1 - h0 < 90.0) {   // − → + (not the 180° wrap)
+            const double t = -h0 / (h1 - h0);
+            const int64_t ms = rows[i - 1].utc_ms
+                + static_cast<int64_t>(t * double(rows[i].utc_ms - rows[i - 1].utc_ms));
+            assert(ms >= rows[i - 1].utc_ms && ms <= rows[i].utc_ms);
+            return ms;
+        }
+    }
+    return -1;
 }
 
 // Linear interpolation between two EphRow samples.
@@ -4881,11 +4912,70 @@ void App::RenderSolarView() {
         return r;
     };
 
+    // Sim time outside the ephemeris day → interpSnap clamps to an edge sample;
+    // flagged in the view so a stale playhead can't pass for a real sky.
+    const bool simOutsideEph = hasEph
+        && (simMs < sunSnap.front().utc_ms || simMs > sunSnap.back().utc_ms);
+
     EphRow sunEph, moonEph;
     if (hasEph) {
         sunEph  = interpSnap(sunSnap,  simMs);
         moonEph = interpSnap(moonSnap, simMs);
     }
+
+    // View center in sky coordinates (current Sun position or fallback)
+    const bool   hasSun    = hasEph && sunEph.utc_ms > 0;
+    const double centerAz  = hasSun ? sunEph.az_deg  : 285.0;
+    const double centerAlt = hasSun ? sunEph.alt_deg :   8.0;
+
+    // ── Gnomonic (rectilinear) projection centred on the Sun ─────────────────
+    // Same geometry as a real camera lens and as PeakFinder's sky grid: great
+    // circles (azimuth lines) map to straight lines converging on the zenith,
+    // altitude circles map to curves. Screen-up at the centre = towards zenith,
+    // so P₀ − q (parallactic angle) stays the correct frame rotation. Basis is
+    // ENU (east, north, up); az measured from north through east.
+    static constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    struct V3 { double e, n, u; };
+    auto dirOf = [](double az, double alt) -> V3 {
+        const double ca = cos(alt * kD2R);
+        return { ca * sin(az * kD2R), ca * cos(az * kD2R), sin(alt * kD2R) };
+    };
+    auto dot3 = [](const V3& a, const V3& b) { return a.e*b.e + a.n*b.n + a.u*b.u; };
+    const V3 vC = dirOf(centerAz, centerAlt);
+    const V3 vR = {  cos(centerAz * kD2R), -sin(centerAz * kD2R), 0.0 };
+    const V3 vU = { -sin(centerAlt * kD2R) * sin(centerAz * kD2R),
+                    -sin(centerAlt * kD2R) * cos(centerAz * kD2R),
+                     cos(centerAlt * kD2R) };
+    // px per tangent-plane unit; 1° near the centre == `scale` px as before.
+    const double kPxPerTan = static_cast<double>(scale) / kD2R;
+    // Points more than ~84° from the centre are not drawn (gnomonic → ∞ at 90°).
+    static constexpr double kMinCosFromCenter = 0.1;
+
+    auto projectAbs = [&](double az, double alt, ImVec2& out) -> bool {
+        const V3     d  = dirOf(az, alt);
+        const double dc = dot3(d, vC);
+        if (dc < kMinCosFromCenter) return false;
+        out = { cx + static_cast<float>(dot3(d, vR) / dc * kPxPerTan),
+                cy - static_cast<float>(dot3(d, vU) / dc * kPxPerTan) };
+        return true;
+    };
+    // Inverse projection: screen pos → (az, alt) degrees
+    auto unprojectAbs = [&](float sx, float sy) -> std::pair<double,double> {
+        assert(kPxPerTan > 0.0);
+        const double x = (sx - cx) / kPxPerTan;
+        const double y = (cy - sy) / kPxPerTan;
+        V3 d = { vC.e + x*vR.e + y*vU.e, vC.n + x*vR.n + y*vU.n, vC.u + x*vR.u + y*vU.u };
+        const double len = sqrt(dot3(d, d));
+        assert(len >= 1.0);
+        double az = atan2(d.e / len, d.n / len) / kD2R;
+        if (az < 0.0) az += 360.0;
+        return { az, asin(std::clamp(d.u / len, -1.0, 1.0)) / kD2R };
+    };
+    // Rectilinear half-extent in px of an angular field of fovDeg (camera sensor
+    // is rectilinear too, so its frame is exactly k·tan(fov/2) on this plane).
+    auto halfFovPx = [&](float fovDeg) -> float {
+        return static_cast<float>(tan(fovDeg * 0.5 * kD2R) * kPxPerTan);
+    };
 
     float sunR  = 0.267f * scale;
     float moonR = 0.278f * scale;
@@ -4896,11 +4986,10 @@ void App::RenderSolarView() {
     if (hasEph && sunEph.utc_ms > 0 && moonEph.utc_ms > 0) {
         sunR  = static_cast<float>(sunEph.ang_diam_arcmin  / 2.0 / 60.0) * scale;
         moonR = static_cast<float>(moonEph.ang_diam_arcmin / 2.0 / 60.0) * scale;
-        float cosAlt = cosf(static_cast<float>(sunEph.alt_deg) * kPi / 180.f);
-        float dAz    = static_cast<float>(moonEph.az_deg  - sunEph.az_deg);
-        float dAlt   = static_cast<float>(moonEph.alt_deg - sunEph.alt_deg);
-        moonX = cx + dAz  * cosAlt * scale;
-        moonY = cy - dAlt * scale;
+        if (ImVec2 mp; projectAbs(moonEph.az_deg, moonEph.alt_deg, mp)) {
+            moonX = mp.x;
+            moonY = mp.y;
+        }
         double solarP0 = ComputeP0(sunEph.ra_deg, sunEph.dec_deg);
         double q       = ComputeQ (sunEph.ra_deg, sunEph.dec_deg,
                                    m_obsLat, m_obsLon, simMs);
@@ -4932,10 +5021,6 @@ void App::RenderSolarView() {
         }
     }
 
-    // cosAltSun: projection factor for az→screen (constant per frame)
-    float cosAltSun = cosf((hasEph && sunEph.utc_ms > 0
-                           ? (float)sunEph.alt_deg : 8.f) * kPi / 180.f);
-
     // N☉ drawing angle from screen vertical (zenith) = P₀ − q
     float P_rad = (m_solarP - m_solarQ) * kPi / 180.f;
 
@@ -4954,12 +5039,16 @@ void App::RenderSolarView() {
         if (idx0 != idx1) {
             size_t si0 = std::min(idx0, sunSnap.size() - 1);
             size_t si1 = std::min(idx1, sunSnap.size() - 1);
-            double relAz0  = moonSnap[idx0].az_deg  - sunSnap[si0].az_deg;
-            double relAz1  = moonSnap[idx1].az_deg  - sunSnap[si1].az_deg;
-            double relAlt0 = moonSnap[idx0].alt_deg - sunSnap[si0].alt_deg;
-            double relAlt1 = moonSnap[idx1].alt_deg - sunSnap[si1].alt_deg;
-            float  vx      = static_cast<float>((relAz1 - relAz0) * cosAltSun);
-            float  vy      = -static_cast<float>(relAlt1 - relAlt0);  // y-down
+            // Moon-minus-Sun screen offset at both samples, both in the current
+            // (Sun-centred) projection — screen coords, y-down.
+            ImVec2 s0, s1, m0, m1;
+            const bool okP =
+                projectAbs(sunSnap[si0].az_deg,   sunSnap[si0].alt_deg,   s0) &&
+                projectAbs(sunSnap[si1].az_deg,   sunSnap[si1].alt_deg,   s1) &&
+                projectAbs(moonSnap[idx0].az_deg, moonSnap[idx0].alt_deg, m0) &&
+                projectAbs(moonSnap[idx1].az_deg, moonSnap[idx1].alt_deg, m1);
+            float  vx      = okP ? (m1.x - s1.x) - (m0.x - s0.x) : 0.f;
+            float  vy      = okP ? (m1.y - s1.y) - (m0.y - s0.y) : 0.f;
             float  vlen    = sqrtf(vx * vx + vy * vy);
             if (vlen > 1e-6f) {
                 kC3ux_dyn =  vx / vlen;  kC3uy_dyn =  vy / vlen;
@@ -4975,85 +5064,132 @@ void App::RenderSolarView() {
     // ── Background ────────────────────────────────────────────────────────────
     dl->AddRectFilled({ox, oy}, {ox+szW, oy+szH}, IM_COL32(6, 8, 16, 255));
 
-    // View center in sky coordinates (current Sun position or fallback)
-    double centerAz  = (hasEph && sunEph.utc_ms > 0) ? sunEph.az_deg  : 285.0;
-    double centerAlt = (hasEph && sunEph.utc_ms > 0) ? sunEph.alt_deg :   8.0;
-    // cosAltSun already computed before PushClipRect — reused here
-
-    // Projection: (az, alt) → screen. Center of view = current Sun.
-    auto projectAbs = [&](double az, double alt) -> ImVec2 {
-        float dAz  = static_cast<float>(az  - centerAz);
-        float dAlt = static_cast<float>(alt - centerAlt);
-        while (dAz >  180.f) dAz -= 360.f;
-        while (dAz < -180.f) dAz += 360.f;
-        return { cx + dAz * cosAltSun * scale, cy - dAlt * scale };
-    };
-
-    // ── Alt/Az grid ───────────────────────────────────────────────────────────
+    // ── Alt/Az grid — gnomonic: azimuth lines are straight and converge on the
+    // zenith, altitude circles are curved (matches PeakFinder / a real lens).
     {
-        float viewHalfDeg = kViewHalf / m_solarZoom;
-        float gd = (viewHalfDeg > 10.f) ? 5.f
-                 : (viewHalfDeg >  3.f) ? 1.f : 0.5f;
-        ImU32 gCol = IM_COL32(28, 36, 55, 100);
-        ImU32 lCol = IM_COL32(48, 60, 85, 170);
+        const float viewHalfDeg = kViewHalf / m_solarZoom;
+        const float gd = (viewHalfDeg > 10.f) ? 5.f
+                       : (viewHalfDeg >  3.f) ? 1.f : 0.5f;
+        const ImU32 gCol = IM_COL32(28, 36, 55, 100);
+        const ImU32 lCol = IM_COL32(48, 60, 85, 170);
+        static constexpr int kSeg          = 96;   // polyline segments per grid line
+        static constexpr int kMaxGridLines = 64;   // loop bound per family
 
-        // Altitude lines (horizontal in this view)
-        float altBase = std::floorf(static_cast<float>(centerAlt) / gd) * gd;
-        for (int k = -12; k <= 12; ++k) {
-            float a  = altBase + k * gd;
-            if (a < -15.f || a > 90.f) continue;
-            float sy = cy - (a - static_cast<float>(centerAlt)) * scale;
-            if (sy < oy - 1.f || sy > oy + szH + 1.f) continue;
-            dl->AddLine({ox, sy}, {ox + szW, sy}, gCol, 1.f);
-            char lbl[8]; snprintf(lbl, sizeof(lbl), "%.0f\xc2\xb0", a);
-            dl->AddText({ox + 4.f, sy - 13.f}, lCol, lbl);
+        // Angular radius of the view's half-diagonal → which lines can be visible.
+        const double halfDiagDeg = atan(0.5 * sqrt(double(szW) * szW + double(szH) * szH)
+                                        / kPxPerTan) / kD2R;
+        const double altLo = std::max(-15.0, centerAlt - halfDiagDeg);
+        const double altHi = std::min( 90.0, centerAlt + halfDiagDeg);
+        // Max |Δaz| reachable within that radius; whole circle once the zenith is in view.
+        const double sinR  = sin(halfDiagDeg * kD2R);
+        const double cosC  = cos(centerAlt * kD2R);
+        const double azHalf = (sinR >= cosC) ? 180.0 : asin(sinR / cosC) / kD2R;
+
+        // Azimuth step: grid step, coarsened until ≤ 24 lines (they crowd near zenith).
+        static constexpr float kAzSteps[] = { 0.5f, 1.f, 2.f, 5.f, 10.f, 15.f, 30.f, 45.f };
+        float azStep = 45.f;
+        for (float s : kAzSteps) {
+            if (s >= gd && 2.0 * azHalf / s <= 24.0) { azStep = s; break; }
         }
 
-        // Azimuth lines (vertical in this view)
-        float azBase = std::floorf(static_cast<float>(centerAz) / gd) * gd;
-        for (int k = -12; k <= 12; ++k) {
-            float az  = azBase + k * gd;
-            float dAz = az - static_cast<float>(centerAz);
-            float sx  = cx + dAz * cosAltSun * scale;
-            if (sx < ox - 1.f || sx > ox + szW + 1.f) continue;
-            dl->AddLine({sx, oy}, {sx, oy + szH}, gCol, 1.f);
-            char lbl[8]; snprintf(lbl, sizeof(lbl), "%.0f\xc2\xb0", az);
-            ImVec2 ts = ImGui::CalcTextSize(lbl);
-            dl->AddText({sx - ts.x * 0.5f, oy + szH - ts.y - 2.f}, lCol, lbl);
+        auto drawPolyline = [&](auto&& pointAt, ImU32 col, float thick) {
+            ImVec2 prev;
+            bool   prevOk = projectAbs(pointAt(0).first, pointAt(0).second, prev);
+            for (int s = 1; s <= kSeg; ++s) {
+                ImVec2 cur;
+                const auto [az, alt] = pointAt(s);
+                const bool curOk = projectAbs(az, alt, cur);
+                if (prevOk && curOk) dl->AddLine(prev, cur, col, thick);
+                prev = cur; prevOk = curOk;
+            }
+        };
+        auto inView = [&](ImVec2 p, float margin) {
+            return p.x >= ox + margin && p.x <= ox + szW - margin
+                && p.y >= oy + margin && p.y <= oy + szH - margin;
+        };
+
+        // Altitude circles
+        const float altFirst = std::ceilf(static_cast<float>(altLo) / gd) * gd;
+        for (int k = 0; k < kMaxGridLines; ++k) {
+            const float a = altFirst + k * gd;
+            if (a > altHi || a >= 90.f) break;
+            drawPolyline([&](int s) {
+                return std::pair{ centerAz - azHalf + 2.0 * azHalf * s / kSeg, double(a) };
+            }, gCol, 1.f);
+            if (ImVec2 lp; projectAbs(centerAz, a, lp) && inView(lp, 2.f)) {
+                char lbl[8]; snprintf(lbl, sizeof(lbl), "%.0f\xc2\xb0", a);
+                dl->AddText({lp.x + 4.f, lp.y - 13.f}, lCol, lbl);
+            }
+        }
+
+        // Azimuth lines (vertical great circles, from altLo up to the zenith)
+        const double azFirst = std::ceil((centerAz - azHalf) / azStep) * azStep;
+        for (int k = 0; k < kMaxGridLines; ++k) {
+            const double az = azFirst + k * azStep;
+            if (az > centerAz + azHalf || (azHalf >= 180.0 && az >= azFirst + 360.0)) break;
+            drawPolyline([&](int s) {
+                return std::pair{ az, altLo + (altHi - altLo) * s / kSeg };
+            }, gCol, 1.f);
+            // Label at the line's lowest on-screen point (bottom edge).
+            const float ty = ImGui::GetTextLineHeight();
+            ImVec2 best{0.f, -1.f};
+            for (int s = 0; s <= kSeg; ++s) {
+                ImVec2 p;
+                if (projectAbs(az, altLo + (altHi - altLo) * s / kSeg, p)
+                    && inView(p, 2.f) && p.y <= oy + szH - ty - 2.f && p.y > best.y)
+                    best = p;
+            }
+            if (best.y >= 0.f) {
+                const double azN = std::fmod(std::fmod(az, 360.0) + 360.0, 360.0);
+                char lbl[8]; snprintf(lbl, sizeof(lbl), "%.0f\xc2\xb0", azN);
+                const ImVec2 ts = ImGui::CalcTextSize(lbl);
+                dl->AddText({best.x - ts.x * 0.5f, best.y}, lCol, lbl);
+            }
+        }
+
+        // ── Horizon (alt = 0) ─────────────────────────────────────────────────
+        if (altLo <= 0.0) {
+            const ImU32 hCol = IM_COL32(50, 65, 90, 220);
+            drawPolyline([&](int s) {
+                return std::pair{ centerAz - azHalf + 2.0 * azHalf * s / kSeg, 0.0 };
+            }, hCol, 2.f);
+            if (ImVec2 hp; projectAbs(centerAz, 0.0, hp) && inView(hp, 2.f))
+                dl->AddText({hp.x + 4.f, hp.y + 2.f}, IM_COL32(50, 65, 90, 200), "horizon");
         }
     }
 
-    // ── Horizon (alt = 0) ─────────────────────────────────────────────────────
+    // ── Zenith direction (always straight up from the centre in this projection)
     {
-        float hY = cy + static_cast<float>(centerAlt) * scale;
-        if (hY > oy && hY < oy + szH) {
-            dl->AddLine({ox, hY}, {ox + szW, hY}, IM_COL32(50, 65, 90, 220), 2.f);
-            dl->AddText({ox + 4.f, hY + 2.f}, IM_COL32(50, 65, 90, 200), "horizon");
+        const ImU32 zCol = IM_COL32(50, 65, 90, 120);
+        ImVec2 zp;
+        const bool zInView = projectAbs(0.0, 90.0, zp) && zp.y > oy + 14.f;
+        const float yEnd = zInView ? zp.y : oy + 20.f;
+        for (float y = cy - 4.f; y > yEnd; y -= 9.f)
+            dl->AddLine({cx, y}, {cx, std::max(y - 5.f, yEnd)},
+                        IM_COL32(50, 65, 90, 100), 1.f);
+        if (zInView) {
+            dl->AddCircle(zp, 4.f, zCol, 12, 1.2f);
+            dl->AddText({zp.x + 6.f, zp.y - 6.f}, IM_COL32(50, 65, 90, 160), "Z");
+        } else {
+            dl->AddTriangleFilled({cx - 4.f, oy + 22.f}, {cx + 4.f, oy + 22.f},
+                                   {cx,       oy + 14.f}, zCol);
+            dl->AddText({cx + 5.f, oy + 10.f}, IM_COL32(50, 65, 90, 160), "Z");
         }
     }
-
-    // ── Zenith direction ──────────────────────────────────────────────────────
-    for (float y = cy - 4.f; y > oy + 20.f; y -= 9.f)
-        dl->AddLine({cx, y}, {cx, std::max(y - 5.f, oy + 20.f)},
-                    IM_COL32(50, 65, 90, 100), 1.f);
-    dl->AddTriangleFilled({cx - 4.f, oy + 22.f}, {cx + 4.f, oy + 22.f},
-                           {cx,       oy + 14.f}, IM_COL32(50, 65, 90, 120));
-    dl->AddText({cx + 5.f, oy + 10.f}, IM_COL32(50, 65, 90, 160), "Z");
 
     // ── Sun trajectory — absolute 24h arc ────────────────────────────────────
     if (hasEph && sunSnap.size() > 1) {
         for (size_t i = 1; i < sunSnap.size(); ++i) {
-            float dAz0 = static_cast<float>(sunSnap[i-1].az_deg - sunEph.az_deg);
-            float dAz1 = static_cast<float>(sunSnap[i  ].az_deg - sunEph.az_deg);
-            if (std::fabs(dAz1 - dAz0) > 180.f) continue;  // az wrap gap
-            ImVec2 a = projectAbs(sunSnap[i-1].az_deg, sunSnap[i-1].alt_deg);
-            ImVec2 b = projectAbs(sunSnap[i  ].az_deg, sunSnap[i  ].alt_deg);
+            ImVec2 a, b;
+            if (!projectAbs(sunSnap[i-1].az_deg, sunSnap[i-1].alt_deg, a)) continue;
+            if (!projectAbs(sunSnap[i  ].az_deg, sunSnap[i  ].alt_deg, b)) continue;
             dl->AddLine(a, b, IM_COL32(200, 140, 30, 110), 1.2f);
         }
         // Hour marks with UTC hour labels
         for (size_t i = 0; i < sunSnap.size(); ++i) {
             if (sunSnap[i].utc_ms % 3600000 != 0) continue;
-            ImVec2 pt = projectAbs(sunSnap[i].az_deg, sunSnap[i].alt_deg);
+            ImVec2 pt;
+            if (!projectAbs(sunSnap[i].az_deg, sunSnap[i].alt_deg, pt)) continue;
             dl->AddCircleFilled(pt, 2.5f, IM_COL32(200, 140, 30, 200));
             int hh = static_cast<int>(sunSnap[i].utc_ms / 3600000 % 24);
             char tl[4]; snprintf(tl, sizeof(tl), "%02d", hh);
@@ -5064,17 +5200,16 @@ void App::RenderSolarView() {
     // ── Moon trajectory — absolute 24h arc ───────────────────────────────────
     if (hasEph && moonSnap.size() > 1) {
         for (size_t i = 1; i < moonSnap.size(); ++i) {
-            float dAz0 = static_cast<float>(moonSnap[i-1].az_deg - sunEph.az_deg);
-            float dAz1 = static_cast<float>(moonSnap[i  ].az_deg - sunEph.az_deg);
-            if (std::fabs(dAz1 - dAz0) > 180.f) continue;
-            ImVec2 a = projectAbs(moonSnap[i-1].az_deg, moonSnap[i-1].alt_deg);
-            ImVec2 b = projectAbs(moonSnap[i  ].az_deg, moonSnap[i  ].alt_deg);
+            ImVec2 a, b;
+            if (!projectAbs(moonSnap[i-1].az_deg, moonSnap[i-1].alt_deg, a)) continue;
+            if (!projectAbs(moonSnap[i  ].az_deg, moonSnap[i  ].alt_deg, b)) continue;
             dl->AddLine(a, b, IM_COL32(55, 130, 200, 100), 1.2f);
         }
         // Hour marks (no label — Moon labels would overlap Sun labels)
         for (size_t i = 0; i < moonSnap.size(); ++i) {
             if (moonSnap[i].utc_ms % 3600000 != 0) continue;
-            ImVec2 pt = projectAbs(moonSnap[i].az_deg, moonSnap[i].alt_deg);
+            ImVec2 pt;
+            if (!projectAbs(moonSnap[i].az_deg, moonSnap[i].alt_deg, pt)) continue;
             dl->AddCircleFilled(pt, 2.5f, IM_COL32(55, 130, 200, 180));
         }
     }
@@ -5104,8 +5239,8 @@ void App::RenderSolarView() {
     // fcx, fcy: screen-space centre of frame; rot_rad: 0 = horizontal
     auto DrawFrame = [&](float fcx, float fcy, float fovW_deg, float fovH_deg,
                           float rot_rad, ImU32 col, bool dashed) {
-        float hw = fovW_deg * scale * 0.5f;
-        float hh = fovH_deg * scale * 0.5f;
+        float hw = halfFovPx(fovW_deg);
+        float hh = halfFovPx(fovH_deg);
         float cr = cosf(rot_rad), sr = sinf(rot_rad);
         const float lx[4] = {-hw, hw, hw,-hw};
         const float ly[4] = {-hh,-hh, hh, hh};
@@ -5130,22 +5265,20 @@ void App::RenderSolarView() {
         }
     };
 
-    // Inverse projection: screen pos → (az, alt) degrees
-    auto unprojectAbs = [&](float sx, float sy) -> std::pair<double,double> {
-        assert(cosAltSun > 1e-4f);
-        double az  = centerAz  + (sx - cx) / (cosAltSun * scale);
-        double alt = centerAlt - (sy - cy) / scale;
-        return {az, alt};
-    };
-
     // Camera frame centre from track mode
     auto FrameCenter = [&](const CamConfig& cc) -> ImVec2 {
         assert(cc.focalMm > 0);
         switch (cc.trackMode) {
         case CamTrackMode::Moon:
             return {moonX, moonY};
-        case CamTrackMode::Horizon:
-            return projectAbs(cc.horizonAzDeg, cc.horizonAltDeg);
+        case CamTrackMode::Horizon: {
+            // Pointing > ~84° away from the Sun: park the frame off-screen
+            // (clip rect hides it, drag hit-test can't reach it).
+            ImVec2 hp;
+            if (!projectAbs(cc.horizonAzDeg, cc.horizonAltDeg, hp))
+                hp = { ox - 1.0e4f, oy - 1.0e4f };
+            return hp;
+        }
         case CamTrackMode::Sun:
         default:
             return {cx, cy};
@@ -5170,8 +5303,8 @@ void App::RenderSolarView() {
                 float f    = static_cast<float>(cc.focalMm);
                 float fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
                 float fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
-                float hw   = fovW * scale * 0.5f;
-                float hh   = fovH * scale * 0.5f;
+                float hw   = halfFovPx(fovW);
+                float hh   = halfFovPx(fovH);
                 ImVec2 fc  = FrameCenter(cc);
                 // Axis-aligned hit test (conservative — ignores rotation for simplicity)
                 if (mpos.x >= fc.x - hw && mpos.x <= fc.x + hw
@@ -5237,12 +5370,10 @@ void App::RenderSolarView() {
         for (const auto& pl : kPlanets) {
             EphRow pr = InterpEphAt(pl.body, simMs);
             if (pr.utc_ms == 0) continue;
-            float dAz  = static_cast<float>(pr.az_deg  - sunEph.az_deg);
-            float dAlt = static_cast<float>(pr.alt_deg - sunEph.alt_deg);
-            float px   = cx + dAz  * cosAltSun * scale;
-            float py   = cy - dAlt * scale;
-            dl->AddCircleFilled({px, py}, 3.f, pl.col);
-            dl->AddText({px+4.f, py-6.f}, pl.col, pl.name);
+            ImVec2 pp;
+            if (!projectAbs(pr.az_deg, pr.alt_deg, pp)) continue;
+            dl->AddCircleFilled(pp, 3.f, pl.col);
+            dl->AddText({pp.x+4.f, pp.y-6.f}, pl.col, pl.name);
         }
     }
 
@@ -5293,8 +5424,8 @@ void App::RenderSolarView() {
             float  fovW = 2.f * std::atan2f(kSensorW * 0.5f, f) * 180.f / kPi;
             float  fovH = 2.f * std::atan2f(kSensorH * 0.5f, f) * 180.f / kPi;
             float  rot  = cc.applyP ? P_rad : 0.f;
-            float  hw   = fovW * scale * 0.5f;
-            float  hh   = fovH * scale * 0.5f;
+            float  hw   = halfFovPx(fovW);
+            float  hh   = halfFovPx(fovH);
             float  cr   = cosf(rot), sr = sinf(rot);
             ImVec2 fc   = FrameCenter(cc);
             ImVec2 tl{ fc.x + (-hw)*cr - (-hh)*sr, fc.y + (-hw)*sr + (-hh)*cr };
@@ -5552,6 +5683,17 @@ void App::RenderSolarView() {
         if (mp.x >= zPos.x && mp.x <= zPos.x + ts.x &&
             mp.y >= zPos.y && mp.y <= zPos.y + ts.y)
             ImGui::SetTooltip("Current zoom level of the simulator view (mouse wheel, 0.2x-20x).");
+    }
+
+    // ── Out-of-range warning (playhead outside the ephemeris day) ────────────
+    if (simOutsideEph) {
+        static constexpr const char* kWarn =
+            "PLAYHEAD OUTSIDE EPHEMERIS DAY - sky frozen at edge sample";
+        const ImVec2 ts = ImGui::CalcTextSize(kWarn);
+        const ImVec2 wp{ cx - ts.x * 0.5f, oy + 6.f };
+        dl->AddRectFilled({wp.x - 6.f, wp.y - 2.f}, {wp.x + ts.x + 6.f, wp.y + ts.y + 2.f},
+                          IM_COL32(120, 30, 20, 220), 3.f);
+        dl->AddText(wp, IM_COL32(255, 220, 200, 255), kWarn);
     }
 
     dl->PopClipRect();
@@ -6410,6 +6552,67 @@ void App::ResyncTimelineAnchors() {
     m_tlAnchorC3Ms = ct.c3Ms;
 }
 
+// After a new eclipse is picked: playhead → C2 − 60 s and the Timeline view
+// re-initialised onto its C1..C4. C2 comes from the synchronous Besselian
+// calc that TriggerIqpFetch() just ran on the database's Besselian elements
+// (observer was moved to the GE point, so BE == GE here). Eclipses with no
+// C2 (partial) fall back to Max − 60 s. Skipped while a sequence is running.
+void App::SnapPlayheadToSelectedEclipse() {
+    assert(m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size()));
+    static constexpr int64_t kPhBeforeC2Ms = 60LL * 1000;
+    const GuiSeqMode sm = m_guiSeqMode.load();
+    if (sm != GuiSeqMode::Idle && sm != GuiSeqMode::TestPaused) return;
+    const ContactTimes& src = (m_beResult.c2Ms > 0 || m_beResult.maxMs > 0) ? m_beResult
+                                                                             : m_geResult;
+    const int64_t anchor = src.c2Ms > 0 ? src.c2Ms : src.maxMs;
+    if (anchor <= kPhBeforeC2Ms) {
+        LogLine("Timeline: no C2/Max for selected eclipse -- playhead left unchanged");
+        return;
+    }
+    SetPlayheadMs(anchor - kPhBeforeC2Ms);
+    static constexpr int64_t kViewMarginMs = 5LL * 60 * 1000;   // as initial view
+    if (src.c1Ms > 0 && src.c4Ms > src.c1Ms) {
+        m_tlViewStart = src.c1Ms - kViewMarginMs;
+        m_tlViewEnd   = src.c4Ms + kViewMarginMs;
+    } else {
+        m_tlViewStart = -1;   // re-init from contacts on next frame
+        m_tlViewEnd   = -1;
+    }
+    assert(m_tlPlayheadMs.load() > 0);
+    LogLine(std::format("Timeline: eclipse selected -- playhead set to {} - 60 s",
+                        src.c2Ms > 0 ? "C2" : "Max"));
+}
+
+// Moves the Timeline playhead; while a TEST RUN is paused also re-syncs the
+// per-track "next unfired block" indices so RESUME continues from the new spot.
+void App::SetPlayheadMs(int64_t newPh) {
+    assert(newPh >= 0);
+    const GuiSeqMode sm = m_guiSeqMode.load();
+    assert(sm == GuiSeqMode::Idle || sm == GuiSeqMode::TestPaused);
+    m_tlPlayheadMs.store(newPh);
+    if (sm != GuiSeqMode::TestPaused) return;
+    int camIdx = 0;
+    for (int ti = 0;
+         ti < static_cast<int>(m_tracks.size()) && camIdx < kMaxCamTracks;
+         ++ti) {
+        if (!m_tracks[ti].IsCamera()) continue;
+        int ni = 0;
+        for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
+            if (m_tracks[ti].blocks[ni].atMs >= newPh) break;
+        m_seqNextBlock[camIdx++] = ni;
+    }
+    int audioIdx = 0;
+    for (int ti = 0;
+         ti < static_cast<int>(m_tracks.size()) && audioIdx < kMaxAudioTracks;
+         ++ti) {
+        if (!m_tracks[ti].IsAudio()) continue;
+        int ni = 0;
+        for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
+            if (m_tracks[ti].blocks[ni].atMs >= newPh) break;
+        m_audioNextBlock[audioIdx++].store(ni, std::memory_order_relaxed);
+    }
+}
+
 void App::RenderTimelineBottom() {
     static const float kLabelW  = 140.0f;
     static const float kMarkerH =  14.0f;
@@ -6673,6 +6876,38 @@ void App::RenderTimelineBottom() {
         dl->AddText({px+2.f, y+1.f}, m.col, m.lbl);
     }
 
+    // ── MERIDIAN FLIP warning ─────────────────────────────────────────────
+    // The Sun crosses the observer's meridian while the eclipse is in
+    // progress (C1..C4) → a German equatorial mount set to auto-flip would
+    // flip mid-sequence. Pulsing red "!" at the transit time on the Contacts
+    // strip + faint red line down through the tracks.
+    if (const int64_t mtMs = SunMeridianTransitMs();
+        mtMs > 0 && c1 > 0 && c4 > 0 && mtMs >= c1 && mtMs <= c4
+        && mtMs >= m_tlViewStart && mtMs <= m_tlViewEnd) {
+        const float  px    = toPx(mtMs);
+        const float  pulse = 0.5f + 0.5f * sinf(static_cast<float>(ImGui::GetTime()) * 6.2832f * 1.2f);
+        const ImU32  red   = IM_COL32(235, 40, 40, static_cast<int>(110 + 145 * pulse));
+        const float  r     = kMarkerH * 0.5f - 0.5f;
+        const ImVec2 ic{ px, y + kMarkerH * 0.5f };
+        dl->AddLine({px, phaseY}, {px, phaseY + kPhaseH}, IM_COL32(235, 40, 40, 160), 1.f);
+        dl->AddCircleFilled(ic, r + 2.f * pulse, IM_COL32(235, 40, 40, static_cast<int>(60 * pulse)));
+        dl->AddCircleFilled(ic, r, red);
+        const ImVec2 ts = ImGui::CalcTextSize("!");
+        dl->AddText({ic.x - ts.x * 0.5f, ic.y - ts.y * 0.5f}, IM_COL32(255, 255, 255, 255), "!");
+        const ImVec2 mp = ImGui::GetMousePos();
+        if (ImGui::IsWindowHovered() && fabsf(mp.x - ic.x) <= r + 3.f && fabsf(mp.y - ic.y) <= r + 3.f) {
+            const int64_t sec = (mtMs / 1000) % 86400;
+            ImGui::BeginTooltip();
+            ImGui::TextColored({1.f, 0.25f, 0.25f, 1.f}, "MERIDIAN FLIP WARNING!");
+            ImGui::Text("Sun crosses the meridian at %02d:%02d:%02d UTC, between C1 and C4.",
+                        static_cast<int>(sec / 3600), static_cast<int>(sec / 60 % 60),
+                        static_cast<int>(sec % 60));
+            ImGui::TextUnformatted("Disable auto meridian flip / extend the past-meridian limit\n"
+                                   "on equatorial mounts beyond the last Timeline block.");
+            ImGui::EndTooltip();
+        }
+    }
+
     // ── Relative time strip + UTC ruler ──────────────────────────────────
     static constexpr float kRelRulerH = 22.0f;  // strip above the UTC ruler
     float relRulerY = phaseY + kPhaseH;
@@ -6696,6 +6931,36 @@ void App::RenderTimelineBottom() {
     dl->AddRectFilled({winPos.x, rulerY}, {winPos.x + winW, rulerY + kRulerH},
                       IM_COL32(10, 10, 14, 255));
     dl->AddText({winPos.x + 4.f, rulerY + 4.f}, IM_COL32(70, 75, 100, 200), "UTC");
+
+    // "Set PH -60 s before C2" — recovers a playhead dragged/scrolled out of
+    // sight (GitHub report): jumps it to C2 − 60 s and pans the view onto it.
+    {
+        static constexpr int64_t kPhBeforeC2Ms = 60LL * 1000;
+        const GuiSeqMode sm    = m_guiSeqMode.load();
+        const bool       canPh = (sm == GuiSeqMode::Idle || sm == GuiSeqMode::TestPaused);
+        ImGui::SetCursorScreenPos({winPos.x + 4.f, rulerY + 22.f});
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.31f, 0.86f, 1.00f, 0.30f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.31f, 0.86f, 1.00f, 0.70f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.20f, 0.70f, 0.90f, 1.00f));
+        ImGui::BeginDisabled(!canPh || c2 <= 0);
+        // Full label if it fits the 140 px label column, else a short form.
+        const float btnW  = kLabelW - 8.f;
+        const char* phLbl = (ImGui::CalcTextSize("Set PH -60 s before C2").x + 8.f <= btnW)
+                          ? "Set PH -60 s before C2##phc2" : "PH: C2 -60 s##phc2";
+        if (ImGui::Button(phLbl, ImVec2(btnW, kPhaseH - 2.f))) {
+            const int64_t ph = c2 - kPhBeforeC2Ms;
+            SetPlayheadMs(ph);
+            if (ph < m_tlViewStart || ph > m_tlViewEnd) {   // pan, keep zoom
+                m_tlViewStart = ph - vDur / 2;
+                m_tlViewEnd   = m_tlViewStart + vDur;
+            }
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(canPh ? "Set PH -60 s before C2: move the Timeline playhead to C2 - 60 s"
+                                    : "Stop the running sequence first");
+        ImGui::PopStyleColor(3);
+    }
 
     // Collect ticks: phase transitions + 60s / 10s / 1s interval marks.
     // Fixed-size stack array (no heap alloc): NASA rule 3.
@@ -7426,11 +7691,20 @@ void App::RenderTimelineBottom() {
 
     // ── Playhead ──────────────────────────────────────────────────────────
     // Initialise playhead to C2 - 45 s when contacts first become available.
+    // Also re-initialise when Idle and the playhead is left more than 12 h from
+    // C2 — i.e. still on a previously selected eclipse's date, outside the
+    // ephemeris day (Sky View would otherwise clamp to the first/last sample
+    // and show a night sky).
     {
+        static constexpr int64_t kStalePhMs = 12LL * 3600 * 1000;
         int64_t ph = m_tlPlayheadMs.load();
-        if (ph < 0 && c2 > 0) {
+        const bool stale = ph >= 0 && c2 > 0
+                        && m_guiSeqMode.load() == GuiSeqMode::Idle
+                        && (ph < c2 - kStalePhMs || ph > c2 + kStalePhMs);
+        if ((ph < 0 || stale) && c2 > 0) {
             ph = c2 - 45000LL;
             m_tlPlayheadMs.store(ph);
+            if (stale) LogLine("Timeline: playhead was > 12 h from C2 (other eclipse) -- reset to C2 - 45 s");
         }
         if (ph >= m_tlViewStart && ph <= m_tlViewEnd) {
             float px = toPx(ph);
@@ -7476,30 +7750,7 @@ void App::RenderTimelineBottom() {
                 float   relX  = std::clamp(mp.x - (winPos.x + kLabelW), 0.f, cntW);
                 int64_t tMs   = m_tlViewStart + int64_t(relX / cntW * vDur);
                 int64_t newPh = std::clamp(tMs, m_tlViewStart, m_tlViewEnd);
-                m_tlPlayheadMs.store(newPh);
-                // Keep per-track next-block indices in sync for TestPaused resume
-                if (sm == GuiSeqMode::TestPaused) {
-                    int camIdx = 0;
-                    for (int ti = 0;
-                         ti < static_cast<int>(m_tracks.size()) && camIdx < kMaxCamTracks;
-                         ++ti) {
-                        if (!m_tracks[ti].IsCamera()) continue;
-                        int ni = 0;
-                        for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
-                            if (m_tracks[ti].blocks[ni].atMs >= newPh) break;
-                        m_seqNextBlock[camIdx++] = ni;
-                    }
-                    int audioIdx = 0;
-                    for (int ti = 0;
-                         ti < static_cast<int>(m_tracks.size()) && audioIdx < kMaxAudioTracks;
-                         ++ti) {
-                        if (!m_tracks[ti].IsAudio()) continue;
-                        int ni = 0;
-                        for (; ni < static_cast<int>(m_tracks[ti].blocks.size()); ++ni)
-                            if (m_tracks[ti].blocks[ni].atMs >= newPh) break;
-                        m_audioNextBlock[audioIdx++].store(ni, std::memory_order_relaxed);
-                    }
-                }
+                SetPlayheadMs(newPh);
             }
 
             // ── End drag on mouse release ────────────────────────────────────
@@ -7772,15 +8023,23 @@ App::App() {
         LogLine(std::format("Timezones: using fallback ({} entries)", m_tzList.size()));
     }
 
-    // Default eclipse: nearest future (UTC date comparison)
+    // Default eclipse: nearest future (UTC date comparison) total, annular or
+    // hybrid one — partials are skipped (nothing for the C2/C3 sequence to
+    // do). Falls back to the nearest future eclipse of any type, then the last.
     if (!m_eclipses.empty()) {
         SYSTEMTIME st{};
         GetSystemTime(&st);
         int today = st.wYear * 10000 + st.wMonth * 100 + st.wDay;
         m_eclipseIdx = static_cast<int>(m_eclipses.size()) - 1;
+        int anyFuture = -1;
         for (int i = 0; i < static_cast<int>(m_eclipses.size()); ++i) {
-            if (m_eclipses[i].DateInt() >= today) { m_eclipseIdx = i; break; }
+            if (m_eclipses[i].DateInt() < today) continue;
+            if (anyFuture < 0) anyFuture = i;
+            const char tc = m_eclipses[i].type.empty() ? '?' : m_eclipses[i].type[0];
+            if (tc == 'T' || tc == 'A' || tc == 'H') { m_eclipseIdx = i; anyFuture = -2; break; }
         }
+        if (anyFuture >= 0) m_eclipseIdx = anyFuture;   // no central one ahead
+        assert(m_eclipseIdx >= 0 && m_eclipseIdx < static_cast<int>(m_eclipses.size()));
         const auto& e = m_eclipses[m_eclipseIdx];
         LogLine(std::format("Default eclipse: {}-{:02d}-{:02d} {}",
                             e.year, e.month, e.day, e.type));
@@ -8269,6 +8528,7 @@ void App::RenderEclipseSection() {
                         SyncDecimalToDms();
                         SaveObserverSettings();
                         TriggerIqpFetch();
+                        SnapPlayheadToSelectedEclipse();
                     }
                     if (sel) ImGui::SetItemDefaultFocus();
                 }
@@ -10338,7 +10598,7 @@ void App::RenderMenuBar() {
                 nullptr, nullptr, SW_SHOWNORMAL);
         }
         ImGui::Separator();
-        ImGui::MenuItem("v2026-08-09", nullptr, false, false);
+        ImGui::MenuItem("v2026-10-15", nullptr, false, false);
         ImGui::EndMenu();
     }
 }
