@@ -10804,7 +10804,6 @@ void App::RenderAboutModal() {
     ImGui::PopFont();
     ImGui::PushFont(m_fontMono);
     ImGui::TextColored(kGray, "Solar Eclipse Photography Controller");
-    ImGui::TextColored(kGray, "TSE 2026-08-12  Burgos / Lerma, Spain  (totality 103.9 s)");
     ImGui::PopFont();
 
     ImGui::Separator();

@@ -86,7 +86,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     HWND hWnd = CreateWindowExW(
         0L,
         L"TotalControlGUI",
-        L"TotalControl — TSE 2026 Mission Control",
+        L"TotalControl",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
         100, 100,
         1920, 1080,
